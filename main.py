@@ -43,11 +43,14 @@ if __name__ == "__main__":
     print("  ✓ Job progress tracking")
     print("=" * 60)
 
+    # Import app after sys.path is set
+    # This ensures all modules can be found
+    from app.main import app
+
     # Start uvicorn server
-    # Note: reload=False is required on Windows to avoid module import issues
-    # Set reload=True only if you need auto-reload during development
+    # Pass app object directly instead of string to avoid import issues
     uvicorn.run(
-        "app.main:app",
+        app,  # Direct app object, not "app.main:app" string
         host=host,
         port=port,
         reload=False,  # Disabled to fix Windows module path issues
