@@ -6,7 +6,7 @@ Based on Azure OpenAI API specification.
 import os
 import time
 from typing import Optional
-from openai import AzureOpenAI
+from openai import AzureOpenAI, Timeout
 from dotenv import load_dotenv
 
 from .base import LLMClient, LLMResponse
@@ -45,13 +45,21 @@ class AzureGPT5MiniClient(LLMClient):
                 "and AZURE_OPENAI_GPT5_MINI_DEPLOYMENT_NAME (or AZURE_OPENAI_DEPLOYMENT_NAME) in .env file."
             )
 
-        # Initialize client with timeout
+        # Initialize client with detailed timeout configuration
         # Heavy processing can take up to 10 minutes, so set 15 minutes timeout
+        # Use Timeout object for granular control over different timeout types
+        timeout_config = Timeout(
+            total=900.0,   # 15 minutes total timeout
+            connect=60.0,  # 60 seconds to establish connection
+            read=900.0,    # 15 minutes to read response (important for long processing)
+            write=60.0     # 60 seconds to write request
+        )
+
         self.client = AzureOpenAI(
             azure_endpoint=self.endpoint,
             api_key=self.api_key,
             api_version=self.api_version,
-            timeout=900.0,  # 15 minutes timeout for heavy processing
+            timeout=timeout_config,
             max_retries=2
         )
 
