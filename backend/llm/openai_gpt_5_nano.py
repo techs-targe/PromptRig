@@ -39,11 +39,12 @@ class OpenAIGPT5NanoClient(LLMClient):
         # Initialize client
         self.client = OpenAI(api_key=self.api_key)
 
-    def call(self, prompt: str, **kwargs) -> LLMResponse:
+    def call(self, prompt: str, images: list = None, **kwargs) -> LLMResponse:
         """Execute OpenAI GPT-5-nano call.
 
         Args:
             prompt: The prompt text to send
+            images: Optional list of base64-encoded image strings for Vision API
             **kwargs: Optional parameters
                 - verbosity (str): Default "medium" - Controls output expansiveness ("low", "medium", "high")
                 - reasoning_effort (str): Default "minimal" - Controls reasoning tokens ("minimal", "medium")
@@ -55,6 +56,8 @@ class OpenAIGPT5NanoClient(LLMClient):
 
         Returns:
             LLMResponse with result or error
+
+        Specification: docs/image_parameter_spec.md
         """
         start_time = time.time()
 
@@ -63,13 +66,28 @@ class OpenAIGPT5NanoClient(LLMClient):
             verbosity = kwargs.get("verbosity", "medium")
             reasoning_effort = kwargs.get("reasoning_effort", "minimal")
 
+            # Build user content (text + optional images for Vision API)
+            if images:
+                # Multimodal content with images
+                user_content = [{"type": "text", "text": prompt}]
+                for img_base64 in images:
+                    user_content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{img_base64}"
+                        }
+                    })
+            else:
+                # Text-only content
+                user_content = prompt
+
             # Call OpenAI GPT-5 API
             # Note: Using standard chat.completions.create() for now
             # May need to adjust based on actual OpenAI GPT-5 API requirements
             response = self.client.chat.completions.create(
                 model=self.MODEL_NAME,
                 messages=[
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": user_content}
                 ]
                 # Note: May need to add verbosity and reasoning_effort parameters
                 # depending on OpenAI API support

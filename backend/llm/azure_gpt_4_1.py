@@ -49,11 +49,12 @@ class AzureGPT41Client(LLMClient):
             api_version=self.api_version
         )
 
-    def call(self, prompt: str, **kwargs) -> LLMResponse:
+    def call(self, prompt: str, images: list = None, **kwargs) -> LLMResponse:
         """Execute Azure OpenAI GPT-4.1 call.
 
         Args:
             prompt: The prompt text to send
+            images: Optional list of base64-encoded image strings for Vision API
             **kwargs: Optional parameters
                 - temperature (float): Default 0.2
                 - max_tokens (int): Default 4000
@@ -62,7 +63,7 @@ class AzureGPT41Client(LLMClient):
         Returns:
             LLMResponse with result or error
 
-        Specification: docs/req.txt section 6.1
+        Specification: docs/req.txt section 6.1, docs/image_parameter_spec.md
         """
         start_time = time.time()
 
@@ -72,11 +73,26 @@ class AzureGPT41Client(LLMClient):
             max_tokens = kwargs.get("max_tokens", 4000)
             top_p = kwargs.get("top_p", 1.0)
 
+            # Build user content (text + optional images for Vision API)
+            if images:
+                # Multimodal content with images
+                user_content = [{"type": "text", "text": prompt}]
+                for img_base64 in images:
+                    user_content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{img_base64}"
+                        }
+                    })
+            else:
+                # Text-only content
+                user_content = prompt
+
             # Call Azure OpenAI API
             response = self.client.chat.completions.create(
                 model=self.deployment_name,
                 messages=[
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": user_content}
                 ],
                 temperature=temperature,
                 max_tokens=max_tokens,

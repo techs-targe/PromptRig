@@ -53,7 +53,9 @@ def get_config(db: Session = Depends(get_db)):
             name=p.name,
             type=p.type,
             html_type=p.html_type,
-            rows=p.rows
+            rows=p.rows,
+            accept=p.accept,
+            placeholder=p.placeholder
         )
         for p in param_defs
     ]

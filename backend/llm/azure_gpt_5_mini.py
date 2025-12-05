@@ -64,11 +64,12 @@ class AzureGPT5MiniClient(LLMClient):
             max_retries=2
         )
 
-    def call(self, prompt: str, **kwargs) -> LLMResponse:
+    def call(self, prompt: str, images: list = None, **kwargs) -> LLMResponse:
         """Execute Azure OpenAI GPT-5-mini call with retry logic.
 
         Args:
             prompt: The prompt text to send
+            images: Optional list of base64-encoded image strings for Vision API
             **kwargs: Optional parameters
                 - max_tokens (int): Maximum completion tokens (default: 4096)
 
@@ -85,6 +86,8 @@ class AzureGPT5MiniClient(LLMClient):
 
         Returns:
             LLMResponse with result or error
+
+        Specification: docs/image_parameter_spec.md
         """
         max_retries = 4
         retry_delays = [15, 30, 60, 60]  # seconds for each retry attempt
@@ -97,10 +100,25 @@ class AzureGPT5MiniClient(LLMClient):
                 # Get parameters with defaults
                 max_tokens = kwargs.get("max_tokens", 4096)
 
+                # Build user content (text + optional images for Vision API)
+                if images:
+                    # Multimodal content with images
+                    user_content = [{"type": "text", "text": prompt}]
+                    for img_base64 in images:
+                        user_content.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{img_base64}"
+                            }
+                        })
+                else:
+                    # Text-only content
+                    user_content = prompt
+
                 # Prepare messages with system and user roles
                 messages = [
                     {"role": "system", "content": "You are a helpful AI assistant."},
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": user_content}
                 ]
 
                 # Call Azure OpenAI GPT-5 API using chat.completions.create()

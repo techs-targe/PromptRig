@@ -21,17 +21,18 @@ class LLMClient(ABC):
     """Abstract base class for LLM clients."""
 
     @abstractmethod
-    def call(self, prompt: str, **kwargs) -> LLMResponse:
-        """Execute LLM call with given prompt.
+    def call(self, prompt: str, images: list = None, **kwargs) -> LLMResponse:
+        """Execute LLM call with given prompt and optional images.
 
         Args:
             prompt: The prompt text to send to LLM
+            images: Optional list of base64-encoded image strings for Vision API
             **kwargs: Additional parameters (temperature, max_tokens, etc.)
 
         Returns:
             LLMResponse object with result or error
 
-        Specification: docs/req.txt section 6.1
+        Specification: docs/req.txt section 6.1, docs/image_parameter_spec.md
         """
         pass
 

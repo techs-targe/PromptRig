@@ -107,12 +107,22 @@ The system uses `{{}}` syntax for dynamic parameters in prompt templates:
 {{PARAM_NAME:NUM}}          # Number input
 {{PARAM_NAME:DATE}}         # Date picker
 {{PARAM_NAME:DATETIME}}     # DateTime picker
+{{PARAM_NAME:FILE}}         # Image file upload (supports Vision API)
+{{PARAM_NAME:FILEPATH}}     # Server-accessible file path (for batch processing)
 ```
 
 **Important behaviors:**
 - Duplicate parameter names use the same value across all occurrences
 - Input forms are auto-generated from template parsing
 - Type specifications are optional (defaults to TEXT5)
+
+**Image Parameters** (FILE and FILEPATH):
+- **Detailed specification**: See `docs/image_parameter_spec.md` for complete technical details
+- FILE type: Browser-based file upload, converts to Base64, works with Vision-capable LLMs
+- FILEPATH type: Server file path for batch processing, requires server-accessible storage
+- Both types support JPEG, PNG, GIF, WebP formats
+- Automatic image resizing if dimensions exceed 2048px
+- Security: FILEPATH has directory access restrictions (see spec doc)
 
 ### Database Schema
 

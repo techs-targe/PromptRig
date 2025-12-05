@@ -23,9 +23,11 @@ from dataclasses import dataclass
 class ParameterDefinition:
     """Definition of a single parameter extracted from template."""
     name: str
-    type: str  # TEXTn, NUM, DATE, DATETIME
-    html_type: str  # textarea, number, date, datetime-local
+    type: str  # TEXTn, NUM, DATE, DATETIME, FILE, FILEPATH
+    html_type: str  # textarea, number, date, datetime-local, file, text
     rows: int = 5  # Only for textarea
+    accept: str = None  # Only for file input (e.g., "image/*")
+    placeholder: str = None  # For text inputs
 
 
 class PromptTemplateParser:
@@ -39,6 +41,8 @@ class PromptTemplateParser:
     TYPE_NUM = "NUM"
     TYPE_DATE = "DATE"
     TYPE_DATETIME = "DATETIME"
+    TYPE_FILE = "FILE"  # Image file upload (Vision API)
+    TYPE_FILEPATH = "FILEPATH"  # Server-accessible file path
 
     # Default type
     DEFAULT_TYPE = "TEXT5"
@@ -123,6 +127,26 @@ class PromptTemplateParser:
                 type=type_spec,
                 html_type="datetime-local",
                 rows=0
+            )
+
+        # Handle FILE (image upload for Vision API)
+        elif type_spec == self.TYPE_FILE:
+            return ParameterDefinition(
+                name=name,
+                type=type_spec,
+                html_type="file",
+                rows=0,
+                accept="image/*"
+            )
+
+        # Handle FILEPATH (server-accessible file path)
+        elif type_spec == self.TYPE_FILEPATH:
+            return ParameterDefinition(
+                name=name,
+                type=type_spec,
+                html_type="text",
+                rows=0,
+                placeholder="/path/to/image.jpg"
             )
 
         # Unknown type, default to TEXT5

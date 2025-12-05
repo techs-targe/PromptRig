@@ -10,9 +10,11 @@ from pydantic import BaseModel, Field
 class ParameterDefinitionResponse(BaseModel):
     """Parameter definition extracted from prompt template."""
     name: str
-    type: str  # TEXTn, NUM, DATE, DATETIME
-    html_type: str  # textarea, number, date, datetime-local
+    type: str  # TEXTn, NUM, DATE, DATETIME, FILE, FILEPATH
+    html_type: str  # textarea, number, date, datetime-local, file, text
     rows: int = 0
+    accept: Optional[str] = None  # For file input (e.g., "image/*")
+    placeholder: Optional[str] = None  # For text inputs
 
 
 class JobItemResponse(BaseModel):

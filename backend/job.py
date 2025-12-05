@@ -5,10 +5,14 @@ Based on specification in docs/req.txt section 4.2.3 (実行処理) and 3.2 (通
 
 import json
 import logging
+import os
+import base64
 from datetime import datetime
 from typing import Dict, List, Optional
 from sqlalchemy.orm import Session
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from PIL import Image
+import io
 
 from .database.models import Job, JobItem, ProjectRevision, Dataset, SystemSetting
 from .prompt import PromptTemplateParser
@@ -198,6 +202,198 @@ class JobManager:
                 return 1
         return 1
 
+    def _process_image_parameters(
+        self,
+        input_params: Dict[str, str],
+        prompt_template: str
+    ) -> List[str]:
+        """Process FILE and FILEPATH parameters into Base64 image data.
+
+        Args:
+            input_params: Dictionary of parameter name -> value
+            prompt_template: Prompt template string with {{}} syntax
+
+        Returns:
+            List of Base64-encoded image strings (without data URI prefix)
+            Empty list if no image parameters found
+
+        Specification: docs/image_parameter_spec.md
+
+        Security considerations:
+        - FILEPATH type validates paths against allowed directories
+        - Images are automatically resized if > 2048px
+        - Only JPEG, PNG, GIF, WebP formats supported
+        """
+        # Parse template to identify FILE and FILEPATH parameters
+        param_defs = self.parser.parse_template(prompt_template)
+
+        images = []
+        allowed_dirs = self._get_allowed_image_directories()
+
+        for param_def in param_defs:
+            param_name = param_def.name
+            param_type = param_def.type
+
+            # Skip non-image parameters
+            if param_type not in ["FILE", "FILEPATH"]:
+                continue
+
+            # Get parameter value
+            param_value = input_params.get(param_name)
+            if not param_value:
+                continue
+
+            try:
+                if param_type == "FILE":
+                    # FILE type: Extract Base64 from data URI
+                    # Expected format: "data:image/jpeg;base64,/9j/4AAQ..."
+                    base64_data = self._extract_base64_from_file_param(param_value)
+                    images.append(base64_data)
+
+                elif param_type == "FILEPATH":
+                    # FILEPATH type: Load file and convert to Base64
+                    base64_data = self._load_image_from_filepath(param_value, allowed_dirs)
+                    images.append(base64_data)
+
+            except Exception as e:
+                logger.error(f"Error processing image parameter '{param_name}': {e}")
+                # Continue processing other images, but log the error
+                # The LLM call may fail if image is critical, but that's expected
+
+        return images
+
+    def _get_allowed_image_directories(self) -> List[str]:
+        """Get list of allowed directories for FILEPATH type.
+
+        Returns:
+            List of absolute paths to allowed directories
+        """
+        # Get from environment variable or use defaults
+        env_dirs = os.getenv("ALLOWED_IMAGE_DIRS", "")
+        if env_dirs:
+            dirs = [d.strip() for d in env_dirs.split(",") if d.strip()]
+        else:
+            # Default allowed directories
+            dirs = [
+                "/var/data/images",
+                "./uploads",
+                os.path.expanduser("~/images")
+            ]
+
+        # Resolve to absolute paths
+        return [os.path.abspath(os.path.expanduser(d)) for d in dirs]
+
+    def _extract_base64_from_file_param(self, param_value: str) -> str:
+        """Extract Base64 data from FILE parameter value.
+
+        Args:
+            param_value: Data URI string like "data:image/jpeg;base64,/9j/..."
+
+        Returns:
+            Base64-encoded image string (without data URI prefix)
+
+        Raises:
+            ValueError: If format is invalid
+        """
+        # Check if already just Base64 (no data URI prefix)
+        if not param_value.startswith("data:"):
+            return param_value
+
+        # Extract Base64 from data URI
+        if ";base64," in param_value:
+            _, base64_data = param_value.split(";base64,", 1)
+            return base64_data
+        else:
+            raise ValueError("Invalid FILE parameter format: missing ';base64,' separator")
+
+    def _load_image_from_filepath(self, file_path: str, allowed_dirs: List[str]) -> str:
+        """Load image from file path and convert to Base64.
+
+        Args:
+            file_path: Path to image file on server
+            allowed_dirs: List of allowed directory paths
+
+        Returns:
+            Base64-encoded image string
+
+        Raises:
+            ValueError: If path is invalid or not allowed
+            FileNotFoundError: If file doesn't exist
+            IOError: If file cannot be read
+
+        Specification: docs/image_parameter_spec.md (Security considerations)
+        """
+        # Validate and sanitize file path
+        real_path = os.path.realpath(os.path.expanduser(file_path))
+
+        # Check if path is in allowed directories
+        allowed = any(
+            real_path.startswith(allowed_dir)
+            for allowed_dir in allowed_dirs
+        )
+
+        if not allowed:
+            raise ValueError(
+                f"Access denied: '{file_path}' is not in allowed directories. "
+                f"Allowed: {', '.join(allowed_dirs)}"
+            )
+
+        # Check if file exists
+        if not os.path.exists(real_path):
+            raise FileNotFoundError(f"Image file not found: {file_path}")
+
+        # Check if it's a file (not directory)
+        if not os.path.isfile(real_path):
+            raise ValueError(f"Path is not a file: {file_path}")
+
+        # Load and validate image
+        try:
+            with Image.open(real_path) as img:
+                # Validate image format
+                if img.format not in ["JPEG", "PNG", "GIF", "WEBP"]:
+                    raise ValueError(
+                        f"Unsupported image format: {img.format}. "
+                        "Supported: JPEG, PNG, GIF, WEBP"
+                    )
+
+                # Resize if needed (max dimension 2048px)
+                img = self._resize_image_if_needed(img)
+
+                # Convert to Base64
+                buffer = io.BytesIO()
+                # Save in original format, or JPEG if format not suitable
+                save_format = img.format if img.format in ["JPEG", "PNG", "GIF", "WEBP"] else "JPEG"
+                img.save(buffer, format=save_format)
+                image_bytes = buffer.getvalue()
+
+                # Encode to Base64
+                base64_data = base64.b64encode(image_bytes).decode("utf-8")
+                return base64_data
+
+        except Exception as e:
+            raise IOError(f"Failed to load image from '{file_path}': {e}")
+
+    def _resize_image_if_needed(self, img: Image.Image) -> Image.Image:
+        """Resize image if dimensions exceed maximum.
+
+        Args:
+            img: PIL Image object
+
+        Returns:
+            Resized image (or original if within limits)
+
+        Specification: docs/image_parameter_spec.md (Performance optimization)
+        """
+        max_dim = 2048
+
+        if max(img.size) > max_dim:
+            ratio = max_dim / max(img.size)
+            new_size = tuple(int(dim * ratio) for dim in img.size)
+            logger.info(f"Resizing image from {img.size} to {new_size}")
+            return img.resize(new_size, Image.Resampling.LANCZOS)
+
+        return img
+
     def _execute_items_serial(
         self,
         job_items: List[JobItem],
@@ -230,7 +426,25 @@ class JobManager:
 
             # Execute LLM call
             try:
-                response = llm_client.call(item.raw_prompt, temperature=temperature)
+                # Process image parameters (FILE and FILEPATH types)
+                images = []
+                if revision and revision.prompt_template:
+                    try:
+                        input_params = json.loads(item.input_params)
+                        images = self._process_image_parameters(
+                            input_params,
+                            revision.prompt_template
+                        )
+                    except Exception as e:
+                        logger.error(f"Error processing images for item {item.id}: {e}")
+                        # Continue without images if processing fails
+
+                # Call LLM with prompt and optional images
+                response = llm_client.call(
+                    item.raw_prompt,
+                    images=images if images else None,
+                    temperature=temperature
+                )
 
                 if response.success:
                     item.status = "done"
@@ -283,12 +497,20 @@ class JobManager:
 
         error_count = 0
 
-        def execute_single_item(item_id: int, raw_prompt: str, parser_config: str) -> int:
+        def execute_single_item(
+            item_id: int,
+            raw_prompt: str,
+            input_params_json: str,
+            prompt_template: str,
+            parser_config: str
+        ) -> int:
             """Execute a single job item with its own database session.
 
             Args:
                 item_id: JobItem ID to process
                 raw_prompt: The prompt text to send to LLM
+                input_params_json: JSON string of input parameters
+                prompt_template: Prompt template for image processing
                 parser_config: Parser configuration JSON
 
             Returns:
@@ -312,7 +534,50 @@ class JobManager:
 
                 # Execute LLM call
                 try:
-                    response = llm_client.call(raw_prompt, temperature=temperature)
+                    # Process image parameters (FILE and FILEPATH types)
+                    images = []
+                    if prompt_template:
+                        try:
+                            input_params = json.loads(input_params_json)
+                            # Create temporary parser for this thread
+                            temp_parser = PromptTemplateParser()
+                            param_defs = temp_parser.parse_template(prompt_template)
+
+                            # Process images using helper methods
+                            # Note: We need to reimplement image processing here
+                            # since we can't access self methods in parallel threads
+                            allowed_dirs = self._get_allowed_image_directories()
+
+                            for param_def in param_defs:
+                                param_name = param_def.name
+                                param_type = param_def.type
+
+                                if param_type not in ["FILE", "FILEPATH"]:
+                                    continue
+
+                                param_value = input_params.get(param_name)
+                                if not param_value:
+                                    continue
+
+                                try:
+                                    if param_type == "FILE":
+                                        base64_data = self._extract_base64_from_file_param(param_value)
+                                        images.append(base64_data)
+                                    elif param_type == "FILEPATH":
+                                        base64_data = self._load_image_from_filepath(param_value, allowed_dirs)
+                                        images.append(base64_data)
+                                except Exception as e:
+                                    logger.error(f"Error processing image parameter '{param_name}' in item {item_id}: {e}")
+
+                        except Exception as e:
+                            logger.error(f"Error processing images for item {item_id}: {e}")
+
+                    # Call LLM with prompt and optional images
+                    response = llm_client.call(
+                        raw_prompt,
+                        images=images if images else None,
+                        temperature=temperature
+                    )
 
                     if response.success:
                         item.status = "done"
@@ -348,12 +613,20 @@ class JobManager:
 
         # Prepare data for parallel execution
         parser_config = revision.parser_config if revision else None
+        prompt_template = revision.prompt_template if revision else None
 
         # Execute items in parallel
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all items with their data (not the ORM objects)
             future_to_item = {
-                executor.submit(execute_single_item, item.id, item.raw_prompt, parser_config): item
+                executor.submit(
+                    execute_single_item,
+                    item.id,
+                    item.raw_prompt,
+                    item.input_params,
+                    prompt_template,
+                    parser_config
+                ): item
                 for item in job_items
             }
 
