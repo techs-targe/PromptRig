@@ -7,8 +7,9 @@ import json
 from datetime import datetime
 from typing import Dict, List, Optional
 from sqlalchemy.orm import Session
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .database.models import Job, JobItem, ProjectRevision, Dataset
+from .database.models import Job, JobItem, ProjectRevision, Dataset, SystemSetting
 from .prompt import PromptTemplateParser
 from .llm import get_llm_client, LLMClient
 from .parser import ResponseParser
@@ -105,6 +106,7 @@ class JobManager:
         Specification: docs/req.txt section 3.2 (通信フロー)
         Phase 1: 同期直列実行
         Phase 2: CSV merging for batch jobs, temperature control
+        Phase 3: Parallel execution based on system settings
         """
         # Get job
         job = self.db.query(Job).filter(Job.id == job_id).first()
@@ -128,6 +130,9 @@ class JobManager:
             self.db.commit()
             raise e
 
+        # Get parallelism setting (default: 1)
+        parallelism = self._get_parallelism_setting()
+
         # Execute all pending job items
         job_items = self.db.query(JobItem).filter(
             JobItem.job_id == job_id,
@@ -136,7 +141,80 @@ class JobManager:
 
         error_count = 0
 
+        # Get revision for parser (fetch once, use for all items)
+        revision = self.db.query(ProjectRevision).filter(
+            ProjectRevision.id == job.project_revision_id
+        ).first()
+
+        if parallelism == 1:
+            # Serial execution (original behavior)
+            error_count = self._execute_items_serial(job_items, llm_client, revision, temperature)
+        else:
+            # Parallel execution
+            error_count = self._execute_items_parallel(job_items, llm_client, revision, temperature, parallelism)
+
+        # Merge CSV outputs for batch jobs and repeated single executions (Phase 2)
+        if job.job_type == "batch" or (job.job_type == "single" and len(job_items) > 1):
+            merged_csv = self._merge_csv_outputs(job_items, include_csv_header)
+            job.merged_csv_output = merged_csv
+
+        # Calculate actual wall-clock time for job execution
+        end_time = datetime.utcnow()
+        actual_turnaround_ms = int((end_time - start_time).total_seconds() * 1000)
+
+        # Update job status
+        job.finished_at = end_time.isoformat()
+        job.turnaround_ms = actual_turnaround_ms  # Real elapsed time, not sum of individual times
+        job.status = "error" if error_count > 0 else "done"
+        self.db.commit()
+        self.db.refresh(job)
+
+        return job
+
+    def _get_parallelism_setting(self) -> int:
+        """Get job parallelism setting from system settings.
+
+        Returns:
+            Parallelism value (1-99), defaults to 1
+        """
+        setting = self.db.query(SystemSetting).filter(
+            SystemSetting.key == "job_parallelism"
+        ).first()
+
+        if setting and setting.value:
+            try:
+                parallelism = int(setting.value)
+                return max(1, min(parallelism, 99))  # Clamp to 1-99
+            except ValueError:
+                return 1
+        return 1
+
+    def _execute_items_serial(
+        self,
+        job_items: List[JobItem],
+        llm_client: LLMClient,
+        revision: ProjectRevision,
+        temperature: float
+    ) -> int:
+        """Execute job items serially (one at a time).
+
+        Args:
+            job_items: List of job items to execute
+            llm_client: LLM client instance
+            revision: Project revision for parser
+            temperature: LLM temperature
+
+        Returns:
+            Number of errors encountered
+        """
+        error_count = 0
+
         for item in job_items:
+            # Check if item was cancelled
+            self.db.refresh(item)
+            if item.status == "cancelled":
+                continue
+
             # Update item status
             item.status = "running"
             self.db.commit()
@@ -151,9 +229,6 @@ class JobManager:
                     item.turnaround_ms = response.turnaround_ms
 
                     # Apply parser (Phase 2)
-                    revision = self.db.query(ProjectRevision).filter(
-                        ProjectRevision.id == job.project_revision_id
-                    ).first()
                     if revision and revision.parser_config:
                         parser = ResponseParser(revision.parser_config)
                         parsed_result = parser.parse(response.response_text)
@@ -173,23 +248,86 @@ class JobManager:
 
             self.db.commit()
 
-        # Merge CSV outputs for batch jobs and repeated single executions (Phase 2)
-        if job.job_type == "batch" or (job.job_type == "single" and len(job_items) > 1):
-            merged_csv = self._merge_csv_outputs(job_items, include_csv_header)
-            job.merged_csv_output = merged_csv
+        return error_count
 
-        # Calculate actual wall-clock time for job execution
-        end_time = datetime.utcnow()
-        actual_turnaround_ms = int((end_time - start_time).total_seconds() * 1000)
+    def _execute_items_parallel(
+        self,
+        job_items: List[JobItem],
+        llm_client: LLMClient,
+        revision: ProjectRevision,
+        temperature: float,
+        max_workers: int
+    ) -> int:
+        """Execute job items in parallel using ThreadPoolExecutor.
 
-        # Update job status
-        job.finished_at = end_time.isoformat()
-        job.turnaround_ms = actual_turnaround_ms  # Real elapsed time, not sum of individual times
-        job.status = "error" if error_count > 0 else "done"
-        self.db.commit()
-        self.db.refresh(job)
+        Args:
+            job_items: List of job items to execute
+            llm_client: LLM client instance
+            revision: Project revision for parser
+            temperature: LLM temperature
+            max_workers: Maximum number of parallel workers
 
-        return job
+        Returns:
+            Number of errors encountered
+        """
+        error_count = 0
+
+        def execute_single_item(item: JobItem) -> int:
+            """Execute a single job item. Returns 1 if error, 0 if success."""
+            # Check if item was cancelled
+            self.db.refresh(item)
+            if item.status == "cancelled":
+                return 0
+
+            # Update item status
+            item.status = "running"
+            self.db.commit()
+
+            # Execute LLM call
+            try:
+                response = llm_client.call(item.raw_prompt, temperature=temperature)
+
+                if response.success:
+                    item.status = "done"
+                    item.raw_response = response.response_text
+                    item.turnaround_ms = response.turnaround_ms
+
+                    # Apply parser
+                    if revision and revision.parser_config:
+                        parser = ResponseParser(revision.parser_config)
+                        parsed_result = parser.parse(response.response_text)
+                        item.parsed_response = json.dumps(parsed_result, ensure_ascii=False)
+                    else:
+                        item.parsed_response = json.dumps({"raw": response.response_text, "parsed": False})
+
+                    self.db.commit()
+                    return 0
+                else:
+                    item.status = "error"
+                    item.error_message = response.error_message
+                    item.turnaround_ms = response.turnaround_ms
+                    self.db.commit()
+                    return 1
+
+            except Exception as e:
+                item.status = "error"
+                item.error_message = str(e)
+                self.db.commit()
+                return 1
+
+        # Execute items in parallel
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all items
+            future_to_item = {
+                executor.submit(execute_single_item, item): item
+                for item in job_items
+            }
+
+            # Wait for completion and collect errors
+            for future in as_completed(future_to_item):
+                error_count += future.result()
+
+        return error_count
 
     def _merge_csv_outputs(self, job_items: List[JobItem], include_csv_header: bool) -> str:
         """Merge CSV outputs from multiple job items.
@@ -381,6 +519,7 @@ class JobManager:
         errors = sum(1 for item in all_items if item.status == "error")
         pending = sum(1 for item in all_items if item.status == "pending")
         running = sum(1 for item in all_items if item.status == "running")
+        cancelled = sum(1 for item in all_items if item.status == "cancelled")
 
         return {
             "job_id": job.id,
@@ -391,8 +530,63 @@ class JobManager:
             "errors": errors,
             "pending": pending,
             "running": running,
-            "progress_percent": int((completed + errors) / total * 100) if total > 0 else 0,
+            "cancelled": cancelled,
+            "progress_percent": int((completed + errors + cancelled) / total * 100) if total > 0 else 0,
             "started_at": job.started_at,
             "finished_at": job.finished_at,
             "turnaround_ms": job.turnaround_ms
+        }
+
+    def cancel_pending_items(self, job_id: int) -> Dict[str, any]:
+        """Cancel all pending job items in a job.
+
+        Args:
+            job_id: ID of job to cancel
+
+        Returns:
+            Dictionary with cancellation results
+
+        Note:
+            This only cancels pending items. Running items cannot be stopped
+            as they are already executing LLM API calls.
+        """
+        job = self.db.query(Job).filter(Job.id == job_id).first()
+        if not job:
+            raise ValueError(f"Job {job_id} not found")
+
+        # Get all pending items
+        pending_items = self.db.query(JobItem).filter(
+            JobItem.job_id == job_id,
+            JobItem.status == "pending"
+        ).all()
+
+        # Mark as cancelled
+        cancelled_count = 0
+        for item in pending_items:
+            item.status = "cancelled"
+            item.error_message = "Cancelled by user"
+            cancelled_count += 1
+
+        self.db.commit()
+
+        # Update job status if needed
+        remaining_pending = self.db.query(JobItem).filter(
+            JobItem.job_id == job_id,
+            JobItem.status == "pending"
+        ).count()
+
+        remaining_running = self.db.query(JobItem).filter(
+            JobItem.job_id == job_id,
+            JobItem.status == "running"
+        ).count()
+
+        # If no more pending or running items, mark job as done
+        if remaining_pending == 0 and remaining_running == 0 and job.status == "running":
+            job.finished_at = datetime.utcnow().isoformat()
+            self.db.commit()
+
+        return {
+            "job_id": job_id,
+            "cancelled_count": cancelled_count,
+            "message": f"Cancelled {cancelled_count} pending item(s)"
         }

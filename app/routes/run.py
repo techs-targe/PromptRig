@@ -216,3 +216,31 @@ def get_job_status(job_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get job status: {str(e)}")
+
+
+@router.post("/api/jobs/{job_id}/cancel", response_model=Dict[str, Any])
+def cancel_job(job_id: int, db: Session = Depends(get_db)):
+    """Cancel all pending items in a job.
+
+    Args:
+        job_id: ID of job to cancel
+
+    Returns:
+        Cancellation results
+
+    Note:
+        This only cancels pending items. Running items cannot be stopped
+        as they are already executing LLM API calls.
+
+    Phase 3 feature for job control
+    """
+    try:
+        job_manager = JobManager(db)
+        result = job_manager.cancel_pending_items(job_id)
+
+        return result
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to cancel job: {str(e)}")

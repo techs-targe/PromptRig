@@ -92,6 +92,67 @@ def set_default_project(project_id: int, db: Session = Depends(get_db)):
     }
 
 
+@router.get("/api/settings/job-parallelism")
+def get_job_parallelism(db: Session = Depends(get_db)):
+    """Get job parallelism setting.
+
+    Returns:
+        Dictionary with parallelism value (1-99, default 1)
+
+    Phase 3 feature for job control
+    """
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "job_parallelism").first()
+
+    if setting and setting.value:
+        try:
+            parallelism = int(setting.value)
+            # Clamp to valid range
+            parallelism = max(1, min(parallelism, 99))
+        except ValueError:
+            parallelism = 1
+    else:
+        parallelism = 1
+
+    return {"parallelism": parallelism}
+
+
+@router.put("/api/settings/job-parallelism")
+def set_job_parallelism(parallelism: int, db: Session = Depends(get_db)):
+    """Set job parallelism setting.
+
+    Args:
+        parallelism: Number of parallel workers (1-99)
+
+    Returns:
+        Updated parallelism value
+
+    Phase 3 feature for job control
+    """
+    # Validate range
+    if parallelism < 1 or parallelism > 99:
+        raise HTTPException(
+            status_code=400,
+            detail="Parallelism must be between 1 and 99"
+        )
+
+    # Update or create setting
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "job_parallelism").first()
+
+    if setting:
+        setting.value = str(parallelism)
+    else:
+        setting = SystemSetting(key="job_parallelism", value=str(parallelism))
+        db.add(setting)
+
+    db.commit()
+    db.refresh(setting)
+
+    return {
+        "parallelism": parallelism,
+        "message": f"Job parallelism set to {parallelism}"
+    }
+
+
 @router.get("/api/settings/{key}", response_model=SettingResponse)
 def get_setting(key: str, db: Session = Depends(get_db)):
     """Get specific setting value.

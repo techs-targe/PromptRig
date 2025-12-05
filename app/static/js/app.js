@@ -85,6 +85,7 @@ function loadTabData(tabName) {
         case 'settings':
             loadSettings();
             loadAvailableModels();
+            loadJobParallelism();
             break;
         case 'datasets':
             loadDatasets();
@@ -132,6 +133,13 @@ function setupEventListeners() {
     document.getElementById('param-model-select')?.addEventListener('change', loadModelParameters);
     document.getElementById('btn-save-model-params')?.addEventListener('click', saveModelParameters);
     document.getElementById('btn-reset-model-params')?.addEventListener('click', resetModelParameters);
+
+    // Job execution settings
+    document.getElementById('btn-save-parallelism')?.addEventListener('click', saveJobParallelism);
+
+    // Job cancellation buttons
+    document.getElementById('btn-stop-single')?.addEventListener('click', cancelSingleJob);
+    document.getElementById('btn-stop-batch')?.addEventListener('click', cancelBatchJob);
 
     // Modal overlay click - DO NOT close on outside click (user requested)
     // Removed event listener to prevent accidental modal close
@@ -513,6 +521,9 @@ async function executePrompt(repeat) {
     setExecutionState(true);
     showStatus('実行中... / Executing...', 'info');
 
+    // Show stop button
+    document.getElementById('btn-stop-single').style.display = 'inline-block';
+
     try {
         // Get model parameters from system settings
         const paramsResponse = await fetch(`/api/settings/models/${modelName}/parameters`);
@@ -539,6 +550,9 @@ async function executePrompt(repeat) {
 
         const result = await response.json();
 
+        // Store job ID for cancellation
+        currentSingleJobId = result.job_id;
+
         if (result.success) {
             showStatus(`実行成功！ ${result.message}`, 'success');
             displayJobResults(result.job);
@@ -549,6 +563,9 @@ async function executePrompt(repeat) {
         showStatus(`エラー / Error: ${error.message}`, 'error');
     } finally {
         setExecutionState(false);
+        // Hide stop button
+        document.getElementById('btn-stop-single').style.display = 'none';
+        currentSingleJobId = null;
     }
 }
 
@@ -1171,6 +1188,9 @@ async function executeBatch() {
     executeBtn.textContent = '実行中... / Executing...';
     executeBtn.style.background = '#95a5a6';
 
+    // Show stop button
+    document.getElementById('btn-stop-batch').style.display = 'inline-block';
+
     try {
         // Get model parameters from system settings
         const paramsResponse = await fetch(`/api/settings/models/${modelName}/parameters`);
@@ -1193,6 +1213,9 @@ async function executeBatch() {
 
         const result = await response.json();
 
+        // Store job ID for cancellation
+        currentBatchJobId = result.job_id;
+
         // Display results immediately
         displayBatchResult(result.job);
 
@@ -1205,6 +1228,9 @@ async function executeBatch() {
         executeBtn.disabled = false;
         executeBtn.textContent = originalText;
         executeBtn.style.background = '';
+        // Hide stop button
+        document.getElementById('btn-stop-batch').style.display = 'none';
+        currentBatchJobId = null;
     }
 }
 
@@ -1922,4 +1948,99 @@ async function resetModelParameters() {
     } catch (error) {
         alert(`エラー / Error: ${error.message}`);
     }
+}
+
+// ========================================
+// Job Parallelism Settings
+// ========================================
+
+let currentSingleJobId = null;
+let currentBatchJobId = null;
+
+async function loadJobParallelism() {
+    try {
+        const response = await fetch('/api/settings/job-parallelism');
+        if (!response.ok) throw new Error('Failed to load parallelism setting');
+
+        const data = await response.json();
+        document.getElementById('job-parallelism').value = data.parallelism;
+
+    } catch (error) {
+        console.error('Failed to load job parallelism:', error);
+    }
+}
+
+async function saveJobParallelism() {
+    const parallelism = parseInt(document.getElementById('job-parallelism').value);
+    const statusEl = document.getElementById('parallelism-status');
+
+    if (parallelism < 1 || parallelism > 99) {
+        statusEl.textContent = 'エラー: 1-99の範囲で設定してください / Error: Must be 1-99';
+        statusEl.style.color = '#e74c3c';
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/settings/job-parallelism?parallelism=${parallelism}`, {
+            method: 'PUT'
+        });
+
+        if (!response.ok) throw new Error('Failed to save parallelism setting');
+
+        const data = await response.json();
+        statusEl.textContent = '保存しました / Saved';
+        statusEl.style.color = '#27ae60';
+
+        setTimeout(() => {
+            statusEl.textContent = '';
+        }, 2000);
+
+    } catch (error) {
+        statusEl.textContent = `エラー / Error: ${error.message}`;
+        statusEl.style.color = '#e74c3c';
+    }
+}
+
+// ========================================
+// Job Cancellation
+// ========================================
+
+async function cancelJob(jobId, buttonId, statusId) {
+    if (!jobId) {
+        alert('ジョブが実行されていません / No job is running');
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/jobs/${jobId}/cancel`, {
+            method: 'POST'
+        });
+
+        if (!response.ok) throw new Error('Failed to cancel job');
+
+        const data = await response.json();
+
+        // Hide stop button
+        document.getElementById(buttonId).style.display = 'none';
+
+        // Show status message
+        const statusEl = document.getElementById(statusId);
+        if (statusEl) {
+            statusEl.textContent = `停止しました: ${data.cancelled_count}件のアイテムをキャンセル / Stopped: ${data.cancelled_count} items cancelled`;
+            statusEl.className = 'status-message status-info';
+        }
+
+    } catch (error) {
+        alert(`停止エラー / Cancellation Error: ${error.message}`);
+    }
+}
+
+async function cancelSingleJob() {
+    await cancelJob(currentSingleJobId, 'btn-stop-single', 'execution-status');
+    currentSingleJobId = null;
+}
+
+async function cancelBatchJob() {
+    await cancelJob(currentBatchJobId, 'btn-stop-batch', 'batch-results-area');
+    currentBatchJobId = null;
 }

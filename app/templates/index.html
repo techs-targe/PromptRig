@@ -75,6 +75,9 @@
                                     CSVヘッダを１行目のみに含める / Include CSV header in first row only
                                 </label>
                             </div>
+                            <button type="button" id="btn-stop-single" class="btn btn-danger" style="display: none; margin-left: 1rem;">
+                                ⏹ 停止 / Stop
+                            </button>
                         </div>
 
                         <div id="execution-status" class="status-message"></div>
@@ -118,6 +121,9 @@
                     CSVヘッダを１行目のみに含める / Include CSV header in first row only
                 </label>
                 <button id="btn-batch-execute" class="btn btn-primary">バッチ実行開始 / Start Batch</button>
+                <button id="btn-stop-batch" class="btn btn-danger" style="display: none; margin-left: 1rem;">
+                    ⏹ 停止 / Stop
+                </button>
             </div>
         </div>
 
@@ -277,6 +283,22 @@
             <div class="settings-group">
                 <label>データベースパス / Database Path:</label>
                 <p id="db-path">database/app.db</p>
+            </div>
+        </div>
+
+        <div class="section">
+            <h3>ジョブ実行設定 / Job Execution Settings</h3>
+            <div class="settings-group">
+                <label>並列実行数 / Job Parallelism (1-99):</label>
+                <p class="info" style="margin-bottom: 1rem;">
+                    同時に実行するジョブアイテムの数を設定します。デフォルトは1（直列実行）です。<br>
+                    Set the number of job items to execute in parallel. Default is 1 (serial execution).
+                </p>
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <input type="number" id="job-parallelism" min="1" max="99" value="1" style="width: 100px;">
+                    <button id="btn-save-parallelism" class="btn btn-primary">保存 / Save</button>
+                    <span id="parallelism-status" style="color: #27ae60;"></span>
+                </div>
             </div>
         </div>
     </div>
