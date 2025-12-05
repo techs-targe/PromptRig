@@ -111,18 +111,28 @@ class AzureGPT5NanoClient(LLMClient):
 
             # Validate response is not None or empty
             if output_text is None:
+                # Log for debugging
+                print(f"⚠️ GPT-5-nano: API returned None response (turnaround: {turnaround_ms}ms)")
+                print(f"   Completion ID: {completion.id if hasattr(completion, 'id') else 'N/A'}")
+                print(f"   Model: {completion.model if hasattr(completion, 'model') else 'N/A'}")
+
                 return LLMResponse(
                     success=False,
                     response_text=None,
-                    error_message="API returned None response. This may occur with very long prompts or API issues.",
+                    error_message="API returned None response. Check Azure OpenAI quota and rate limits.",
                     turnaround_ms=turnaround_ms
                 )
 
             if not output_text.strip():
+                # Log for debugging
+                print(f"⚠️ GPT-5-nano: API returned empty response (turnaround: {turnaround_ms}ms)")
+                print(f"   Completion ID: {completion.id if hasattr(completion, 'id') else 'N/A'}")
+                print(f"   Finish reason: {completion.choices[0].finish_reason if completion.choices else 'N/A'}")
+
                 return LLMResponse(
                     success=False,
                     response_text=None,
-                    error_message="API returned empty response. This may occur with very long prompts or API issues.",
+                    error_message=f"API returned empty response. Finish reason: {completion.choices[0].finish_reason if completion.choices else 'unknown'}. Check rate limits or reduce parallelism.",
                     turnaround_ms=turnaround_ms
                 )
 
@@ -136,10 +146,23 @@ class AzureGPT5NanoClient(LLMClient):
         except Exception as e:
             turnaround_ms = int((time.time() - start_time) * 1000)
 
+            # Detailed error message for debugging
+            error_type = type(e).__name__
+            error_msg = str(e)
+
+            # Check for rate limit errors
+            if "rate" in error_msg.lower() or "quota" in error_msg.lower() or "429" in error_msg:
+                error_msg = f"[RATE_LIMIT] {error_msg}"
+            elif "timeout" in error_msg.lower():
+                error_msg = f"[TIMEOUT] {error_msg}"
+
+            # Log detailed error
+            print(f"❌ GPT-5-nano error [{error_type}]: {error_msg}")
+
             return LLMResponse(
                 success=False,
                 response_text=None,
-                error_message=str(e),
+                error_message=f"{error_type}: {error_msg}",
                 turnaround_ms=turnaround_ms
             )
 

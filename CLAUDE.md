@@ -199,6 +199,74 @@ class ModelConfig:
 
 The application scans this directory at startup to discover available models.
 
+## Job Execution and Parallelism
+
+### Parallelism Configuration
+
+The system supports parallel job execution for faster batch processing. This is configured in System Settings:
+
+- **Setting**: `job_parallelism` (range: 1-99, default: 1)
+- **UI**: System Settings tab → "並列実行数 / Job Parallelism" picker
+- **API**:
+  - `GET /api/settings/job-parallelism` - Get current setting
+  - `PUT /api/settings/job-parallelism?parallelism=N` - Set parallelism
+
+**Implementation**: When `parallelism=1`, jobs execute serially. When `parallelism>1`, the system uses `ThreadPoolExecutor` with `max_workers=parallelism` to process job items concurrently.
+
+### Thread Safety
+
+Each parallel worker thread creates its own database session to ensure thread safety:
+
+```python
+def execute_single_item(item_id: int, raw_prompt: str, parser_config: str) -> int:
+    db = SessionLocal()  # New session per thread
+    try:
+        # ... process item
+    finally:
+        db.close()  # Always close session
+```
+
+**Important**: Never share SQLAlchemy sessions across threads as SQLite is not thread-safe for concurrent writes.
+
+### Azure OpenAI Rate Limits
+
+When using Azure OpenAI GPT-5 models (mini, nano), be aware of API rate limits:
+
+**Common Symptoms of Rate Limiting:**
+- Empty responses with no error message
+- 429 HTTP errors
+- Slow response times
+- Finish reason: `content_filter` or `length`
+
+**Recommended Parallelism Settings:**
+- **Testing/Development**: Start with parallelism=1
+- **Production with Standard Tier**: parallelism=3-5
+- **Production with Premium Tier**: parallelism=10-20
+- **If experiencing errors**: Reduce by 50% and monitor
+
+**Best Practices:**
+1. Monitor server logs for `[RATE_LIMIT]` and `[TIMEOUT]` tags in error messages
+2. Check Azure Portal for quota utilization and throttling metrics
+3. Start with low parallelism and gradually increase while monitoring success rate
+4. Consider implementing retry logic with exponential backoff for rate-limited requests
+
+**Enhanced Error Logging:**
+The GPT-5 clients now log detailed information for troubleshooting:
+- Completion ID and model name for all requests
+- Finish reason for empty responses
+- Automatic detection of rate limit and timeout errors
+- Response turnaround time tracking
+
+### Job Cancellation
+
+Users can stop running jobs using the stop button (⏹ 停止). This cancels all **pending** items in the job queue:
+
+- **Single Execution**: Stop button appears during execution
+- **Batch Execution**: Stop button appears during batch processing
+- **Limitation**: Only pending items can be cancelled. Items currently executing (LLM API calls in progress) cannot be interrupted.
+
+**API**: `POST /api/jobs/{job_id}/cancel` - Cancels all pending items, returns count of cancelled items.
+
 ## Important Notes
 
 - **Target OS**: Windows 10/11 (64-bit) and Linux (x86_64)
