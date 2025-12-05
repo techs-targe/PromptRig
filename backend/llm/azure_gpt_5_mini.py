@@ -34,8 +34,8 @@ class AzureGPT5MiniClient(LLMClient):
             "AZURE_OPENAI_GPT5_MINI_DEPLOYMENT_NAME",
             os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
         )
-        # GPT-5 requires API version 2025-03-01-preview
-        self.api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2025-03-01-preview")
+        # GPT-5 requires API version 2025-01-01-preview or later
+        self.api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
 
         # Validate configuration
         if not all([self.endpoint, self.api_key, self.deployment_name]):
@@ -57,13 +57,12 @@ class AzureGPT5MiniClient(LLMClient):
 
         Args:
             prompt: The prompt text to send
-            **kwargs: Optional parameters
-                - verbosity (str): Default "medium" - Controls output expansiveness ("low", "medium", "high")
-                - reasoning_effort (str): Default "medium" - Controls reasoning tokens ("minimal", "medium")
+            **kwargs: Optional parameters (Note: GPT-5 has fixed parameters)
 
         Note:
-            GPT-5 models use responses.create() API (not chat.completions.create()).
-            API version must be 2025-03-01-preview or later.
+            GPT-5 models use chat.completions.create() API.
+            API version must be 2025-01-01-preview or later.
+            Temperature is fixed at 1.0 and cannot be changed.
             Reference: Azure AI Foundry GPT-5 documentation
 
         Returns:
@@ -72,30 +71,43 @@ class AzureGPT5MiniClient(LLMClient):
         start_time = time.time()
 
         try:
-            # Get GPT-5 specific parameters
-            verbosity = kwargs.get("verbosity", "medium")
-            reasoning_effort = kwargs.get("reasoning_effort", "medium")
+            # Prepare messages with developer role
+            messages = [
+                {
+                    "role": "developer",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "You are a helpful AI assistant."
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }
+            ]
 
-            # Call Azure OpenAI GPT-5 API using responses.create()
-            # Reference: Azure AI Foundry sample code
-            # reasoning_effort values: minimal, low, medium, high
-            response = self.client.responses.create(
+            # Call Azure OpenAI GPT-5 API using chat.completions.create()
+            # Reference: Azure AI Foundry sample code (2025-01-01-preview)
+            completion = self.client.chat.completions.create(
                 model=self.deployment_name,
-                input=prompt,
-                text={"verbosity": verbosity},
-                reasoning={"effort": reasoning_effort}
+                messages=messages,
+                max_completion_tokens=4096,
+                stop=None,
+                stream=False
             )
 
             # Calculate turnaround time
             turnaround_ms = int((time.time() - start_time) * 1000)
 
-            # Extract response text from response.output
-            output_text = ""
-            for item in response.output:
-                if hasattr(item, "content") and item.content:
-                    for content in item.content:
-                        if hasattr(content, "text") and content.text:
-                            output_text += content.text
+            # Extract response text
+            output_text = completion.choices[0].message.content
 
             return LLMResponse(
                 success=True,
@@ -121,13 +133,11 @@ class AzureGPT5MiniClient(LLMClient):
             Dictionary of default parameter values
 
         Note:
-            GPT-5 models only support verbosity and reasoning_effort.
+            GPT-5 models have fixed parameters.
             Temperature is fixed at 1.0 and cannot be changed.
+            max_completion_tokens is set to 4096 by default.
         """
-        return {
-            "verbosity": "medium",
-            "reasoning_effort": "medium"
-        }
+        return {}
 
     def get_model_name(self) -> str:
         """Get model name identifier.
