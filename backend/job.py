@@ -4,6 +4,7 @@ Based on specification in docs/req.txt section 4.2.3 (実行処理) and 3.2 (通
 """
 
 import json
+import logging
 from datetime import datetime
 from typing import Dict, List, Optional
 from sqlalchemy.orm import Session
@@ -14,6 +15,8 @@ from .prompt import PromptTemplateParser
 from .llm import get_llm_client, LLMClient
 from .parser import ResponseParser
 from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
 
 
 class JobManager:
@@ -376,16 +379,22 @@ class JobManager:
         # This guarantees that CSV rows appear in the same order as they were created
         sorted_items = sorted(job_items, key=lambda x: x.id)
 
+        logger.info(f"CSV merge: Processing {len(sorted_items)} items, include_header={include_csv_header}")
+
         for item in sorted_items:
             # Skip items that are not successfully completed
             if item.status != "done" or not item.parsed_response:
+                logger.debug(f"CSV merge: Skipping item {item.id} - status={item.status}, has_parsed={bool(item.parsed_response)}")
                 continue
 
             try:
                 parsed = json.loads(item.parsed_response)
                 csv_output = parsed.get("csv_output", "")
 
+                logger.debug(f"CSV merge: Item {item.id} - has_csv_output={bool(csv_output)}, parsed_keys={list(parsed.keys())}")
+
                 if not csv_output:
+                    logger.warning(f"CSV merge: Item {item.id} has no csv_output field in parsed response")
                     continue
 
                 # Add header from first successful item (only once)
@@ -396,15 +405,20 @@ class JobManager:
                         header_line = ",".join(fields.keys())
                         csv_lines.append(header_line)
                         header_added = True
+                        logger.info(f"CSV merge: Added header: {header_line}")
 
                 # Add data line
                 csv_lines.append(csv_output)
+                logger.debug(f"CSV merge: Added line from item {item.id}: {csv_output[:100]}")
 
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, KeyError) as e:
                 # Skip items with invalid parsed response
+                logger.error(f"CSV merge: Error parsing item {item.id}: {e}")
                 continue
 
-        return "\n".join(csv_lines)
+        result = "\n".join(csv_lines)
+        logger.info(f"CSV merge: Completed with {len(csv_lines)} lines (including header if present)")
+        return result
 
     def get_job_with_items(self, job_id: int) -> Optional[Job]:
         """Get job with all its items loaded.

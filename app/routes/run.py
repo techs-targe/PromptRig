@@ -96,6 +96,7 @@ def run_single(request: RunSingleRequest, db: Session = Depends(get_db)):
             finished_at=job.finished_at,
             turnaround_ms=job.turnaround_ms,
             merged_csv_output=job.merged_csv_output,
+            model_name=job.model_name,
             items=items
         )
 
@@ -185,6 +186,7 @@ def run_batch(request: RunBatchRequestWithHeader, db: Session = Depends(get_db))
             finished_at=job.finished_at,
             turnaround_ms=job.turnaround_ms,
             merged_csv_output=job.merged_csv_output,
+            model_name=job.model_name,
             items=items
         )
 
