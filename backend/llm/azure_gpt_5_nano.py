@@ -34,7 +34,8 @@ class AzureGPT5NanoClient(LLMClient):
             "AZURE_OPENAI_GPT5_NANO_DEPLOYMENT_NAME",
             os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
         )
-        self.api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+        # GPT-5 requires API version 2025-03-01-preview
+        self.api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2025-03-01-preview")
 
         # Validate configuration
         if not all([self.endpoint, self.api_key, self.deployment_name]):
@@ -61,9 +62,9 @@ class AzureGPT5NanoClient(LLMClient):
                 - reasoning_effort (str): Default "minimal" - Controls reasoning tokens ("minimal", "medium")
 
         Note:
-            GPT-5 models only support temperature=1.0 (fixed).
-            Other sampling parameters (top_p, max_tokens, frequency_penalty, etc.) are not supported.
-            See: https://community.openai.com/t/temperature-in-gpt-5-models/1337133
+            GPT-5 models use responses.create() API (not chat.completions.create()).
+            API version must be 2025-03-01-preview or later.
+            Reference: Azure AI Foundry GPT-5 documentation
 
         Returns:
             LLMResponse with result or error
@@ -75,27 +76,30 @@ class AzureGPT5NanoClient(LLMClient):
             verbosity = kwargs.get("verbosity", "medium")
             reasoning_effort = kwargs.get("reasoning_effort", "minimal")  # nano defaults to minimal
 
-            # Build API call parameters
-            # Note: GPT-5 only accepts temperature=1.0 (default), verbosity, and reasoning_effort
-            api_params = {
-                "model": self.deployment_name,
-                "messages": [{"role": "user", "content": prompt}],
-                "verbosity": verbosity,
-                "reasoning_effort": reasoning_effort
-            }
-
-            # Call Azure OpenAI API
-            response = self.client.chat.completions.create(**api_params)
+            # Call Azure OpenAI GPT-5 API using responses.create()
+            # Reference: Azure AI Foundry sample code
+            response = self.client.responses.create(
+                model=self.deployment_name,
+                input=prompt,
+                text={"verbosity": verbosity}
+                # Note: reasoning_effort may not be supported in Azure OpenAI GPT-5
+                # Only verbosity is confirmed in the sample code
+            )
 
             # Calculate turnaround time
             turnaround_ms = int((time.time() - start_time) * 1000)
 
-            # Extract response text
-            response_text = response.choices[0].message.content
+            # Extract response text from response.output
+            output_text = ""
+            for item in response.output:
+                if hasattr(item, "content") and item.content:
+                    for content in item.content:
+                        if hasattr(content, "text") and content.text:
+                            output_text += content.text
 
             return LLMResponse(
                 success=True,
-                response_text=response_text,
+                response_text=output_text,
                 error_message=None,
                 turnaround_ms=turnaround_ms
             )

@@ -13,6 +13,7 @@ from .azure_gpt_4_1 import AzureGPT41Client
 from .azure_gpt_5_mini import AzureGPT5MiniClient
 from .azure_gpt_5_nano import AzureGPT5NanoClient
 from .openai_gpt_4_nano import OpenAIGPT4NanoClient
+from .openai_gpt_5_nano import OpenAIGPT5NanoClient
 
 # Load environment variables
 load_dotenv()
@@ -23,7 +24,8 @@ def get_llm_client(model_name: str = None) -> LLMClient:
 
     Args:
         model_name: Model identifier. If None, uses ACTIVE_LLM_MODEL from env.
-                   Options: 'azure-gpt-4.1', 'azure-gpt-5-mini', 'azure-gpt-5-nano', 'openai-gpt-4.1-nano'
+                   Options: 'azure-gpt-4.1', 'azure-gpt-5-mini', 'azure-gpt-5-nano',
+                           'openai-gpt-4.1-nano', 'openai-gpt-5-nano'
 
     Returns:
         LLMClient instance
@@ -32,7 +34,7 @@ def get_llm_client(model_name: str = None) -> LLMClient:
         ValueError: If model_name is not supported
 
     Specification: docs/req.txt section 8 (Phase 1)
-    Extended to support Azure GPT-5-mini and GPT-5-nano
+    Extended to support Azure GPT-5-mini, GPT-5-nano and OpenAI GPT-5-nano
     """
     if model_name is None:
         model_name = os.getenv("ACTIVE_LLM_MODEL", "azure-gpt-4.1")
@@ -45,10 +47,13 @@ def get_llm_client(model_name: str = None) -> LLMClient:
         return AzureGPT5NanoClient()
     elif model_name == "openai-gpt-4.1-nano":
         return OpenAIGPT4NanoClient()
+    elif model_name == "openai-gpt-5-nano":
+        return OpenAIGPT5NanoClient()
     else:
         raise ValueError(
             f"Unsupported model: {model_name}. "
-            f"Supported models: 'azure-gpt-4.1', 'azure-gpt-5-mini', 'azure-gpt-5-nano', 'openai-gpt-4.1-nano'"
+            f"Supported models: 'azure-gpt-4.1', 'azure-gpt-5-mini', 'azure-gpt-5-nano', "
+            f"'openai-gpt-4.1-nano', 'openai-gpt-5-nano'"
         )
 
 
@@ -81,6 +86,11 @@ def get_available_models() -> List[Dict[str, any]]:
             "name": "openai-gpt-4.1-nano",
             "display_name": "OpenAI GPT-4.1-nano",
             "default_parameters": OpenAIGPT4NanoClient().get_default_parameters()
+        },
+        {
+            "name": "openai-gpt-5-nano",
+            "display_name": "OpenAI GPT-5-nano",
+            "default_parameters": OpenAIGPT5NanoClient().get_default_parameters()
         }
     ]
     return models
