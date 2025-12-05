@@ -109,13 +109,31 @@ class ModelParametersUpdate(BaseModel):
 
 
 @router.get("/api/settings/models/available")
-def get_available_models_info():
+def get_available_models_info(db: Session = Depends(get_db)):
     """Get list of available LLM models with their information.
 
     Specification: docs/req.txt section 4.5.1
     Phase 2 - Extended to include GPT-5 models
+
+    Returns only enabled models. If no enabled models are configured,
+    all models are considered enabled by default.
     """
-    return get_available_models()
+    all_models = get_available_models()
+
+    # Check which models are enabled
+    enabled_models = []
+    for model in all_models:
+        setting_key = f"model_enabled_{model['name']}"
+        setting = db.query(SystemSetting).filter(SystemSetting.key == setting_key).first()
+
+        # If no setting exists, model is enabled by default
+        # If setting exists, check if value is "true"
+        is_enabled = setting is None or setting.value == "true"
+
+        if is_enabled:
+            enabled_models.append(model)
+
+    return enabled_models
 
 
 @router.get("/api/settings/models/default")
@@ -254,4 +272,73 @@ def reset_model_parameters(model_name: str, db: Session = Depends(get_db)):
         "model_name": model_name,
         "parameters": model_info["default_parameters"],
         "message": "Parameters reset to defaults"
+    }
+
+
+class ModelEnableStatus(BaseModel):
+    """Model enable/disable status."""
+    name: str
+    display_name: str
+    enabled: bool
+
+
+@router.get("/api/settings/models/all", response_model=List[ModelEnableStatus])
+def get_all_models_with_status(db: Session = Depends(get_db)):
+    """Get all available models with their enabled/disabled status.
+
+    Returns all models discovered by the system, along with their
+    enabled/disabled status. Used for model management UI.
+    """
+    all_models = get_available_models()
+    result = []
+
+    for model in all_models:
+        setting_key = f"model_enabled_{model['name']}"
+        setting = db.query(SystemSetting).filter(SystemSetting.key == setting_key).first()
+
+        # If no setting exists, model is enabled by default
+        is_enabled = setting is None or setting.value == "true"
+
+        result.append(ModelEnableStatus(
+            name=model["name"],
+            display_name=model["display_name"],
+            enabled=is_enabled
+        ))
+
+    return result
+
+
+@router.put("/api/settings/models/{model_name}/enable")
+def set_model_enabled(model_name: str, enabled: bool, db: Session = Depends(get_db)):
+    """Enable or disable a specific model.
+
+    Args:
+        model_name: The model name to enable/disable
+        enabled: True to enable, False to disable
+    """
+    # Validate model exists
+    all_models = get_available_models()
+    model_info = next((m for m in all_models if m["name"] == model_name), None)
+
+    if not model_info:
+        raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
+
+    setting_key = f"model_enabled_{model_name}"
+    setting = db.query(SystemSetting).filter(SystemSetting.key == setting_key).first()
+
+    value = "true" if enabled else "false"
+
+    if setting:
+        setting.value = value
+    else:
+        setting = SystemSetting(key=setting_key, value=value)
+        db.add(setting)
+
+    db.commit()
+    db.refresh(setting)
+
+    return {
+        "model_name": model_name,
+        "enabled": enabled,
+        "message": f"Model '{model_name}' {'enabled' if enabled else 'disabled'}"
     }

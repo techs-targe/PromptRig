@@ -1382,8 +1382,79 @@ async function loadAvailableModels() {
         container.innerHTML = models.map(model =>
             `<div class="badge badge-info">${model.display_name || model.name || model}</div>`
         ).join(' ');
+
+        // Also load model enable settings
+        await loadModelEnableSettings();
     } catch (error) {
         // Failed to load models - silently continue
+    }
+}
+
+async function loadModelEnableSettings() {
+    try {
+        const response = await fetch('/api/settings/models/all');
+        const models = await response.json();
+
+        const container = document.getElementById('model-enable-settings');
+        if (!container) return;
+
+        container.innerHTML = models.map(model => `
+            <div class="model-toggle" style="display: flex; align-items: center; padding: 0.5rem; border-bottom: 1px solid #ecf0f1;">
+                <label style="flex: 1; margin: 0; cursor: pointer;">
+                    <input type="checkbox"
+                           class="model-enable-checkbox"
+                           data-model-name="${model.name}"
+                           ${model.enabled ? 'checked' : ''}
+                           onchange="toggleModelEnabled('${model.name}', this.checked)"
+                           style="margin-right: 0.5rem; cursor: pointer;">
+                    <strong>${model.display_name}</strong>
+                    <span style="color: #7f8c8d; font-size: 0.85rem; margin-left: 0.5rem;">(${model.name})</span>
+                </label>
+                <span class="badge ${model.enabled ? 'badge-success' : 'badge-secondary'}" style="font-size: 0.75rem;">
+                    ${model.enabled ? '有効 / Enabled' : '無効 / Disabled'}
+                </span>
+            </div>
+        `).join('');
+    } catch (error) {
+        const container = document.getElementById('model-enable-settings');
+        if (container) {
+            container.innerHTML = '<p class="error">モデル設定の読み込みに失敗しました / Failed to load model settings</p>';
+        }
+    }
+}
+
+async function toggleModelEnabled(modelName, enabled) {
+    try {
+        const response = await fetch(`/api/settings/models/${modelName}/enable?enabled=${enabled}`, {
+            method: 'PUT'
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to update model status');
+        }
+
+        // Reload model lists
+        await loadAvailableModels();
+
+        // Show success message
+        const message = enabled ?
+            `${modelName} を有効化しました / Enabled ${modelName}` :
+            `${modelName} を無効化しました / Disabled ${modelName}`;
+
+        // Create temporary success message
+        const container = document.getElementById('model-enable-settings');
+        const successMsg = document.createElement('div');
+        successMsg.className = 'success-message';
+        successMsg.style.cssText = 'background: #27ae60; color: white; padding: 0.5rem; margin: 0.5rem 0; border-radius: 4px;';
+        successMsg.textContent = message;
+        container.insertBefore(successMsg, container.firstChild);
+
+        setTimeout(() => successMsg.remove(), 3000);
+
+    } catch (error) {
+        alert(`エラー / Error: ${error.message}`);
+        // Reload to reset checkbox state
+        await loadModelEnableSettings();
     }
 }
 

@@ -214,8 +214,18 @@
         <div class="section">
             <h3>LLMモデル設定 / LLM Model Configuration</h3>
             <div class="settings-group">
-                <label>利用可能なモデル / Available Models:</label>
+                <label>利用可能なモデル / Available Models (有効化されたモデル):</label>
                 <div id="available-models">
+                    <p class="loading">Loading...</p>
+                </div>
+            </div>
+
+            <div class="settings-group" style="margin-top: 2rem;">
+                <label>モデル有効化設定 / Model Activation Settings:</label>
+                <p class="info" style="margin-bottom: 1rem;">
+                    システムで利用可能にするモデルを選択してください / Select models to make available in the system
+                </p>
+                <div id="model-enable-settings">
                     <p class="loading">Loading...</p>
                 </div>
             </div>
