@@ -509,12 +509,16 @@ async function executePrompt(repeat) {
 
     const modelName = document.getElementById('model-select').value;
     const includeCsvHeader = document.getElementById('single-include-csv-header')?.checked ?? true;
-    const temperature = parseFloat(document.getElementById('temperature')?.value ?? 0.7);
 
     setExecutionState(true);
     showStatus('実行中... / Executing...', 'info');
 
     try {
+        // Get model parameters from system settings
+        const paramsResponse = await fetch(`/api/settings/models/${modelName}/parameters`);
+        const paramsData = await paramsResponse.json();
+        const modelParams = paramsData.active_parameters || {};
+
         const response = await fetch('/api/run/single', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -524,7 +528,7 @@ async function executePrompt(repeat) {
                 repeat: repeat,
                 model_name: modelName,
                 include_csv_header: includeCsvHeader,
-                temperature: temperature
+                ...modelParams  // Include all model parameters from system settings
             })
         });
 
@@ -1154,7 +1158,6 @@ async function executeBatch() {
     const datasetId = document.getElementById('batch-dataset-select').value;
     const includeCsvHeader = document.getElementById('batch-include-csv-header')?.checked ?? true;
     const modelName = document.getElementById('batch-model-select').value;
-    const temperature = parseFloat(document.getElementById('batch-temperature')?.value ?? 0.7);
 
     if (!projectId || !datasetId) {
         alert('プロジェクトとデータセットを選択してください / Please select project and dataset');
@@ -1169,6 +1172,11 @@ async function executeBatch() {
     executeBtn.style.background = '#95a5a6';
 
     try {
+        // Get model parameters from system settings
+        const paramsResponse = await fetch(`/api/settings/models/${modelName}/parameters`);
+        const paramsData = await paramsResponse.json();
+        const modelParams = paramsData.active_parameters || {};
+
         const response = await fetch('/api/run/batch', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -1177,7 +1185,7 @@ async function executeBatch() {
                 dataset_id: parseInt(datasetId),
                 include_csv_header: includeCsvHeader,
                 model_name: modelName,
-                temperature: temperature
+                ...modelParams  // Include all model parameters from system settings
             })
         });
 
