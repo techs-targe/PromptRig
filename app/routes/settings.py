@@ -43,6 +43,55 @@ def list_settings(db: Session = Depends(get_db)):
     ]
 
 
+@router.get("/api/settings/default-project")
+def get_default_project(db: Session = Depends(get_db)):
+    """Get default project ID for single execution.
+
+    Returns:
+        Dictionary with project_id (None if not set)
+    """
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "default_project_id").first()
+
+    return {
+        "project_id": int(setting.value) if setting and setting.value else None
+    }
+
+
+@router.put("/api/settings/default-project")
+def set_default_project(project_id: int, db: Session = Depends(get_db)):
+    """Set default project ID for single execution.
+
+    Args:
+        project_id: Project ID to set as default
+
+    Returns:
+        Success message with project_id
+    """
+    # Verify project exists
+    from backend.database import Project
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project with ID {project_id} not found")
+
+    # Update or create setting
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "default_project_id").first()
+
+    if setting:
+        setting.value = str(project_id)
+    else:
+        setting = SystemSetting(key="default_project_id", value=str(project_id))
+        db.add(setting)
+
+    db.commit()
+    db.refresh(setting)
+
+    return {
+        "project_id": project_id,
+        "project_name": project.name,
+        "message": f"Default project set to '{project.name}'"
+    }
+
+
 @router.get("/api/settings/{key}", response_model=SettingResponse)
 def get_setting(key: str, db: Session = Depends(get_db)):
     """Get specific setting value.

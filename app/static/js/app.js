@@ -128,6 +128,7 @@ function setupEventListeners() {
 
     // Settings
     document.getElementById('btn-save-default-model')?.addEventListener('click', saveDefaultModel);
+    document.getElementById('btn-save-default-project')?.addEventListener('click', saveDefaultProject);
     document.getElementById('param-model-select')?.addEventListener('change', loadModelParameters);
     document.getElementById('btn-save-model-params')?.addEventListener('click', saveModelParameters);
     document.getElementById('btn-reset-model-params')?.addEventListener('click', resetModelParameters);
@@ -1252,15 +1253,45 @@ function renderProjects() {
 async function updateProjectSelects() {
     const singleSelect = document.getElementById('single-project-select');
     const batchSelect = document.getElementById('batch-project-select');
+    const defaultProjectSelect = document.getElementById('default-project-select');
 
     const options = allProjects.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
 
-    if (singleSelect) singleSelect.innerHTML = options;
+    if (singleSelect) {
+        singleSelect.innerHTML = options;
+        // Set default project if configured
+        try {
+            const response = await fetch('/api/settings/default-project');
+            const data = await response.json();
+            if (data.project_id) {
+                singleSelect.value = data.project_id;
+                // Trigger project change to load prompts
+                await onProjectChange();
+            }
+        } catch (error) {
+            console.error('Failed to load default project:', error);
+        }
+    }
+
     if (batchSelect) {
         batchSelect.innerHTML = options;
         // Auto-load datasets for first project on batch tab
         if (batchSelect.value) {
             await loadDatasetsForProject(parseInt(batchSelect.value));
+        }
+    }
+
+    if (defaultProjectSelect) {
+        defaultProjectSelect.innerHTML = options;
+        // Set current default project in settings
+        try {
+            const response = await fetch('/api/settings/default-project');
+            const data = await response.json();
+            if (data.project_id) {
+                defaultProjectSelect.value = data.project_id;
+            }
+        } catch (error) {
+            console.error('Failed to load default project for settings:', error);
         }
     }
 }
@@ -1704,6 +1735,37 @@ async function saveDefaultModel() {
         // Update execution dropdowns
         document.getElementById('model-select').value = modelName;
         document.getElementById('batch-model-select').value = modelName;
+
+    } catch (error) {
+        alert(`エラー / Error: ${error.message}`);
+    }
+}
+
+async function saveDefaultProject() {
+    const projectId = document.getElementById('default-project-select').value;
+
+    if (!projectId) {
+        alert('プロジェクトを選択してください / Please select a project');
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/settings/default-project?project_id=${projectId}`, {
+            method: 'PUT'
+        });
+
+        if (!response.ok) throw new Error('Failed to save default project');
+
+        const data = await response.json();
+        alert(`デフォルトプロジェクトを保存しました / Default project saved: ${data.project_name}`);
+
+        // Update single execution dropdown
+        const singleSelect = document.getElementById('single-project-select');
+        if (singleSelect) {
+            singleSelect.value = projectId;
+            // Trigger project change to load prompts
+            await onProjectChange();
+        }
 
     } catch (error) {
         alert(`エラー / Error: ${error.message}`);
