@@ -65,7 +65,7 @@ class AzureGPT5NanoClient(LLMClient):
         )
 
     def call(self, prompt: str, **kwargs) -> LLMResponse:
-        """Execute Azure OpenAI GPT-5-nano call.
+        """Execute Azure OpenAI GPT-5-nano call with retry logic.
 
         Args:
             prompt: The prompt text to send
@@ -78,93 +78,152 @@ class AzureGPT5NanoClient(LLMClient):
             Temperature, verbosity, and reasoning_effort are not used.
             Reference: Azure OpenAI GPT-5 documentation
 
+            Retry Logic:
+            - Retries up to 4 times on errors or empty responses
+            - Retry delays: 15s → 30s → 60s → 60s (exponential backoff)
+            - Retries on: rate limits, timeouts, empty responses
+
         Returns:
             LLMResponse with result or error
         """
+        max_retries = 4
+        retry_delays = [15, 30, 60, 60]  # seconds for each retry attempt
         start_time = time.time()
 
-        try:
-            # Get parameters with defaults
-            max_tokens = kwargs.get("max_tokens", 4096)
+        for attempt in range(max_retries):
+            attempt_start = time.time()
 
-            # Prepare messages with system and user roles
-            messages = [
-                {"role": "system", "content": "You are a helpful AI assistant."},
-                {"role": "user", "content": prompt}
-            ]
+            try:
+                # Get parameters with defaults
+                max_tokens = kwargs.get("max_tokens", 4096)
 
-            # Call Azure OpenAI GPT-5 API using chat.completions.create()
-            # Reference: Azure OpenAI GPT-5 SDK documentation
-            completion = self.client.chat.completions.create(
-                model=self.deployment_name,
-                messages=messages,
-                max_completion_tokens=max_tokens,
-                stop=None,
-                stream=False
-            )
+                # Prepare messages with system and user roles
+                messages = [
+                    {"role": "system", "content": "You are a helpful AI assistant."},
+                    {"role": "user", "content": prompt}
+                ]
 
-            # Calculate turnaround time
-            turnaround_ms = int((time.time() - start_time) * 1000)
-
-            # Extract response text with validation
-            output_text = completion.choices[0].message.content
-
-            # Validate response is not None or empty
-            if output_text is None:
-                # Log for debugging
-                print(f"⚠️ GPT-5-nano: API returned None response (turnaround: {turnaround_ms}ms)")
-                print(f"   Completion ID: {completion.id if hasattr(completion, 'id') else 'N/A'}")
-                print(f"   Model: {completion.model if hasattr(completion, 'model') else 'N/A'}")
-
-                return LLMResponse(
-                    success=False,
-                    response_text=None,
-                    error_message="API returned None response. Check Azure OpenAI quota and rate limits.",
-                    turnaround_ms=turnaround_ms
+                # Call Azure OpenAI GPT-5 API using chat.completions.create()
+                # Reference: Azure OpenAI GPT-5 SDK documentation
+                completion = self.client.chat.completions.create(
+                    model=self.deployment_name,
+                    messages=messages,
+                    max_completion_tokens=max_tokens,
+                    stop=None,
+                    stream=False
                 )
 
-            if not output_text.strip():
-                # Log for debugging
-                print(f"⚠️ GPT-5-nano: API returned empty response (turnaround: {turnaround_ms}ms)")
-                print(f"   Completion ID: {completion.id if hasattr(completion, 'id') else 'N/A'}")
-                print(f"   Finish reason: {completion.choices[0].finish_reason if completion.choices else 'N/A'}")
+                # Calculate turnaround time for this attempt
+                attempt_ms = int((time.time() - attempt_start) * 1000)
+
+                # Extract response text with validation
+                output_text = completion.choices[0].message.content
+
+                # Check for empty response (None)
+                if output_text is None:
+                    if attempt < max_retries - 1:
+                        delay = retry_delays[attempt]
+                        print(f"⚠️ GPT-5-nano: API returned None response (attempt {attempt + 1}/{max_retries}, turnaround: {attempt_ms}ms)")
+                        print(f"   Completion ID: {completion.id if hasattr(completion, 'id') else 'N/A'}")
+                        print(f"   Retrying in {delay} seconds...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        # Last attempt failed
+                        total_ms = int((time.time() - start_time) * 1000)
+                        print(f"❌ GPT-5-nano: API returned None response after {max_retries} attempts (total: {total_ms}ms)")
+                        return LLMResponse(
+                            success=False,
+                            response_text=None,
+                            error_message=f"API returned None response after {max_retries} retry attempts. Check Azure OpenAI quota and rate limits.",
+                            turnaround_ms=total_ms
+                        )
+
+                # Check for empty response (whitespace only)
+                if not output_text.strip():
+                    if attempt < max_retries - 1:
+                        delay = retry_delays[attempt]
+                        finish_reason = completion.choices[0].finish_reason if completion.choices else 'N/A'
+                        print(f"⚠️ GPT-5-nano: API returned empty response (attempt {attempt + 1}/{max_retries}, turnaround: {attempt_ms}ms)")
+                        print(f"   Completion ID: {completion.id if hasattr(completion, 'id') else 'N/A'}")
+                        print(f"   Finish reason: {finish_reason}")
+                        print(f"   Retrying in {delay} seconds...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        # Last attempt failed
+                        total_ms = int((time.time() - start_time) * 1000)
+                        finish_reason = completion.choices[0].finish_reason if completion.choices else 'unknown'
+                        print(f"❌ GPT-5-nano: API returned empty response after {max_retries} attempts (total: {total_ms}ms)")
+                        return LLMResponse(
+                            success=False,
+                            response_text=None,
+                            error_message=f"API returned empty response after {max_retries} retry attempts. Finish reason: {finish_reason}. Check rate limits or reduce parallelism.",
+                            turnaround_ms=total_ms
+                        )
+
+                # Success!
+                total_ms = int((time.time() - start_time) * 1000)
+                if attempt > 0:
+                    print(f"✅ GPT-5-nano: Success on attempt {attempt + 1}/{max_retries} (total: {total_ms}ms)")
 
                 return LLMResponse(
-                    success=False,
-                    response_text=None,
-                    error_message=f"API returned empty response. Finish reason: {completion.choices[0].finish_reason if completion.choices else 'unknown'}. Check rate limits or reduce parallelism.",
-                    turnaround_ms=turnaround_ms
+                    success=True,
+                    response_text=output_text,
+                    error_message=None,
+                    turnaround_ms=total_ms
                 )
 
-            return LLMResponse(
-                success=True,
-                response_text=output_text,
-                error_message=None,
-                turnaround_ms=turnaround_ms
-            )
+            except Exception as e:
+                attempt_ms = int((time.time() - attempt_start) * 1000)
 
-        except Exception as e:
-            turnaround_ms = int((time.time() - start_time) * 1000)
+                # Detailed error message for debugging
+                error_type = type(e).__name__
+                error_msg = str(e)
 
-            # Detailed error message for debugging
-            error_type = type(e).__name__
-            error_msg = str(e)
+                # Check if error is retryable
+                is_rate_limit = "rate" in error_msg.lower() or "quota" in error_msg.lower() or "429" in error_msg
+                is_timeout = "timeout" in error_msg.lower()
+                should_retry = is_rate_limit or is_timeout
 
-            # Check for rate limit errors
-            if "rate" in error_msg.lower() or "quota" in error_msg.lower() or "429" in error_msg:
-                error_msg = f"[RATE_LIMIT] {error_msg}"
-            elif "timeout" in error_msg.lower():
-                error_msg = f"[TIMEOUT] {error_msg}"
+                # Tag error type
+                if is_rate_limit:
+                    error_tag = "[RATE_LIMIT]"
+                elif is_timeout:
+                    error_tag = "[TIMEOUT]"
+                else:
+                    error_tag = "[ERROR]"
 
-            # Log detailed error
-            print(f"❌ GPT-5-nano error [{error_type}]: {error_msg}")
+                if should_retry and attempt < max_retries - 1:
+                    delay = retry_delays[attempt]
+                    print(f"⚠️ GPT-5-nano {error_tag}: {error_type} (attempt {attempt + 1}/{max_retries}, turnaround: {attempt_ms}ms)")
+                    print(f"   Error: {error_msg}")
+                    print(f"   Retrying in {delay} seconds...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    # Last attempt or non-retryable error
+                    total_ms = int((time.time() - start_time) * 1000)
+                    if should_retry:
+                        print(f"❌ GPT-5-nano {error_tag}: Failed after {max_retries} attempts (total: {total_ms}ms)")
+                    else:
+                        print(f"❌ GPT-5-nano {error_tag}: Non-retryable error [{error_type}]: {error_msg}")
 
-            return LLMResponse(
-                success=False,
-                response_text=None,
-                error_message=f"{error_type}: {error_msg}",
-                turnaround_ms=turnaround_ms
-            )
+                    return LLMResponse(
+                        success=False,
+                        response_text=None,
+                        error_message=f"{error_type}: {error_tag} {error_msg}",
+                        turnaround_ms=total_ms
+                    )
+
+        # Should never reach here, but just in case
+        total_ms = int((time.time() - start_time) * 1000)
+        return LLMResponse(
+            success=False,
+            response_text=None,
+            error_message=f"Failed after {max_retries} retry attempts",
+            turnaround_ms=total_ms
+        )
 
     def get_default_parameters(self) -> dict:
         """Get default parameters for Azure GPT-5-nano.
