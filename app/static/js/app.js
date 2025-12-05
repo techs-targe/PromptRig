@@ -1219,19 +1219,77 @@ async function executeBatch() {
         // Display results immediately
         displayBatchResult(result.job);
 
-        // Reload history
-        await loadBatchJobHistory(parseInt(projectId));
-    } catch (error) {
-        alert(`エラー / Error: ${error.message}`);
-    } finally {
-        // Restore button
+        // Restore execute button (but keep stop button visible)
         executeBtn.disabled = false;
         executeBtn.textContent = originalText;
         executeBtn.style.background = '';
-        // Hide stop button
+
+        // Start polling for job progress
+        pollBatchJobProgress(result.job_id, parseInt(projectId));
+
+    } catch (error) {
+        alert(`エラー / Error: ${error.message}`);
+        // On error, restore button and hide stop button
+        executeBtn.disabled = false;
+        executeBtn.textContent = originalText;
+        executeBtn.style.background = '';
         document.getElementById('btn-stop-batch').style.display = 'none';
         currentBatchJobId = null;
     }
+}
+
+// Poll batch job progress until completion
+let batchPollIntervalId = null;
+
+async function pollBatchJobProgress(jobId, projectId) {
+    // Clear any existing polling interval
+    if (batchPollIntervalId) {
+        clearInterval(batchPollIntervalId);
+    }
+
+    // Poll every 3 seconds
+    batchPollIntervalId = setInterval(async () => {
+        try {
+            // Fetch updated job data
+            const response = await fetch(`/api/projects/${projectId}/jobs`);
+            const allJobs = await response.json();
+            const job = allJobs.find(j => j.id === jobId);
+
+            if (!job) {
+                // Job not found, stop polling
+                clearInterval(batchPollIntervalId);
+                batchPollIntervalId = null;
+                hideBatchStopButton();
+                return;
+            }
+
+            // Update display with latest job data
+            displayBatchResult(job);
+
+            // Check if job is complete
+            const isComplete = job.status === 'done' || job.status === 'error';
+            const allItemsComplete = job.items && job.items.every(item =>
+                item.status === 'done' || item.status === 'error' || item.status === 'cancelled'
+            );
+
+            if (isComplete || allItemsComplete) {
+                // Job finished, stop polling
+                clearInterval(batchPollIntervalId);
+                batchPollIntervalId = null;
+                hideBatchStopButton();
+                // Reload history to show final status
+                await loadBatchJobHistory(projectId);
+            }
+        } catch (error) {
+            console.error('Error polling batch job:', error);
+            // Continue polling on error (network issue might be temporary)
+        }
+    }, 3000); // Poll every 3 seconds
+}
+
+function hideBatchStopButton() {
+    document.getElementById('btn-stop-batch').style.display = 'none';
+    currentBatchJobId = null;
 }
 
 async function onBatchProjectChange(e) {
@@ -2041,6 +2099,12 @@ async function cancelSingleJob() {
 }
 
 async function cancelBatchJob() {
+    // Stop polling first
+    if (batchPollIntervalId) {
+        clearInterval(batchPollIntervalId);
+        batchPollIntervalId = null;
+    }
+
     await cancelJob(currentBatchJobId, 'btn-stop-batch', 'batch-results-area');
-    currentBatchJobId = null;
+    hideBatchStopButton();
 }
