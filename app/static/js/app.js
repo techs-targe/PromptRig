@@ -1380,7 +1380,7 @@ async function loadAvailableModels() {
         if (!container) return;
 
         container.innerHTML = models.map(model =>
-            `<div class="badge badge-info">${model}</div>`
+            `<div class="badge badge-info">${model.display_name || model.name || model}</div>`
         ).join(' ');
     } catch (error) {
         // Failed to load models - silently continue
