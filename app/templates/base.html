@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Prompt Evaluation System{% endblock %}</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <h1>プロンプト評価システム / Prompt Evaluation System</h1>
+        <p class="subtitle">Phase 2 Complete</p>
+    </header>
+
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer>
+        <p>Prompt Evaluation System v2.0.0 (Phase 2 Complete)</p>
+    </footer>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>

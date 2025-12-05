@@ -1,0 +1,29 @@
+# Python dependencies for Prompt Evaluation System
+# Phase 1 (MVP) requirements
+
+# Web framework
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+
+# Database
+sqlalchemy==2.0.36
+
+# LLM providers
+openai==1.57.0
+azure-identity==1.19.0
+
+# Configuration
+python-dotenv==1.0.1
+
+# Data validation (included with FastAPI but explicit version)
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# Template rendering (included with FastAPI)
+jinja2==3.1.4
+
+# Date/time handling
+python-dateutil==2.9.0
+
+# Phase 2: Excel dataset import
+openpyxl==3.1.5

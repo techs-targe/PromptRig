@@ -1,0 +1,274 @@
+{% extends "base.html" %}
+
+{% block title %}プロンプト評価システム - Prompt Evaluation System{% endblock %}
+
+{% block content %}
+<div class="container">
+    <!-- Tab Navigation -->
+    <div class="tab-navigation">
+        <button class="tab-button active" data-tab="single">単発実行 / Single Execution</button>
+        <button class="tab-button" data-tab="batch">バッチ実行 / Batch Execution</button>
+        <button class="tab-button" data-tab="projects">プロジェクト設定 / Projects</button>
+        <button class="tab-button" data-tab="settings">システム設定 / System Settings</button>
+        <button class="tab-button" data-tab="datasets">データセット / Datasets</button>
+    </div>
+
+    <!-- Tab Content Areas -->
+
+    <!-- Single Execution Tab -->
+    <div id="tab-single" class="tab-content active">
+        <div class="section">
+            <h2>単発実行 / Single Execution</h2>
+            <div class="toolbar">
+                <label>プロジェクト / Project:</label>
+                <select id="single-project-select">
+                    <option value="">Loading...</option>
+                </select>
+                <button id="btn-edit-prompt" class="btn btn-secondary">プロンプト編集 / Edit Prompt</button>
+                <button id="btn-edit-parser" class="btn btn-secondary">パーサー編集 / Edit Parser</button>
+                <label style="margin-left: 20px;">モデル / Model:</label>
+                <select id="model-select">
+                    <option value="azure-gpt-4.1">Azure GPT-4.1</option>
+                    <option value="openai-gpt-4.1-nano">OpenAI GPT-4.1-nano</option>
+                </select>
+                <label style="margin-left: 1rem;">温度 / Temperature:</label>
+                <input type="number" id="temperature" min="0" max="2" step="0.1" value="0.7" style="width: 60px;">
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="left-pane">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                    <h3 style="margin: 0;">実行履歴 / History</h3>
+                    <button id="btn-reload-single-history" class="btn btn-secondary btn-sm" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;">🔄</button>
+                </div>
+                <div id="history-list" class="history-list">
+                    <p class="loading">Loading...</p>
+                </div>
+            </div>
+
+            <div class="right-pane">
+                <div class="section">
+                    <h3>プロンプトテンプレート / Prompt Template</h3>
+                    <div class="prompt-template-box">
+                        <pre id="prompt-template">Loading...</pre>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <h3>入力パラメータ / Input Parameters</h3>
+                    <form id="input-form">
+                        <div id="parameter-inputs">
+                            <p class="loading">Loading...</p>
+                        </div>
+
+                        <div class="execution-controls">
+                            <button type="button" id="btn-send-once" class="btn btn-primary">
+                                1件送信 / Send Once
+                            </button>
+                            <div class="repeat-control">
+                                <label for="repeat-count">回数 / Repeat:</label>
+                                <input type="number" id="repeat-count" min="1" max="10" value="3">
+                                <button type="button" id="btn-send-repeat" class="btn btn-secondary">
+                                    n回送信 / Send n Times
+                                </button>
+                                <label style="margin-left: 1rem;">
+                                    <input type="checkbox" id="single-include-csv-header" checked>
+                                    CSVヘッダを１行目のみに含める / Include CSV header in first row only
+                                </label>
+                            </div>
+                        </div>
+
+                        <div id="execution-status" class="status-message"></div>
+                    </form>
+                </div>
+
+                <div class="section">
+                    <h3>実行結果 / Results</h3>
+                    <div id="results-area">
+                        <p class="info">実行結果がここに表示されます / Results will be displayed here</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Batch Execution Tab -->
+    <div id="tab-batch" class="tab-content">
+        <div class="section">
+            <h2>バッチ実行 / Batch Execution</h2>
+            <div class="toolbar">
+                <label>プロジェクト / Project:</label>
+                <select id="batch-project-select">
+                    <option value="">Loading...</option>
+                </select>
+                <button id="btn-batch-edit-prompt" class="btn btn-secondary">プロンプト編集 / Edit Prompt</button>
+                <button id="btn-batch-edit-parser" class="btn btn-secondary">パーサー編集 / Edit Parser</button>
+                <label style="margin-left: 20px;">データセット / Dataset:</label>
+                <select id="batch-dataset-select">
+                    <option value="">データセットを選択 / Select Dataset</option>
+                </select>
+            </div>
+            <div class="toolbar">
+                <label>モデル / Model:</label>
+                <select id="batch-model-select">
+                    <option value="azure-gpt-4.1">Azure GPT-4.1</option>
+                    <option value="openai-gpt-4.1-nano">OpenAI GPT-4.1-nano</option>
+                </select>
+                <label style="margin-left: 1rem;">温度 / Temperature:</label>
+                <input type="number" id="batch-temperature" min="0" max="2" step="0.1" value="0.7" style="width: 60px;">
+                <label style="margin-left: 1rem;">
+                    <input type="checkbox" id="batch-include-csv-header" checked>
+                    CSVヘッダを１行目のみに含める / Include CSV header in first row only
+                </label>
+                <button id="btn-batch-execute" class="btn btn-primary">バッチ実行開始 / Start Batch</button>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="left-pane">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                    <h3 style="margin: 0;">バッチジョブ履歴 / Batch Job History</h3>
+                    <button id="btn-reload-batch-history" class="btn btn-secondary btn-sm" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;">🔄</button>
+                </div>
+                <div id="batch-jobs-list" class="history-list">
+                    <p class="loading">Loading...</p>
+                </div>
+            </div>
+
+            <div class="right-pane">
+                <div class="section">
+                    <h3>バッチ実行結果 / Batch Results</h3>
+                    <div id="batch-results-area">
+                        <p class="info">バッチジョブを選択すると結果が表示されます / Select a batch job to view results</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Projects Tab -->
+    <div id="tab-projects" class="tab-content">
+        <div class="section">
+            <h2>プロジェクト設定 / Project Management</h2>
+            <button id="btn-create-project" class="btn btn-primary">新規プロジェクト作成 / Create Project</button>
+        </div>
+
+        <div class="section">
+            <h3>プロジェクト一覧 / Projects</h3>
+            <div id="projects-list">
+                <p class="loading">Loading...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- System Settings Tab -->
+    <div id="tab-settings" class="tab-content">
+        <div class="section">
+            <h2>システム設定 / System Settings</h2>
+        </div>
+
+        <div class="section">
+            <h3>デフォルトモデル設定 / Default Model Configuration</h3>
+            <div class="settings-group">
+                <label>デフォルトLLMモデル / Default LLM Model:</label>
+                <select id="default-model-select" style="margin-left: 1rem; padding: 0.5rem;">
+                    <option value="">Loading...</option>
+                </select>
+                <button id="btn-save-default-model" class="btn btn-primary" style="margin-left: 1rem;">保存 / Save</button>
+                <p class="info" style="margin-top: 0.5rem;">選択したモデルが単発実行・バッチ実行画面のデフォルトとして使用されます / Selected model will be used as default in single and batch execution screens</p>
+            </div>
+        </div>
+
+        <div class="section">
+            <h3>モデルパラメータ設定 / Model Parameters Configuration</h3>
+            <div class="settings-group">
+                <label>モデル選択 / Select Model:</label>
+                <select id="param-model-select" style="margin-left: 1rem; padding: 0.5rem;">
+                    <option value="">Loading...</option>
+                </select>
+            </div>
+            <div id="model-parameters-form" style="margin-top: 1rem; display: none;">
+                <div class="form-group">
+                    <label>Temperature (0-2):</label>
+                    <input type="number" id="param-temperature" min="0" max="2" step="0.1" value="0.7" style="width: 100px; margin-left: 1rem;">
+                    <span id="default-temperature" style="margin-left: 1rem; color: #7f8c8d; font-size: 0.9rem;"></span>
+                </div>
+                <div class="form-group">
+                    <label>Max Tokens:</label>
+                    <input type="number" id="param-max-tokens" min="100" max="32000" step="100" value="4000" style="width: 100px; margin-left: 1rem;">
+                    <span id="default-max-tokens" style="margin-left: 1rem; color: #7f8c8d; font-size: 0.9rem;"></span>
+                </div>
+                <div class="form-group">
+                    <label>Top P (0-1):</label>
+                    <input type="number" id="param-top-p" min="0" max="1" step="0.1" value="1.0" style="width: 100px; margin-left: 1rem;">
+                    <span id="default-top-p" style="margin-left: 1rem; color: #7f8c8d; font-size: 0.9rem;"></span>
+                </div>
+                <div style="margin-top: 1rem;">
+                    <button id="btn-save-model-params" class="btn btn-primary">パラメータ保存 / Save Parameters</button>
+                    <button id="btn-reset-model-params" class="btn btn-secondary" style="margin-left: 1rem;">デフォルトに戻す / Reset to Defaults</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h3>LLMモデル設定 / LLM Model Configuration</h3>
+            <div class="settings-group">
+                <label>利用可能なモデル / Available Models:</label>
+                <div id="available-models">
+                    <p class="loading">Loading...</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h3>API設定 / API Configuration</h3>
+            <div class="settings-group">
+                <p class="info">API設定は .env ファイルで管理されます / API settings are managed in .env file</p>
+                <ul>
+                    <li>AZURE_OPENAI_ENDPOINT</li>
+                    <li>AZURE_OPENAI_API_KEY</li>
+                    <li>OPENAI_API_KEY</li>
+                    <li>AZURE_OPENAI_GPT5_MINI_DEPLOYMENT_NAME (optional, defaults to AZURE_OPENAI_DEPLOYMENT_NAME)</li>
+                    <li>AZURE_OPENAI_GPT5_NANO_DEPLOYMENT_NAME (optional, defaults to AZURE_OPENAI_DEPLOYMENT_NAME)</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="section">
+            <h3>データベース / Database</h3>
+            <div class="settings-group">
+                <label>データベースパス / Database Path:</label>
+                <p id="db-path">database/app.db</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Datasets Tab -->
+    <div id="tab-datasets" class="tab-content">
+        <div class="section">
+            <h2>データセット管理 / Dataset Management</h2>
+            <button id="btn-import-dataset" class="btn btn-primary">データセットインポート / Import Dataset</button>
+        </div>
+
+        <div class="section">
+            <h3>データセット一覧 / Datasets</h3>
+            <div id="datasets-list">
+                <p class="loading">Loading...</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modals -->
+<div id="modal-overlay" class="modal-overlay">
+    <div id="modal-content" class="modal-content">
+        <!-- Dynamic modal content -->
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/app.js"></script>
+{% endblock %}
