@@ -45,11 +45,14 @@ class AzureGPT5NanoClient(LLMClient):
                 "and AZURE_OPENAI_GPT5_NANO_DEPLOYMENT_NAME (or AZURE_OPENAI_DEPLOYMENT_NAME) in .env file."
             )
 
-        # Initialize client
+        # Initialize client with timeout
+        # Long prompts can take time, so set generous timeout
         self.client = AzureOpenAI(
             azure_endpoint=self.endpoint,
             api_key=self.api_key,
-            api_version=self.api_version
+            api_version=self.api_version,
+            timeout=300.0,  # 5 minutes timeout for long prompts
+            max_retries=2
         )
 
     def call(self, prompt: str, **kwargs) -> LLMResponse:
@@ -94,8 +97,25 @@ class AzureGPT5NanoClient(LLMClient):
             # Calculate turnaround time
             turnaround_ms = int((time.time() - start_time) * 1000)
 
-            # Extract response text
+            # Extract response text with validation
             output_text = completion.choices[0].message.content
+
+            # Validate response is not None or empty
+            if output_text is None:
+                return LLMResponse(
+                    success=False,
+                    response_text=None,
+                    error_message="API returned None response. This may occur with very long prompts or API issues.",
+                    turnaround_ms=turnaround_ms
+                )
+
+            if not output_text.strip():
+                return LLMResponse(
+                    success=False,
+                    response_text=None,
+                    error_message="API returned empty response. This may occur with very long prompts or API issues.",
+                    turnaround_ms=turnaround_ms
+                )
 
             return LLMResponse(
                 success=True,
