@@ -54,5 +54,7 @@ if __name__ == "__main__":
         host=host,
         port=port,
         reload=False,  # Disabled to fix Windows module path issues
-        log_level="info"
+        log_level="info",
+        timeout_keep_alive=1000,  # 1000 seconds keep-alive for long requests
+        timeout_graceful_shutdown=30  # 30 seconds for graceful shutdown
     )

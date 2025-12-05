@@ -46,12 +46,12 @@ class AzureGPT5MiniClient(LLMClient):
             )
 
         # Initialize client with timeout
-        # Long prompts can take time, so set generous timeout
+        # Heavy processing can take up to 10 minutes, so set 15 minutes timeout
         self.client = AzureOpenAI(
             azure_endpoint=self.endpoint,
             api_key=self.api_key,
             api_version=self.api_version,
-            timeout=300.0,  # 5 minutes timeout for long prompts
+            timeout=900.0,  # 15 minutes timeout for heavy processing
             max_retries=2
         )
 
