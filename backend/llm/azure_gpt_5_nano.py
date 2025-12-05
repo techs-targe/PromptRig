@@ -75,7 +75,7 @@ class AzureGPT5NanoClient(LLMClient):
 
         try:
             # Get parameters with defaults
-            temperature = kwargs.get("temperature", 0.7)
+            # Note: GPT-5 has temperature fixed at 1.0 - attempting to set it will cause an error
             verbosity = kwargs.get("verbosity", "medium")
             reasoning_effort = kwargs.get("reasoning_effort", "medium")
             max_tokens = kwargs.get("max_tokens", 4096)
@@ -88,10 +88,10 @@ class AzureGPT5NanoClient(LLMClient):
 
             # Call Azure OpenAI GPT-5 API using chat.completions.create()
             # Reference: Azure OpenAI GPT-5 SDK documentation
+            # Note: Do NOT set temperature - it's fixed at 1.0 for GPT-5 models
             completion = self.client.chat.completions.create(
                 model=self.deployment_name,
                 messages=messages,
-                temperature=temperature,
                 verbosity=verbosity,
                 reasoning_effort=reasoning_effort,
                 max_completion_tokens=max_tokens,
@@ -129,14 +129,13 @@ class AzureGPT5NanoClient(LLMClient):
             Dictionary of default parameter values
 
         Note:
-            GPT-5 models support temperature, verbosity, and reasoning_effort.
-            - temperature: 0.0-2.0 (default: 0.7)
+            GPT-5 models have temperature FIXED at 1.0 (cannot be changed).
+            Supported parameters:
             - verbosity: "low", "medium", "high" (default: "medium")
             - reasoning_effort: "minimal", "low", "medium", "high" (default: "medium")
             - max_tokens: Maximum completion tokens (default: 4096)
         """
         return {
-            "temperature": 0.7,
             "verbosity": "medium",
             "reasoning_effort": "medium",
             "max_tokens": 4096
