@@ -78,12 +78,12 @@ class AzureGPT5NanoClient(LLMClient):
 
             # Call Azure OpenAI GPT-5 API using responses.create()
             # Reference: Azure AI Foundry sample code
+            # reasoning_effort values: minimal, low, medium, high
             response = self.client.responses.create(
                 model=self.deployment_name,
                 input=prompt,
-                text={"verbosity": verbosity}
-                # Note: reasoning_effort may not be supported in Azure OpenAI GPT-5
-                # Only verbosity is confirmed in the sample code
+                text={"verbosity": verbosity},
+                reasoning={"effort": reasoning_effort}
             )
 
             # Calculate turnaround time
