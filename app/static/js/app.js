@@ -7,6 +7,7 @@
 let currentConfig = null;
 let currentParameters = [];
 let selectedJobId = null;
+let selectedBatchJobId = null;
 let allProjects = [];
 let allDatasets = [];
 let currentProjectId = 1;
@@ -106,9 +107,15 @@ function setupEventListeners() {
     document.getElementById('single-project-select')?.addEventListener('change', onProjectChange);
     document.getElementById('btn-edit-prompt')?.addEventListener('click', showEditPromptModal);
     document.getElementById('btn-edit-parser')?.addEventListener('click', showEditParserModal);
-    document.getElementById('btn-reload-single-history')?.addEventListener('click', () => {
+    document.getElementById('btn-reload-single-history')?.addEventListener('click', async () => {
         const projectId = document.getElementById('single-project-select').value;
-        if (projectId) loadHistory(parseInt(projectId));
+        if (projectId) {
+            await loadHistory(parseInt(projectId));
+            // Re-select the previously selected job if any
+            if (selectedJobId) {
+                selectHistoryItem(selectedJobId);
+            }
+        }
     });
 
     // Batch execution
@@ -116,9 +123,15 @@ function setupEventListeners() {
     document.getElementById('batch-project-select')?.addEventListener('change', onBatchProjectChange);
     document.getElementById('btn-batch-edit-prompt')?.addEventListener('click', showBatchEditPromptModal);
     document.getElementById('btn-batch-edit-parser')?.addEventListener('click', showBatchEditParserModal);
-    document.getElementById('btn-reload-batch-history')?.addEventListener('click', () => {
+    document.getElementById('btn-reload-batch-history')?.addEventListener('click', async () => {
         const projectId = document.getElementById('batch-project-select').value;
-        if (projectId) loadBatchJobHistory(parseInt(projectId));
+        if (projectId) {
+            await loadBatchJobHistory(parseInt(projectId));
+            // Re-select the previously selected batch job if any
+            if (selectedBatchJobId) {
+                selectBatchJob(selectedBatchJobId);
+            }
+        }
     });
 
     // Projects
@@ -1139,6 +1152,9 @@ function renderBatchHistory(jobs) {
 
 async function selectBatchJob(jobId) {
     try {
+        // Save selected job ID for refresh functionality
+        selectedBatchJobId = jobId;
+
         // Find job in current batch jobs list
         const job = currentBatchJobs.find(j => j.id === jobId);
 

@@ -380,6 +380,7 @@ def get_project_jobs(project_id: int, limit: int = 50, db: Session = Depends(get
             finished_at=job.finished_at,
             turnaround_ms=job.turnaround_ms,
             merged_csv_output=job.merged_csv_output,
+            model_name=job.model_name,
             items=items
         ))
 
