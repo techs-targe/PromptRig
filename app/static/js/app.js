@@ -1284,9 +1284,24 @@ async function updateProjectSelects() {
 
     if (batchSelect) {
         batchSelect.innerHTML = options;
-        // Auto-load datasets for first project on batch tab
-        if (batchSelect.value) {
-            await loadDatasetsForProject(parseInt(batchSelect.value));
+        // Set default project if configured
+        try {
+            const response = await fetch('/api/settings/default-project');
+            const data = await response.json();
+            if (data.project_id) {
+                batchSelect.value = data.project_id;
+                // Load datasets for default project
+                await loadDatasetsForProject(data.project_id);
+            } else if (batchSelect.value) {
+                // Auto-load datasets for first project on batch tab if no default
+                await loadDatasetsForProject(parseInt(batchSelect.value));
+            }
+        } catch (error) {
+            console.error('Failed to load default project for batch:', error);
+            // Fallback to first project
+            if (batchSelect.value) {
+                await loadDatasetsForProject(parseInt(batchSelect.value));
+            }
         }
     }
 
