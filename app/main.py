@@ -4,7 +4,15 @@ Based on specification in docs/req.txt section 3.1 (構成要素)
 """
 
 import sys
+import logging
 from pathlib import Path
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 # Add project root to Python path for module imports
 # This ensures modules can be imported correctly on all platforms (Windows/Linux/macOS)

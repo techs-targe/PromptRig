@@ -160,7 +160,11 @@ class JobManager:
 
         # Merge CSV outputs for batch jobs and repeated single executions (Phase 2)
         if job.job_type == "batch" or (job.job_type == "single" and len(job_items) > 1):
-            merged_csv = self._merge_csv_outputs(job_items, include_csv_header)
+            # Expire session cache to ensure we get fresh data from database
+            self.db.expire_all()
+            # Re-fetch job items to get updated status and parsed_response after execution
+            job_items_for_csv = self.db.query(JobItem).filter(JobItem.job_id == job_id).all()
+            merged_csv = self._merge_csv_outputs(job_items_for_csv, include_csv_header)
             job.merged_csv_output = merged_csv
 
         # Calculate actual wall-clock time for job execution
