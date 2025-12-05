@@ -367,12 +367,18 @@ class JobManager:
             Merged CSV string with newline-separated rows
 
         Specification: Phase 2 batch CSV merge feature
+        Phase 3: Enhanced for parallel execution - maintains order by item ID
         """
         csv_lines = []
-        header_line = None
+        header_added = False
 
-        for idx, item in enumerate(job_items):
-            if not item.parsed_response:
+        # Sort job_items by ID to ensure consistent order, especially for parallel execution
+        # This guarantees that CSV rows appear in the same order as they were created
+        sorted_items = sorted(job_items, key=lambda x: x.id)
+
+        for item in sorted_items:
+            # Skip items that are not successfully completed
+            if item.status != "done" or not item.parsed_response:
                 continue
 
             try:
@@ -382,17 +388,14 @@ class JobManager:
                 if not csv_output:
                     continue
 
-                # For first item, extract potential header
-                if idx == 0 and include_csv_header:
-                    # Check if parser config has csv_template
-                    # The csv_output should be the data line
-                    # We need to generate header from field names
+                # Add header from first successful item (only once)
+                if not header_added and include_csv_header:
                     fields = parsed.get("fields", {})
                     if fields:
-                        # Generate header from field names in order they appear in csv_template
-                        # For now, use field names directly as header
+                        # Generate header from field names in order
                         header_line = ",".join(fields.keys())
                         csv_lines.append(header_line)
+                        header_added = True
 
                 # Add data line
                 csv_lines.append(csv_output)
