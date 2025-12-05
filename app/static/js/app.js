@@ -240,10 +240,20 @@ function renderParameterInputs() {
         let input;
         if (param.html_type === 'textarea') {
             input = document.createElement('textarea');
-            input.rows = param.rows;
+            input.rows = param.rows || 5;  // Default to 5 rows
         } else {
             input = document.createElement('input');
             input.type = param.html_type;
+
+            // Set accept attribute for file inputs
+            if (param.accept) {
+                input.accept = param.accept;
+            }
+
+            // Set placeholder for text inputs
+            if (param.placeholder) {
+                input.placeholder = param.placeholder;
+            }
         }
 
         input.id = `param-${param.name}`;
@@ -519,15 +529,37 @@ async function executePrompt(repeat) {
     const inputParams = {};
     let valid = true;
 
-    currentParameters.forEach(param => {
+    // Process parameters (including FILE type)
+    for (const param of currentParameters) {
         const input = document.getElementById(`param-${param.name}`);
-        if (!input || !input.value.trim()) {
-            valid = false;
-            showStatus(`パラメータ "${param.name}" を入力してください`, 'error');
+
+        if (param.html_type === 'file') {
+            // Handle FILE type - convert to Base64
+            if (!input || !input.files || input.files.length === 0) {
+                valid = false;
+                showStatus(`ファイル "${param.name}" を選択してください`, 'error');
+                break;
+            }
+
+            try {
+                const file = input.files[0];
+                const base64 = await fileToBase64(file);
+                inputParams[param.name] = base64;
+            } catch (error) {
+                valid = false;
+                showStatus(`ファイル "${param.name}" の読み込みに失敗しました: ${error.message}`, 'error');
+                break;
+            }
         } else {
+            // Handle other types (text, number, date, etc.)
+            if (!input || !input.value.trim()) {
+                valid = false;
+                showStatus(`パラメータ "${param.name}" を入力してください`, 'error');
+                break;
+            }
             inputParams[param.name] = input.value;
         }
-    });
+    }
 
     if (!valid) return;
 
@@ -654,6 +686,29 @@ function setExecutionState(executing) {
     const btnRepeat = document.getElementById('btn-send-repeat');
     if (btnOnce) btnOnce.disabled = executing;
     if (btnRepeat) btnRepeat.disabled = executing;
+}
+
+/**
+ * Convert File object to Base64 string with data URL format
+ * @param {File} file - The file to convert
+ * @returns {Promise<string>} - Base64 encoded data URL (e.g., "data:image/jpeg;base64,...")
+ */
+function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+
+        reader.onload = () => {
+            // reader.result contains the data URL (data:image/jpeg;base64,...)
+            resolve(reader.result);
+        };
+
+        reader.onerror = () => {
+            reject(new Error('Failed to read file'));
+        };
+
+        // Read file as data URL (includes Base64 encoding)
+        reader.readAsDataURL(file);
+    });
 }
 
 function showStatus(message, type) {
