@@ -568,7 +568,16 @@ function showStatus(message, type) {
 }
 
 async function onProjectChange(e) {
-    currentProjectId = parseInt(e.target.value);
+    // Handle both event-triggered and manual calls
+    if (e && e.target) {
+        currentProjectId = parseInt(e.target.value);
+    } else {
+        // Manual call - get from dropdown
+        const singleSelect = document.getElementById('single-project-select');
+        if (singleSelect) {
+            currentProjectId = parseInt(singleSelect.value);
+        }
+    }
     await loadConfig();
 }
 
