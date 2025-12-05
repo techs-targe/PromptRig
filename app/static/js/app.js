@@ -735,7 +735,10 @@ async function showEditParserModal() {
         const parserJson = JSON.stringify(parserConfig, null, 2);
 
         const modalContent = `
-            <div class="modal-header">パーサー設定編集 / Edit Parser Configuration</div>
+            <div class="modal-header">
+                パーサー設定編集 / Edit Parser Configuration
+                <button onclick="showParserHelp()" style="background: none; border: none; cursor: pointer; font-size: 1.2rem; margin-left: 10px;" title="ヘルプを表示 / Show Help">❓</button>
+            </div>
             <div class="modal-body">
                 <div class="form-group">
                     <label>プロジェクト / Project: ${project.name}</label>
@@ -973,7 +976,10 @@ async function showBatchEditParserModal() {
         const parserJson = JSON.stringify(parserConfig, null, 2);
 
         const modalContent = `
-            <div class="modal-header">パーサー設定編集 / Edit Parser Configuration</div>
+            <div class="modal-header">
+                パーサー設定編集 / Edit Parser Configuration
+                <button onclick="showParserHelp()" style="background: none; border: none; cursor: pointer; font-size: 1.2rem; margin-left: 10px;" title="ヘルプを表示 / Show Help">❓</button>
+            </div>
             <div class="modal-body">
                 <div class="form-group">
                     <label>プロジェクト / Project: ${project.name}</label>
@@ -1028,7 +1034,7 @@ async function saveBatchParserRevision(projectId) {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                parser_config: parserConfig
+                parser_config: JSON.stringify(parserConfig)
             })
         });
 
@@ -1066,7 +1072,7 @@ async function rebuildBatchParserRevision(projectId) {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                parser_config: parserConfig
+                parser_config: JSON.stringify(parserConfig)
             })
         });
 
@@ -1790,6 +1796,127 @@ function closeModal() {
     if (modal) {
         modal.classList.remove('show');
     }
+}
+
+function showParserHelp() {
+    const helpContent = `
+        <div class="modal-header">
+            パーサー設定ヘルプ / Parser Configuration Help
+        </div>
+        <div class="modal-body" style="max-height: 70vh; overflow-y: auto;">
+            <h3 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 0.5rem;">📖 パーサー設定の概要 / Parser Configuration Overview</h3>
+            <p style="margin: 1rem 0;">
+                パーサーは、LLMからの生レスポンスを構造化されたデータに変換するための機能です。<br>
+                特にCSV形式での出力を行う場合、パーサー設定が必須です。
+            </p>
+            <p style="margin: 1rem 0; font-style: italic; color: #7f8c8d;">
+                The parser converts raw LLM responses into structured data.<br>
+                Parser configuration is required for CSV output functionality.
+            </p>
+
+            <h3 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 0.5rem; margin-top: 2rem;">🔧 パーサータイプ / Parser Types</h3>
+
+            <h4 style="color: #27ae60; margin-top: 1rem;">1. JSON Path パーサー (推奨 / Recommended)</h4>
+            <p><strong>用途:</strong> LLMがJSON形式でレスポンスを返す場合</p>
+            <pre style="background: #f8f9fa; padding: 1rem; border-radius: 4px; overflow-x: auto;"><code>{
+  "type": "json_path",
+  "paths": {
+    "answer": "$.answer",
+    "confidence": "$.confidence",
+    "category": "$.category"
+  },
+  "csv_template": "$answer$,$confidence$,$category$"
+}</code></pre>
+            <ul style="margin: 0.5rem 0 1rem 2rem;">
+                <li><code>paths</code>: 抽出するフィールド名とJSONパス</li>
+                <li><code>csv_template</code>: CSV行の形式（$フィールド名$で置換）</li>
+            </ul>
+
+            <h4 style="color: #27ae60; margin-top: 1rem;">2. Regex パーサー</h4>
+            <p><strong>用途:</strong> LLMがテキスト形式でレスポンスを返す場合</p>
+            <pre style="background: #f8f9fa; padding: 1rem; border-radius: 4px; overflow-x: auto;"><code>{
+  "type": "regex",
+  "patterns": {
+    "answer": "Answer: (.+)",
+    "score": "Score: (\\\\d+)"
+  },
+  "csv_template": "$answer$,$score$"
+}</code></pre>
+            <ul style="margin: 0.5rem 0 1rem 2rem;">
+                <li><code>patterns</code>: 抽出するフィールド名と正規表現パターン</li>
+                <li>正規表現のグループ ( ) でキャプチャした部分が値になります</li>
+            </ul>
+
+            <h3 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 0.5rem; margin-top: 2rem;">📊 CSV出力設定 / CSV Output Configuration</h3>
+            <p style="margin: 1rem 0;">
+                <strong>csv_template</strong>を設定すると、バッチ実行時に全ての結果が自動的にCSV形式に結合されます。
+            </p>
+            <ul style="margin: 0.5rem 0 1rem 2rem;">
+                <li><code>$フィールド名$</code>の形式でフィールドを参照</li>
+                <li>カンマ区切りで複数フィールドを指定</li>
+                <li>例: <code>"$name$,$age$,$city$"</code> → <code>John,30,Tokyo</code></li>
+            </ul>
+            <div style="background: #e8f8f5; border-left: 4px solid #27ae60; padding: 1rem; margin: 1rem 0;">
+                <strong>💡 ヒント:</strong> バッチ実行時に「CSVヘッダを１行目のみに含める」にチェックを入れると、<br>
+                1行目にフィールド名のヘッダーが自動的に追加されます。
+            </div>
+
+            <h3 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 0.5rem; margin-top: 2rem;">🤖 LLMにパーサー構文を作成してもらう方法 / Using LLM to Generate Parser Config</h3>
+            <p style="margin: 1rem 0;">プロンプトテンプレートに以下のような指示を追加すると、LLMが自動的にパース可能な形式で返答します：</p>
+
+            <h4 style="color: #27ae60; margin-top: 1rem;">JSON形式の場合:</h4>
+            <pre style="background: #f8f9fa; padding: 1rem; border-radius: 4px; overflow-x: auto;"><code>以下の質問に対して、必ず以下のJSON形式で回答してください：
+
+{
+  "answer": "あなたの回答",
+  "confidence": "信頼度（0-1）",
+  "category": "カテゴリ"
+}
+
+質問: {{question}}</code></pre>
+
+            <h4 style="color: #27ae60; margin-top: 1rem;">テキスト形式の場合:</h4>
+            <pre style="background: #f8f9fa; padding: 1rem; border-radius: 4px; overflow-x: auto;"><code>以下の質問に対して、必ず以下の形式で回答してください：
+
+Answer: [あなたの回答]
+Score: [スコア（0-100）]
+
+質問: {{question}}</code></pre>
+
+            <h3 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 0.5rem; margin-top: 2rem;">✨ 完全な設定例 / Complete Configuration Example</h3>
+            <pre style="background: #f8f9fa; padding: 1rem; border-radius: 4px; overflow-x: auto;"><code>{
+  "type": "json_path",
+  "paths": {
+    "product_name": "$.product_name",
+    "price": "$.price",
+    "rating": "$.rating",
+    "in_stock": "$.in_stock"
+  },
+  "csv_template": "$product_name$,$price$,$rating$,$in_stock$"
+}</code></pre>
+            <p style="margin: 1rem 0;">
+                この設定により、バッチ実行で10件のデータを処理すると、<br>
+                以下のような結合されたCSVが自動生成されます：
+            </p>
+            <pre style="background: #f8f9fa; padding: 1rem; border-radius: 4px; overflow-x: auto;"><code>product_name,price,rating,in_stock
+Product A,1000,4.5,true
+Product B,2000,4.2,false
+...（全10行）</code></pre>
+
+            <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 1rem; margin: 1rem 0;">
+                <strong>⚠️ 注意:</strong>
+                <ul style="margin: 0.5rem 0 0 1rem;">
+                    <li>フィールド名は<code>paths</code>と<code>csv_template</code>で一致させてください</li>
+                    <li>JSON Pathは<code>$.</code>で始まります（例: <code>$.answer</code>）</li>
+                    <li>CSV出力を使用する場合、<code>csv_template</code>は必須です</li>
+                </ul>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-primary" onclick="closeModal()">閉じる / Close</button>
+        </div>
+    `;
+    showModal(helpContent);
 }
 
 // ========== SETTINGS MANAGEMENT ==========
