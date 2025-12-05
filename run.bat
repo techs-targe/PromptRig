@@ -23,10 +23,9 @@ echo Press Ctrl+C to stop
 echo ============================================================
 echo.
 
-REM Set PYTHONPATH to include project root for module imports
-set PYTHONPATH=%~dp0
-
-REM Use python -m to ensure correct module path resolution
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 9200
+REM Use python main.py instead of uvicorn directly
+REM This ensures sys.path is set correctly before any imports
+REM and avoids reload subprocess issues on Windows
+python main.py
 
 pause
