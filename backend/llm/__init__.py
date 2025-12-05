@@ -2,6 +2,8 @@
 
 from .base import LLMClient, LLMResponse
 from .azure_gpt_4_1 import AzureGPT41Client
+from .azure_gpt_4o import AzureGPT4oClient
+from .azure_gpt_4o_mini import AzureGPT4oMiniClient
 from .azure_gpt_5_mini import AzureGPT5MiniClient
 from .azure_gpt_5_nano import AzureGPT5NanoClient
 from .openai_gpt_4_nano import OpenAIGPT4NanoClient
@@ -12,6 +14,8 @@ __all__ = [
     "LLMClient",
     "LLMResponse",
     "AzureGPT41Client",
+    "AzureGPT4oClient",
+    "AzureGPT4oMiniClient",
     "AzureGPT5MiniClient",
     "AzureGPT5NanoClient",
     "OpenAIGPT4NanoClient",
