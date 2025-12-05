@@ -49,10 +49,11 @@ class AzureGPT5MiniClient(LLMClient):
         # Heavy processing can take up to 10 minutes, so set 15 minutes timeout
         # Use Timeout object for granular control over different timeout types
         timeout_config = Timeout(
-            total=900.0,   # 15 minutes total timeout
+            900.0,         # Default timeout (15 minutes)
             connect=60.0,  # 60 seconds to establish connection
             read=900.0,    # 15 minutes to read response (important for long processing)
-            write=60.0     # 60 seconds to write request
+            write=60.0,    # 60 seconds to write request
+            pool=60.0      # 60 seconds for pool timeout
         )
 
         self.client = AzureOpenAI(
