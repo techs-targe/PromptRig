@@ -6,7 +6,7 @@ Phase 2 implementation.
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union, Any
 from pydantic import BaseModel
 import json
 
@@ -99,13 +99,17 @@ class ModelInfo(BaseModel):
     """Model information response model."""
     name: str
     display_name: str
-    default_parameters: Dict[str, float]
+    default_parameters: Dict[str, Union[float, int, str]]
 
 
 class ModelParametersUpdate(BaseModel):
-    """Request to update model parameters."""
+    """Request to update model parameters.
+
+    Parameters can be float (temperature, max_tokens, top_p) or
+    string (verbosity, reasoning_effort for GPT-5 models).
+    """
     model_name: str
-    parameters: Dict[str, float]
+    parameters: Dict[str, Union[float, int, str]]
 
 
 @router.get("/api/settings/models/available")

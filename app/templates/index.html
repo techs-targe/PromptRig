@@ -204,6 +204,23 @@
                     <input type="number" id="param-top-p" min="0" max="1" step="0.1" value="1.0" style="width: 100px; margin-left: 1rem;">
                     <span id="default-top-p" style="margin-left: 1rem; color: #7f8c8d; font-size: 0.9rem;"></span>
                 </div>
+                <div class="form-group" id="param-verbosity-group" style="display: none;">
+                    <label>Verbosity (GPT-5):</label>
+                    <select id="param-verbosity" style="width: 150px; margin-left: 1rem;">
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">High</option>
+                    </select>
+                    <span id="default-verbosity" style="margin-left: 1rem; color: #7f8c8d; font-size: 0.9rem;"></span>
+                </div>
+                <div class="form-group" id="param-reasoning-effort-group" style="display: none;">
+                    <label>Reasoning Effort (GPT-5):</label>
+                    <select id="param-reasoning-effort" style="width: 150px; margin-left: 1rem;">
+                        <option value="minimal">Minimal</option>
+                        <option value="medium">Medium</option>
+                    </select>
+                    <span id="default-reasoning-effort" style="margin-left: 1rem; color: #7f8c8d; font-size: 0.9rem;"></span>
+                </div>
                 <div style="margin-top: 1rem;">
                     <button id="btn-save-model-params" class="btn btn-primary">パラメータ保存 / Save Parameters</button>
                     <button id="btn-reset-model-params" class="btn btn-secondary" style="margin-left: 1rem;">デフォルトに戻す / Reset to Defaults</button>

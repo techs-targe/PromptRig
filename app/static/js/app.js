@@ -1679,6 +1679,14 @@ function populateModelSelects() {
             </ul>
         `;
     }
+
+    // Auto-select first model in param-model-select and load its parameters
+    const paramSelect = document.getElementById('param-model-select');
+    if (paramSelect && availableModelsData.length > 0) {
+        paramSelect.value = availableModelsData[0].name;
+        // Trigger load parameters for the first model
+        loadModelParameters();
+    }
 }
 
 async function saveDefaultModel() {
@@ -1726,6 +1734,25 @@ async function loadModelParameters() {
         document.getElementById('default-max-tokens').textContent = `(デフォルト / Default: ${defaults.max_tokens})`;
         document.getElementById('default-top-p').textContent = `(デフォルト / Default: ${defaults.top_p})`;
 
+        // GPT-5 specific parameters
+        const isGPT5 = modelName.includes('gpt-5') || modelName.includes('gpt5');
+        const verbosityGroup = document.getElementById('param-verbosity-group');
+        const reasoningEffortGroup = document.getElementById('param-reasoning-effort-group');
+
+        if (isGPT5 && active.verbosity !== undefined) {
+            verbosityGroup.style.display = 'block';
+            reasoningEffortGroup.style.display = 'block';
+
+            document.getElementById('param-verbosity').value = active.verbosity;
+            document.getElementById('param-reasoning-effort').value = active.reasoning_effort;
+
+            document.getElementById('default-verbosity').textContent = `(デフォルト / Default: ${defaults.verbosity})`;
+            document.getElementById('default-reasoning-effort').textContent = `(デフォルト / Default: ${defaults.reasoning_effort})`;
+        } else {
+            verbosityGroup.style.display = 'none';
+            reasoningEffortGroup.style.display = 'none';
+        }
+
     } catch (error) {
         alert(`エラー / Error: ${error.message}`);
     }
@@ -1738,6 +1765,13 @@ async function saveModelParameters() {
         max_tokens: parseInt(document.getElementById('param-max-tokens').value),
         top_p: parseFloat(document.getElementById('param-top-p').value)
     };
+
+    // Add GPT-5 specific parameters if applicable
+    const isGPT5 = modelName.includes('gpt-5') || modelName.includes('gpt5');
+    if (isGPT5) {
+        parameters.verbosity = document.getElementById('param-verbosity').value;
+        parameters.reasoning_effort = document.getElementById('param-reasoning-effort').value;
+    }
 
     try {
         const response = await fetch(`/api/settings/models/${modelName}/parameters`, {

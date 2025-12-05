@@ -60,6 +60,8 @@ class AzureGPT5MiniClient(LLMClient):
                 - temperature (float): Default 0.5
                 - max_tokens (int): Default 8000
                 - top_p (float): Default 1.0
+                - verbosity (str): Default "medium" - Controls output expansiveness ("low", "medium", "high")
+                - reasoning_effort (str): Default "medium" - Controls reasoning tokens ("minimal", "medium")
 
         Returns:
             LLMResponse with result or error
@@ -71,17 +73,22 @@ class AzureGPT5MiniClient(LLMClient):
             temperature = kwargs.get("temperature", 0.5)
             max_tokens = kwargs.get("max_tokens", 8000)
             top_p = kwargs.get("top_p", 1.0)
+            verbosity = kwargs.get("verbosity", "medium")
+            reasoning_effort = kwargs.get("reasoning_effort", "medium")
+
+            # Build API call parameters
+            api_params = {
+                "model": self.deployment_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "top_p": top_p,
+                "verbosity": verbosity,
+                "reasoning_effort": reasoning_effort
+            }
 
             # Call Azure OpenAI API
-            response = self.client.chat.completions.create(
-                model=self.deployment_name,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=temperature,
-                max_tokens=max_tokens,
-                top_p=top_p
-            )
+            response = self.client.chat.completions.create(**api_params)
 
             # Calculate turnaround time
             turnaround_ms = int((time.time() - start_time) * 1000)
@@ -115,7 +122,9 @@ class AzureGPT5MiniClient(LLMClient):
         return {
             "temperature": 0.5,
             "max_tokens": 8000,
-            "top_p": 1.0
+            "top_p": 1.0,
+            "verbosity": "medium",
+            "reasoning_effort": "medium"
         }
 
     def get_model_name(self) -> str:
