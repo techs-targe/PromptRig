@@ -3,17 +3,35 @@
 Based on specification in docs/req.txt section 3.2, 3.3, 4.2.3, 4.3
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Dict, Any
 
-from backend.database import get_db, ProjectRevision, JobItem
+from backend.database import get_db, ProjectRevision, JobItem, SessionLocal
 from backend.job import JobManager
 from app.schemas.requests import RunSingleRequest
 from app.schemas.responses import RunSingleResponse, JobResponse, JobItemResponse
 
 router = APIRouter()
+
+
+def execute_job_background(job_id: int, model_name: str, include_csv_header: bool, temperature: float):
+    """Execute job in background task.
+
+    Creates new database session for background execution.
+    """
+    db = SessionLocal()
+    try:
+        job_manager = JobManager(db)
+        job_manager.execute_job(
+            job_id=job_id,
+            model_name=model_name,
+            include_csv_header=include_csv_header,
+            temperature=temperature
+        )
+    finally:
+        db.close()
 
 
 class RunBatchRequest(BaseModel):
@@ -28,13 +46,13 @@ class RunBatchRequest(BaseModel):
 
 
 @router.post("/api/run/single", response_model=RunSingleResponse)
-def run_single(request: RunSingleRequest, db: Session = Depends(get_db)):
+def run_single(request: RunSingleRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Execute single/repeated prompt execution.
 
     Phase 2 update:
     - Supports multiple projects via project_id in request
     - Uses latest revision for specified project
-    - Executes synchronously
+    - Executes asynchronously in background
     - Repeat count limited to 1-10
 
     Specification: docs/req.txt section 3.2 (通信フロー step 4-6), 4.2.3
@@ -54,7 +72,7 @@ def run_single(request: RunSingleRequest, db: Session = Depends(get_db)):
         # Create job manager
         job_manager = JobManager(db)
 
-        # Create job with job items
+        # Create job with job items (but don't execute yet)
         job = job_manager.create_single_job(
             project_revision_id=revision.id,
             input_params=request.input_params,
@@ -62,15 +80,16 @@ def run_single(request: RunSingleRequest, db: Session = Depends(get_db)):
             model_name=request.model_name
         )
 
-        # Execute job
-        job = job_manager.execute_job(
-            job_id=job.id,
-            model_name=request.model_name,
-            include_csv_header=request.include_csv_header,
-            temperature=request.temperature
+        # Start execution in background
+        background_tasks.add_task(
+            execute_job_background,
+            job.id,
+            request.model_name,
+            request.include_csv_header,
+            request.temperature
         )
 
-        # Load job items for response
+        # Load job items for immediate response (will be in pending state)
         job_items = db.query(JobItem).filter(JobItem.job_id == job.id).all()
         items = [
             JobItemResponse(
@@ -104,7 +123,7 @@ def run_single(request: RunSingleRequest, db: Session = Depends(get_db)):
             success=True,
             job_id=job.id,
             job=job_response,
-            message=f"Successfully executed {len(items)} item(s)"
+            message=f"Job started with {len(items)} item(s)"
         )
 
     except ValueError as e:
@@ -123,10 +142,10 @@ class RunBatchRequestWithHeader(BaseModel):
 
 
 @router.post("/api/run/batch", response_model=RunSingleResponse)
-def run_batch(request: RunBatchRequestWithHeader, db: Session = Depends(get_db)):
+def run_batch(request: RunBatchRequestWithHeader, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Execute batch job from dataset.
 
-    Phase 2 implementation: Creates batch job and executes synchronously
+    Phase 2 implementation: Creates batch job and executes asynchronously
 
     Specification: docs/req.txt section 3.3 (バッチ実行通信フロー), 4.3.2
     """
@@ -145,22 +164,23 @@ def run_batch(request: RunBatchRequestWithHeader, db: Session = Depends(get_db))
         # Create job manager
         job_manager = JobManager(db)
 
-        # Create batch job
+        # Create batch job (but don't execute yet)
         job = job_manager.create_batch_job(
             project_revision_id=revision.id,
             dataset_id=request.dataset_id,
             model_name=request.model_name
         )
 
-        # Execute job with CSV header option
-        job = job_manager.execute_job(
-            job_id=job.id,
-            model_name=request.model_name,
-            include_csv_header=request.include_csv_header,
-            temperature=request.temperature
+        # Start execution in background
+        background_tasks.add_task(
+            execute_job_background,
+            job.id,
+            request.model_name,
+            request.include_csv_header,
+            request.temperature
         )
 
-        # Load job items for response
+        # Load job items for immediate response (will be in pending state)
         job_items = db.query(JobItem).filter(JobItem.job_id == job.id).all()
         items = [
             JobItemResponse(
@@ -194,7 +214,7 @@ def run_batch(request: RunBatchRequestWithHeader, db: Session = Depends(get_db))
             success=True,
             job_id=job.id,
             job=job_response,
-            message=f"Batch job executed: {len([i for i in items if i.status=='done'])} completed, {len([i for i in items if i.status=='error'])} errors"
+            message=f"Batch job started with {len(items)} item(s)"
         )
 
     except ValueError as e:

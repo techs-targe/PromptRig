@@ -570,19 +570,83 @@ async function executePrompt(repeat) {
         currentSingleJobId = result.job_id;
 
         if (result.success) {
-            showStatus(`実行成功！ ${result.message}`, 'success');
+            showStatus(`ジョブ開始！ ${result.message}`, 'info');
             displayJobResults(result.job);
-            await loadConfig();
-            selectHistoryItem(result.job_id);
+
+            // Restore execution state (but keep stop button visible)
+            setExecutionState(false);
+
+            // Start polling for job progress
+            pollSingleJobProgress(result.job_id, currentProjectId);
         }
     } catch (error) {
         showStatus(`エラー / Error: ${error.message}`, 'error');
-    } finally {
         setExecutionState(false);
-        // Hide stop button
+        // Hide stop button on error
         document.getElementById('btn-stop-single').style.display = 'none';
         currentSingleJobId = null;
     }
+}
+
+// Poll single job progress until completion
+let singlePollIntervalId = null;
+
+async function pollSingleJobProgress(jobId, projectId) {
+    // Clear any existing polling interval
+    if (singlePollIntervalId) {
+        clearInterval(singlePollIntervalId);
+    }
+
+    // Poll every 3 seconds
+    singlePollIntervalId = setInterval(async () => {
+        try {
+            // Fetch updated job data
+            const response = await fetch(`/api/projects/${projectId}/jobs`);
+            const allJobs = await response.json();
+            const job = allJobs.find(j => j.id === jobId);
+
+            if (!job) {
+                // Job not found, stop polling
+                clearInterval(singlePollIntervalId);
+                singlePollIntervalId = null;
+                hideSingleStopButton();
+                return;
+            }
+
+            // Update display with latest job data
+            displayJobResults(job);
+
+            // Check if job is complete
+            const isComplete = job.status === 'done' || job.status === 'error';
+            const allItemsComplete = job.items && job.items.every(item =>
+                item.status === 'done' || item.status === 'error' || item.status === 'cancelled'
+            );
+
+            if (isComplete || allItemsComplete) {
+                // Job finished, stop polling
+                clearInterval(singlePollIntervalId);
+                singlePollIntervalId = null;
+                hideSingleStopButton();
+
+                // Show completion status
+                const completedCount = job.items.filter(i => i.status === 'done').length;
+                const errorCount = job.items.filter(i => i.status === 'error').length;
+                showStatus(`実行完了！ ${completedCount} 成功, ${errorCount} エラー`, 'success');
+
+                // Reload history to show final status
+                await loadConfig();
+                selectHistoryItem(jobId);
+            }
+        } catch (error) {
+            console.error('Error polling single job:', error);
+            // Continue polling on error (network issue might be temporary)
+        }
+    }, 3000); // Poll every 3 seconds
+}
+
+function hideSingleStopButton() {
+    document.getElementById('btn-stop-single').style.display = 'none';
+    currentSingleJobId = null;
 }
 
 function setExecutionState(executing) {
@@ -2243,8 +2307,14 @@ async function cancelJob(jobId, buttonId, statusId) {
 }
 
 async function cancelSingleJob() {
+    // Stop polling first
+    if (singlePollIntervalId) {
+        clearInterval(singlePollIntervalId);
+        singlePollIntervalId = null;
+    }
+
     await cancelJob(currentSingleJobId, 'btn-stop-single', 'execution-status');
-    currentSingleJobId = null;
+    hideSingleStopButton();
 }
 
 async function cancelBatchJob() {
