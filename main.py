@@ -44,10 +44,12 @@ if __name__ == "__main__":
     print("=" * 60)
 
     # Start uvicorn server
+    # Note: reload=False is required on Windows to avoid module import issues
+    # Set reload=True only if you need auto-reload during development
     uvicorn.run(
         "app.main:app",
         host=host,
         port=port,
-        reload=True,  # Enable auto-reload during development
+        reload=False,  # Disabled to fix Windows module path issues
         log_level="info"
     )
