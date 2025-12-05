@@ -2313,8 +2313,29 @@ async function cancelSingleJob() {
         singlePollIntervalId = null;
     }
 
+    const jobId = currentSingleJobId;
     await cancelJob(currentSingleJobId, 'btn-stop-single', 'execution-status');
     hideSingleStopButton();
+
+    // Reload job state and history after cancellation
+    if (jobId && currentProjectId) {
+        try {
+            // Fetch updated job data
+            const response = await fetch(`/api/projects/${currentProjectId}/jobs`);
+            const allJobs = await response.json();
+            const job = allJobs.find(j => j.id === jobId);
+
+            if (job) {
+                // Display final job state
+                displayJobResults(job);
+            }
+
+            // Reload history
+            await loadConfig();
+        } catch (error) {
+            console.error('Error reloading job after cancel:', error);
+        }
+    }
 }
 
 async function cancelBatchJob() {
@@ -2324,6 +2345,29 @@ async function cancelBatchJob() {
         batchPollIntervalId = null;
     }
 
+    const jobId = currentBatchJobId;
+    const projectId = document.getElementById('batch-project-select')?.value;
+
     await cancelJob(currentBatchJobId, 'btn-stop-batch', 'batch-results-area');
     hideBatchStopButton();
+
+    // Reload job state and history after cancellation
+    if (jobId && projectId) {
+        try {
+            // Fetch updated job data
+            const response = await fetch(`/api/projects/${projectId}/jobs`);
+            const allJobs = await response.json();
+            const job = allJobs.find(j => j.id === parseInt(jobId));
+
+            if (job) {
+                // Display final job state
+                displayBatchResult(job);
+            }
+
+            // Reload batch job history
+            await loadBatchJobHistory(parseInt(projectId));
+        } catch (error) {
+            console.error('Error reloading job after cancel:', error);
+        }
+    }
 }
