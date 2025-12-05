@@ -708,7 +708,9 @@ async function showEditPromptModal() {
                         • TEXT10 (10行テキストエリア / 10-line textarea)<br>
                         • NUM (数値入力 / Number input)<br>
                         • DATE (日付選択 / Date picker)<br>
-                        • DATETIME (日時選択 / DateTime picker)
+                        • DATETIME (日時選択 / DateTime picker)<br>
+                        • <strong>FILE</strong> (画像アップロード / Image upload) - Vision API対応<br>
+                        • <strong>FILEPATH</strong> (サーバーパス / Server file path) - バッチ処理用
                     </small>
                 </div>
             </div>
@@ -948,7 +950,9 @@ async function showBatchEditPromptModal() {
                         • TEXT10 (10行テキストエリア / 10-line textarea)<br>
                         • NUM (数値入力 / Number input)<br>
                         • DATE (日付選択 / Date picker)<br>
-                        • DATETIME (日時選択 / DateTime picker)
+                        • DATETIME (日時選択 / DateTime picker)<br>
+                        • <strong>FILE</strong> (画像アップロード / Image upload) - Vision API対応<br>
+                        • <strong>FILEPATH</strong> (サーバーパス / Server file path) - バッチ処理用
                     </small>
                 </div>
             </div>
