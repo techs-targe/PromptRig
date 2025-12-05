@@ -57,13 +57,16 @@ class AzureGPT5MiniClient(LLMClient):
 
         Args:
             prompt: The prompt text to send
-            **kwargs: Optional parameters (Note: GPT-5 has fixed parameters)
+            **kwargs: Optional parameters
+                - temperature (float): 0.0-2.0, controls randomness (default: 0.7)
+                - verbosity (str): "low", "medium", "high" - output detail level (default: "medium")
+                - reasoning_effort (str): "minimal", "low", "medium", "high" - reasoning depth (default: "medium")
+                - max_tokens (int): Maximum completion tokens (default: 4096)
 
         Note:
             GPT-5 models use chat.completions.create() API.
             API version must be 2025-01-01-preview or later.
-            Temperature is fixed at 1.0 and cannot be changed.
-            Reference: Azure AI Foundry GPT-5 documentation
+            Reference: Azure OpenAI GPT-5 documentation
 
         Returns:
             LLMResponse with result or error
@@ -71,34 +74,27 @@ class AzureGPT5MiniClient(LLMClient):
         start_time = time.time()
 
         try:
-            # Prepare messages with developer role
+            # Get parameters with defaults
+            temperature = kwargs.get("temperature", 0.7)
+            verbosity = kwargs.get("verbosity", "medium")
+            reasoning_effort = kwargs.get("reasoning_effort", "medium")
+            max_tokens = kwargs.get("max_tokens", 4096)
+
+            # Prepare messages with system and user roles
             messages = [
-                {
-                    "role": "developer",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "You are a helpful AI assistant."
-                        }
-                    ]
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt
-                        }
-                    ]
-                }
+                {"role": "system", "content": "You are a helpful AI assistant."},
+                {"role": "user", "content": prompt}
             ]
 
             # Call Azure OpenAI GPT-5 API using chat.completions.create()
-            # Reference: Azure AI Foundry sample code (2025-01-01-preview)
+            # Reference: Azure OpenAI GPT-5 SDK documentation
             completion = self.client.chat.completions.create(
                 model=self.deployment_name,
                 messages=messages,
-                max_completion_tokens=4096,
+                temperature=temperature,
+                verbosity=verbosity,
+                reasoning_effort=reasoning_effort,
+                max_completion_tokens=max_tokens,
                 stop=None,
                 stream=False
             )
@@ -133,11 +129,18 @@ class AzureGPT5MiniClient(LLMClient):
             Dictionary of default parameter values
 
         Note:
-            GPT-5 models have fixed parameters.
-            Temperature is fixed at 1.0 and cannot be changed.
-            max_completion_tokens is set to 4096 by default.
+            GPT-5 models support temperature, verbosity, and reasoning_effort.
+            - temperature: 0.0-2.0 (default: 0.7)
+            - verbosity: "low", "medium", "high" (default: "medium")
+            - reasoning_effort: "minimal", "low", "medium", "high" (default: "medium")
+            - max_tokens: Maximum completion tokens (default: 4096)
         """
-        return {}
+        return {
+            "temperature": 0.7,
+            "verbosity": "medium",
+            "reasoning_effort": "medium",
+            "max_tokens": 4096
+        }
 
     def get_model_name(self) -> str:
         """Get model name identifier.
