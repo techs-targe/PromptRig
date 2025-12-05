@@ -1739,15 +1739,16 @@ async function loadModelParameters() {
         const verbosityGroup = document.getElementById('param-verbosity-group');
         const reasoningEffortGroup = document.getElementById('param-reasoning-effort-group');
 
-        if (isGPT5 && active.verbosity !== undefined) {
+        if (isGPT5) {
             verbosityGroup.style.display = 'block';
             reasoningEffortGroup.style.display = 'block';
 
-            document.getElementById('param-verbosity').value = active.verbosity;
-            document.getElementById('param-reasoning-effort').value = active.reasoning_effort;
+            // Set values (use defaults if active doesn't have them)
+            document.getElementById('param-verbosity').value = active.verbosity || defaults.verbosity || 'medium';
+            document.getElementById('param-reasoning-effort').value = active.reasoning_effort || defaults.reasoning_effort || 'medium';
 
-            document.getElementById('default-verbosity').textContent = `(デフォルト / Default: ${defaults.verbosity})`;
-            document.getElementById('default-reasoning-effort').textContent = `(デフォルト / Default: ${defaults.reasoning_effort})`;
+            document.getElementById('default-verbosity').textContent = `(デフォルト / Default: ${defaults.verbosity || 'medium'})`;
+            document.getElementById('default-reasoning-effort').textContent = `(デフォルト / Default: ${defaults.reasoning_effort || 'medium'})`;
         } else {
             verbosityGroup.style.display = 'none';
             reasoningEffortGroup.style.display = 'none';
