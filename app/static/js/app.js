@@ -182,18 +182,8 @@ async function loadConfig(projectId = null) {
         // Filter single-type jobs
         const singleJobs = allJobs.filter(job => job.job_type === 'single');
 
-        // Parse prompt template to get parameters (same as before)
-        const templateMatch = project.prompt_template.match(/{{([^}]+)}}/g);
-        const parameters = templateMatch ? templateMatch.map(match => {
-            const paramDef = match.slice(2, -2);
-            const [name, type] = paramDef.split(':');
-            return {
-                name: name.trim(),
-                type: type?.trim() || 'str',
-                html_type: 'text',
-                rows: 1
-            };
-        }) : [];
+        // Use parameters from API (parsed by backend)
+        const parameters = project.parameters || [];
 
         // Build config object compatible with existing code
         currentConfig = {

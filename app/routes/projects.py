@@ -6,12 +6,13 @@ Phase 2 implementation.
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 
 from backend.database import get_db, Project, ProjectRevision, Job, JobItem
 from backend.parser import create_default_parser_config
-from app.schemas.responses import JobResponse, JobItemResponse
+from backend.prompt import PromptTemplateParser
+from app.schemas.responses import JobResponse, JobItemResponse, ParameterDefinitionResponse
 
 router = APIRouter()
 
@@ -37,6 +38,7 @@ class ProjectResponse(BaseModel):
     revision_count: int = 0
     prompt_template: str = ""
     parser_config: str = ""
+    parameters: List[ParameterDefinitionResponse] = []
 
 
 class RevisionCreate(BaseModel):
@@ -151,6 +153,23 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
         ProjectRevision.project_id == project.id
     ).order_by(ProjectRevision.revision.desc()).first()
 
+    # Parse prompt template to get parameters
+    parameters = []
+    if latest_revision:
+        parser = PromptTemplateParser()
+        param_defs = parser.parse_template(latest_revision.prompt_template)
+        parameters = [
+            ParameterDefinitionResponse(
+                name=p.name,
+                type=p.type,
+                html_type=p.html_type,
+                rows=p.rows,
+                accept=p.accept,
+                placeholder=p.placeholder
+            )
+            for p in param_defs
+        ]
+
     return ProjectResponse(
         id=project.id,
         name=project.name,
@@ -158,7 +177,8 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
         created_at=project.created_at,
         revision_count=revision_count,
         prompt_template=latest_revision.prompt_template if latest_revision else "",
-        parser_config=latest_revision.parser_config if latest_revision else ""
+        parser_config=latest_revision.parser_config if latest_revision else "",
+        parameters=parameters
     )
 
 
