@@ -58,7 +58,8 @@ def run_single(request: RunSingleRequest, db: Session = Depends(get_db)):
         job = job_manager.create_single_job(
             project_revision_id=revision.id,
             input_params=request.input_params,
-            repeat=request.repeat
+            repeat=request.repeat,
+            model_name=request.model_name
         )
 
         # Execute job
@@ -146,7 +147,8 @@ def run_batch(request: RunBatchRequestWithHeader, db: Session = Depends(get_db))
         # Create batch job
         job = job_manager.create_batch_job(
             project_revision_id=revision.id,
-            dataset_id=request.dataset_id
+            dataset_id=request.dataset_id,
+            model_name=request.model_name
         )
 
         # Execute job with CSV header option

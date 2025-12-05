@@ -64,6 +64,7 @@ class Job(Base):
     job_type = Column(Text, nullable=False)  # 'single' or 'batch'
     status = Column(Text, nullable=False, default="pending")  # pending/running/done/error
     dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=True)  # Only for batch jobs
+    model_name = Column(Text, nullable=True)  # LLM model used (e.g., 'azure-gpt-5-mini')
     created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
     started_at = Column(Text, nullable=True)
     finished_at = Column(Text, nullable=True)

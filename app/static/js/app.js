@@ -1110,14 +1110,18 @@ function renderBatchHistory(jobs) {
     }
 
     container.innerHTML = jobs.map(job => {
-        const timestamp = new Date(job.created_at).toLocaleString('ja-JP');
+        const createdAt = new Date(job.created_at).toLocaleString('ja-JP');
+        const startedAt = job.started_at ? new Date(job.started_at).toLocaleString('ja-JP') : '-';
         const turnaround = job.turnaround_ms ? `${job.turnaround_ms}ms` : 'N/A';
         const itemCount = job.items ? job.items.length : 0;
+        const modelName = job.model_name || '-';
 
         return `
             <div class="history-item" data-job-id="${job.id}">
                 <div class="job-id">Batch Job #${job.id} (${itemCount} items)</div>
-                <div class="timestamp">${timestamp}</div>
+                <div class="timestamp">作成: ${createdAt}</div>
+                <div class="timestamp">開始: ${startedAt}</div>
+                <div class="turnaround">モデル: ${modelName}</div>
                 <div class="turnaround">Time: ${turnaround}</div>
                 <span class="status ${job.status}">${job.status}</span>
             </div>

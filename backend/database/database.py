@@ -59,14 +59,23 @@ def migrate_db():
     try:
         inspector = inspect(engine)
 
-        # Check if merged_csv_output column exists in jobs table
+        # Check if jobs table exists
         if 'jobs' in inspector.get_table_names():
             columns = [col['name'] for col in inspector.get_columns('jobs')]
+
+            # Migration: Add merged_csv_output column
             if 'merged_csv_output' not in columns:
                 print("⚙ Adding merged_csv_output column to jobs table...")
                 db.execute(text('ALTER TABLE jobs ADD COLUMN merged_csv_output TEXT'))
                 db.commit()
-                print("✓ Migration completed")
+                print("✓ Migration: merged_csv_output column added")
+
+            # Migration: Add model_name column
+            if 'model_name' not in columns:
+                print("⚙ Adding model_name column to jobs table...")
+                db.execute(text('ALTER TABLE jobs ADD COLUMN model_name TEXT'))
+                db.commit()
+                print("✓ Migration: model_name column added")
 
     except Exception as e:
         db.rollback()

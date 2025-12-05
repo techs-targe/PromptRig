@@ -35,7 +35,8 @@ class JobManager:
         self,
         project_revision_id: int,
         input_params: Dict[str, str],
-        repeat: int = 1
+        repeat: int = 1,
+        model_name: str = None
     ) -> Job:
         """Create a single execution job.
 
@@ -57,7 +58,8 @@ class JobManager:
         job = Job(
             project_revision_id=project_revision_id,
             job_type="single",
-            status="pending"
+            status="pending",
+            model_name=model_name
         )
         self.db.add(job)
         self.db.flush()  # Get job.id
@@ -443,13 +445,15 @@ class JobManager:
     def create_batch_job(
         self,
         project_revision_id: int,
-        dataset_id: int
+        dataset_id: int,
+        model_name: str = None
     ) -> Job:
         """Create a batch execution job from dataset.
 
         Args:
             project_revision_id: ID of project revision to use
             dataset_id: ID of dataset to process
+            model_name: Name of LLM model to use (optional)
 
         Returns:
             Created Job object (not yet executed)
@@ -474,7 +478,8 @@ class JobManager:
             project_revision_id=project_revision_id,
             job_type="batch",
             status="pending",
-            dataset_id=dataset_id
+            dataset_id=dataset_id,
+            model_name=model_name
         )
         self.db.add(job)
         self.db.flush()
