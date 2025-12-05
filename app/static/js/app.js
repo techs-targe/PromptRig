@@ -110,7 +110,7 @@ function setupEventListeners() {
     document.getElementById('btn-reload-single-history')?.addEventListener('click', async () => {
         const projectId = document.getElementById('single-project-select').value;
         if (projectId) {
-            await loadHistory(parseInt(projectId));
+            await loadConfig(parseInt(projectId));
             // Re-select the previously selected job if any
             if (selectedJobId) {
                 selectHistoryItem(selectedJobId);
