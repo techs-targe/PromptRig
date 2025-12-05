@@ -251,20 +251,51 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## 🐛 Troubleshooting
 
+### ModuleNotFoundError: No module named 'backend.database'
+
+This error occurs on Windows when Python cannot find the project modules. **Solutions:**
+
+**Option 1: Use the provided run.bat (Recommended)**
+```cmd
+run.bat
+```
+
+**Option 2: If using uvicorn directly, use python -m**
+```cmd
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 9200
+```
+
+**Option 3: Set PYTHONPATH manually**
+```cmd
+set PYTHONPATH=%CD%
+uvicorn app.main:app --reload --host 127.0.0.1 --port 9200
+```
+
+**Why this happens:**
+- Windows doesn't automatically add the current directory to Python's module search path
+- The fix has been added to `main.py` and `app/main.py` (version 2.0.0+)
+- Using `python -m uvicorn` ensures correct path resolution
+
 ### Port Already in Use
 
-Edit `main.py` to change the port:
+Edit `.env` file to change the port:
+```bash
+SERVER_PORT=9201
+```
+
+Or edit `main.py`:
 ```python
 uvicorn.run(app, host="127.0.0.1", port=9201)
 ```
 
 ### Database Issues
 
-Delete `database/` folder and restart the application.
+Delete `database/` folder and restart the application. The database will be automatically recreated with default data.
 
 ### Virtual Environment Issues (Windows)
 
-```cmd
+If you get "script execution disabled" error:
+```powershell
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 

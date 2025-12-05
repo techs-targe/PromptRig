@@ -9,8 +9,16 @@ The application will start on http://localhost:9200
 """
 
 import os
+import sys
+from pathlib import Path
 import uvicorn
 from dotenv import load_dotenv
+
+# Add project root to Python path for module imports
+# This ensures modules can be imported correctly on all platforms (Windows/Linux/macOS)
+project_root = Path(__file__).parent.absolute()
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 # Load environment variables
 load_dotenv()

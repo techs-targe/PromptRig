@@ -1,33 +1,38 @@
 @echo off
+chcp 65001 >nul
+cd /d "%~dp0"
+
 echo ============================================================
-echo PromptRig Setup / セットアップ
+echo PromptRig Setup
 echo ============================================================
 echo.
 
-echo [1/4] Creating virtual environment / 仮想環境を作成しています...
+echo [1/4] Creating virtual environment...
 python -m venv venv
 if errorlevel 1 (
     echo ERROR: Failed to create virtual environment
     echo Python 3.10-3.12 is required
+    echo.
     pause
     exit /b 1
 )
 
 echo.
-echo [2/4] Activating virtual environment / 仮想環境を有効化しています...
+echo [2/4] Activating virtual environment...
 call venv\Scripts\activate
 
 echo.
-echo [3/4] Installing dependencies / 依存関係をインストールしています...
+echo [3/4] Installing dependencies...
 pip install -r requirements.txt
 if errorlevel 1 (
     echo ERROR: Failed to install dependencies
+    echo.
     pause
     exit /b 1
 )
 
 echo.
-echo [4/4] Creating configuration file / 設定ファイルを作成しています...
+echo [4/4] Creating configuration file...
 if not exist .env (
     (
         echo # Azure OpenAI Configuration
@@ -49,19 +54,19 @@ if not exist .env (
         echo # Default Model
         echo ACTIVE_LLM_MODEL=azure-gpt-4.1
     ) > .env
-    echo Created .env file / .envファイルを作成しました
-    echo Please edit .env with your API keys / APIキーを編集してください
+    echo Created .env file
+    echo Please edit .env with your API keys
 ) else (
-    echo .env file already exists / .envファイルは既に存在します
+    echo .env file already exists
 )
 
 echo.
 echo ============================================================
-echo Setup complete! / セットアップ完了！
+echo Setup complete!
 echo ============================================================
 echo.
-echo Next steps / 次のステップ:
-echo 1. Edit .env file with your API keys / .envファイルにAPIキーを入力
-echo 2. Run run.bat to start the application / run.batを実行してアプリを起動
+echo Next steps:
+echo 1. Edit .env file with your API keys
+echo 2. Run run.bat to start the application
 echo.
 pause

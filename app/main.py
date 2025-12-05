@@ -3,6 +3,16 @@
 Based on specification in docs/req.txt section 3.1 (構成要素)
 """
 
+import sys
+from pathlib import Path
+
+# Add project root to Python path for module imports
+# This ensures modules can be imported correctly on all platforms (Windows/Linux/macOS)
+# especially when running with uvicorn directly: uvicorn app.main:app
+project_root = Path(__file__).parent.parent.absolute()
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
