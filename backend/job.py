@@ -270,56 +270,81 @@ class JobManager:
         Returns:
             Number of errors encountered
         """
+        from backend.database import SessionLocal
+
         error_count = 0
 
-        def execute_single_item(item: JobItem) -> int:
-            """Execute a single job item. Returns 1 if error, 0 if success."""
-            # Check if item was cancelled
-            self.db.refresh(item)
-            if item.status == "cancelled":
-                return 0
+        def execute_single_item(item_id: int, raw_prompt: str, parser_config: str) -> int:
+            """Execute a single job item with its own database session.
 
-            # Update item status
-            item.status = "running"
-            self.db.commit()
+            Args:
+                item_id: JobItem ID to process
+                raw_prompt: The prompt text to send to LLM
+                parser_config: Parser configuration JSON
 
-            # Execute LLM call
+            Returns:
+                1 if error, 0 if success
+            """
+            # Create new session for this thread
+            db = SessionLocal()
             try:
-                response = llm_client.call(item.raw_prompt, temperature=temperature)
-
-                if response.success:
-                    item.status = "done"
-                    item.raw_response = response.response_text
-                    item.turnaround_ms = response.turnaround_ms
-
-                    # Apply parser
-                    if revision and revision.parser_config:
-                        parser = ResponseParser(revision.parser_config)
-                        parsed_result = parser.parse(response.response_text)
-                        item.parsed_response = json.dumps(parsed_result, ensure_ascii=False)
-                    else:
-                        item.parsed_response = json.dumps({"raw": response.response_text, "parsed": False})
-
-                    self.db.commit()
-                    return 0
-                else:
-                    item.status = "error"
-                    item.error_message = response.error_message
-                    item.turnaround_ms = response.turnaround_ms
-                    self.db.commit()
+                # Get fresh item from database
+                item = db.query(JobItem).filter(JobItem.id == item_id).first()
+                if not item:
                     return 1
 
-            except Exception as e:
-                item.status = "error"
-                item.error_message = str(e)
-                self.db.commit()
-                return 1
+                # Check if item was cancelled
+                if item.status == "cancelled":
+                    return 0
+
+                # Update item status
+                item.status = "running"
+                db.commit()
+
+                # Execute LLM call
+                try:
+                    response = llm_client.call(raw_prompt, temperature=temperature)
+
+                    if response.success:
+                        item.status = "done"
+                        item.raw_response = response.response_text
+                        item.turnaround_ms = response.turnaround_ms
+
+                        # Apply parser
+                        if parser_config:
+                            parser = ResponseParser(parser_config)
+                            parsed_result = parser.parse(response.response_text)
+                            item.parsed_response = json.dumps(parsed_result, ensure_ascii=False)
+                        else:
+                            item.parsed_response = json.dumps({"raw": response.response_text, "parsed": False})
+
+                        db.commit()
+                        return 0
+                    else:
+                        item.status = "error"
+                        item.error_message = response.error_message
+                        item.turnaround_ms = response.turnaround_ms
+                        db.commit()
+                        return 1
+
+                except Exception as e:
+                    item.status = "error"
+                    item.error_message = str(e)
+                    db.commit()
+                    return 1
+
+            finally:
+                # Always close session
+                db.close()
+
+        # Prepare data for parallel execution
+        parser_config = revision.parser_config if revision else None
 
         # Execute items in parallel
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all items
+            # Submit all items with their data (not the ORM objects)
             future_to_item = {
-                executor.submit(execute_single_item, item): item
+                executor.submit(execute_single_item, item.id, item.raw_prompt, parser_config): item
                 for item in job_items
             }
 
