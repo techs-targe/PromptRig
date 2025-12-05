@@ -1725,33 +1725,46 @@ async function loadModelParameters() {
         const active = currentModelParams.active_parameters;
         const defaults = currentModelParams.default_parameters;
 
-        document.getElementById('param-temperature').value = active.temperature;
-        document.getElementById('param-max-tokens').value = active.max_tokens;
-        document.getElementById('param-top-p').value = active.top_p;
-
-        // Show default values
-        document.getElementById('default-temperature').textContent = `(デフォルト / Default: ${defaults.temperature})`;
-        document.getElementById('default-max-tokens').textContent = `(デフォルト / Default: ${defaults.max_tokens})`;
-        document.getElementById('default-top-p').textContent = `(デフォルト / Default: ${defaults.top_p})`;
-
-        // GPT-5 specific parameters
+        // Check if GPT-5 model
         const isGPT5 = modelName.includes('gpt-5') || modelName.includes('gpt5');
+
+        // Get all parameter groups
+        const temperatureGroup = document.getElementById('param-temperature-group');
+        const maxTokensGroup = document.getElementById('param-max-tokens-group');
+        const topPGroup = document.getElementById('param-top-p-group');
         const verbosityGroup = document.getElementById('param-verbosity-group');
         const reasoningEffortGroup = document.getElementById('param-reasoning-effort-group');
 
         if (isGPT5) {
+            // GPT-5: Hide traditional parameters, show GPT-5 specific parameters
+            temperatureGroup.style.display = 'none';
+            maxTokensGroup.style.display = 'none';
+            topPGroup.style.display = 'none';
             verbosityGroup.style.display = 'block';
             reasoningEffortGroup.style.display = 'block';
 
-            // Set values (use defaults if active doesn't have them)
+            // Set GPT-5 parameter values
             document.getElementById('param-verbosity').value = active.verbosity || defaults.verbosity || 'medium';
             document.getElementById('param-reasoning-effort').value = active.reasoning_effort || defaults.reasoning_effort || 'medium';
 
             document.getElementById('default-verbosity').textContent = `(デフォルト / Default: ${defaults.verbosity || 'medium'})`;
             document.getElementById('default-reasoning-effort').textContent = `(デフォルト / Default: ${defaults.reasoning_effort || 'medium'})`;
         } else {
+            // Non-GPT-5: Show traditional parameters, hide GPT-5 specific parameters
+            temperatureGroup.style.display = 'block';
+            maxTokensGroup.style.display = 'block';
+            topPGroup.style.display = 'block';
             verbosityGroup.style.display = 'none';
             reasoningEffortGroup.style.display = 'none';
+
+            // Set traditional parameter values
+            document.getElementById('param-temperature').value = active.temperature;
+            document.getElementById('param-max-tokens').value = active.max_tokens;
+            document.getElementById('param-top-p').value = active.top_p;
+
+            document.getElementById('default-temperature').textContent = `(デフォルト / Default: ${defaults.temperature})`;
+            document.getElementById('default-max-tokens').textContent = `(デフォルト / Default: ${defaults.max_tokens})`;
+            document.getElementById('default-top-p').textContent = `(デフォルト / Default: ${defaults.top_p})`;
         }
 
     } catch (error) {
@@ -1761,17 +1774,23 @@ async function loadModelParameters() {
 
 async function saveModelParameters() {
     const modelName = document.getElementById('param-model-select').value;
-    const parameters = {
-        temperature: parseFloat(document.getElementById('param-temperature').value),
-        max_tokens: parseInt(document.getElementById('param-max-tokens').value),
-        top_p: parseFloat(document.getElementById('param-top-p').value)
-    };
-
-    // Add GPT-5 specific parameters if applicable
     const isGPT5 = modelName.includes('gpt-5') || modelName.includes('gpt5');
+
+    let parameters;
+
     if (isGPT5) {
-        parameters.verbosity = document.getElementById('param-verbosity').value;
-        parameters.reasoning_effort = document.getElementById('param-reasoning-effort').value;
+        // GPT-5: Only send GPT-5 specific parameters
+        parameters = {
+            verbosity: document.getElementById('param-verbosity').value,
+            reasoning_effort: document.getElementById('param-reasoning-effort').value
+        };
+    } else {
+        // Non-GPT-5: Send traditional parameters
+        parameters = {
+            temperature: parseFloat(document.getElementById('param-temperature').value),
+            max_tokens: parseInt(document.getElementById('param-max-tokens').value),
+            top_p: parseFloat(document.getElementById('param-top-p').value)
+        };
     }
 
     try {

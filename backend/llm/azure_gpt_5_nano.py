@@ -57,11 +57,13 @@ class AzureGPT5NanoClient(LLMClient):
         Args:
             prompt: The prompt text to send
             **kwargs: Optional parameters
-                - temperature (float): Default 0.7
-                - max_tokens (int): Default 4000
-                - top_p (float): Default 1.0
                 - verbosity (str): Default "medium" - Controls output expansiveness ("low", "medium", "high")
                 - reasoning_effort (str): Default "minimal" - Controls reasoning tokens ("minimal", "medium")
+
+        Note:
+            GPT-5 models only support temperature=1.0 (fixed).
+            Other sampling parameters (top_p, max_tokens, frequency_penalty, etc.) are not supported.
+            See: https://community.openai.com/t/temperature-in-gpt-5-models/1337133
 
         Returns:
             LLMResponse with result or error
@@ -69,20 +71,15 @@ class AzureGPT5NanoClient(LLMClient):
         start_time = time.time()
 
         try:
-            # Get parameters with defaults
-            temperature = kwargs.get("temperature", 0.7)
-            max_tokens = kwargs.get("max_tokens", 4000)
-            top_p = kwargs.get("top_p", 1.0)
+            # Get GPT-5 specific parameters
             verbosity = kwargs.get("verbosity", "medium")
             reasoning_effort = kwargs.get("reasoning_effort", "minimal")  # nano defaults to minimal
 
             # Build API call parameters
+            # Note: GPT-5 only accepts temperature=1.0 (default), verbosity, and reasoning_effort
             api_params = {
                 "model": self.deployment_name,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "top_p": top_p,
                 "verbosity": verbosity,
                 "reasoning_effort": reasoning_effort
             }
@@ -118,11 +115,12 @@ class AzureGPT5NanoClient(LLMClient):
 
         Returns:
             Dictionary of default parameter values
+
+        Note:
+            GPT-5 models only support verbosity and reasoning_effort.
+            Temperature is fixed at 1.0 and cannot be changed.
         """
         return {
-            "temperature": 0.7,
-            "max_tokens": 4000,
-            "top_p": 1.0,
             "verbosity": "medium",
             "reasoning_effort": "minimal"
         }
