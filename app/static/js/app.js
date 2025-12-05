@@ -511,7 +511,10 @@ function displayJobResults(job, targetContainer = null) {
 function populateInputForm(params) {
     Object.entries(params).forEach(([name, value]) => {
         const input = document.getElementById(`param-${name}`);
-        if (input) input.value = value;
+        // Skip file inputs - cannot programmatically set file input values for security reasons
+        if (input && input.type !== 'file') {
+            input.value = value;
+        }
     });
 }
 

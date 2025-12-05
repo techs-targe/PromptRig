@@ -81,14 +81,20 @@ class OpenAIGPT5NanoClient(LLMClient):
                 # Text-only content
                 user_content = prompt
 
+            # Build messages with system prompt
+            messages = [
+                {"role": "system", "content": "You are a helpful AI assistant."}
+            ]
+
+            # Add user message (with or without images)
+            messages.append({"role": "user", "content": user_content})
+
             # Call OpenAI GPT-5 API
             # Note: Using standard chat.completions.create() for now
             # May need to adjust based on actual OpenAI GPT-5 API requirements
             response = self.client.chat.completions.create(
                 model=self.MODEL_NAME,
-                messages=[
-                    {"role": "user", "content": user_content}
-                ]
+                messages=messages
                 # Note: May need to add verbosity and reasoning_effort parameters
                 # depending on OpenAI API support
             )

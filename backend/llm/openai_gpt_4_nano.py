@@ -81,12 +81,18 @@ class OpenAIGPT4NanoClient(LLMClient):
                 # Text-only content
                 user_content = prompt
 
+            # Build messages with system prompt
+            messages = [
+                {"role": "system", "content": "You are a helpful AI assistant."}
+            ]
+
+            # Add user message (with or without images)
+            messages.append({"role": "user", "content": user_content})
+
             # Call OpenAI API
             response = self.client.chat.completions.create(
                 model=self.MODEL_NAME,
-                messages=[
-                    {"role": "user", "content": user_content}
-                ],
+                messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 top_p=top_p
