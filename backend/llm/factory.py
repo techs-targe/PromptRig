@@ -73,42 +73,35 @@ def get_available_models() -> List[Dict[str, any]]:
         - name: Model identifier
         - display_name: Human-readable name
         - default_parameters: Dictionary of default parameter values
+
+    Note:
+        Only returns models that have valid environment configuration.
+        Models with missing configuration are skipped.
     """
-    models = [
-        {
-            "name": "azure-gpt-4.1",
-            "display_name": "Azure GPT-4.1",
-            "default_parameters": AzureGPT41Client().get_default_parameters()
-        },
-        {
-            "name": "azure-gpt-4o",
-            "display_name": "Azure GPT-4o (2024-08-06)",
-            "default_parameters": AzureGPT4oClient().get_default_parameters()
-        },
-        {
-            "name": "azure-gpt-4o-mini",
-            "display_name": "Azure GPT-4o-mini (2024-07-18)",
-            "default_parameters": AzureGPT4oMiniClient().get_default_parameters()
-        },
-        {
-            "name": "azure-gpt-5-mini",
-            "display_name": "Azure GPT-5-mini",
-            "default_parameters": AzureGPT5MiniClient().get_default_parameters()
-        },
-        {
-            "name": "azure-gpt-5-nano",
-            "display_name": "Azure GPT-5-nano",
-            "default_parameters": AzureGPT5NanoClient().get_default_parameters()
-        },
-        {
-            "name": "openai-gpt-4.1-nano",
-            "display_name": "OpenAI GPT-4.1-nano",
-            "default_parameters": OpenAIGPT4NanoClient().get_default_parameters()
-        },
-        {
-            "name": "openai-gpt-5-nano",
-            "display_name": "OpenAI GPT-5-nano",
-            "default_parameters": OpenAIGPT5NanoClient().get_default_parameters()
-        }
+    models = []
+
+    # Try each model, skip if configuration is incomplete
+    model_definitions = [
+        ("azure-gpt-4.1", "Azure GPT-4.1", AzureGPT41Client),
+        ("azure-gpt-4o", "Azure GPT-4o (2024-08-06)", AzureGPT4oClient),
+        ("azure-gpt-4o-mini", "Azure GPT-4o-mini (2024-07-18)", AzureGPT4oMiniClient),
+        ("azure-gpt-5-mini", "Azure GPT-5-mini", AzureGPT5MiniClient),
+        ("azure-gpt-5-nano", "Azure GPT-5-nano", AzureGPT5NanoClient),
+        ("openai-gpt-4.1-nano", "OpenAI GPT-4.1-nano", OpenAIGPT4NanoClient),
+        ("openai-gpt-5-nano", "OpenAI GPT-5-nano", OpenAIGPT5NanoClient),
     ]
+
+    for name, display_name, client_class in model_definitions:
+        try:
+            client = client_class()
+            models.append({
+                "name": name,
+                "display_name": display_name,
+                "default_parameters": client.get_default_parameters()
+            })
+        except (ValueError, Exception) as e:
+            # Skip models with incomplete configuration
+            # This allows the system to work even if some models are not configured
+            pass
+
     return models
