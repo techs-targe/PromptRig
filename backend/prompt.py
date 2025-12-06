@@ -170,9 +170,21 @@ class PromptTemplateParser:
 
         Specification: docs/req.txt section 4.2.2
         Note: Same parameter name used multiple times gets same value
+        Note: FILE and FILEPATH parameters are excluded from prompt text
+              (they are sent separately as images to Vision API)
         """
+        # Parse template to get parameter types
+        param_defs = self.parse_template(template)
+        image_params = {p.name for p in param_defs if p.type in [self.TYPE_FILE, self.TYPE_FILEPATH]}
+
         def replacer(match):
             param_name = match.group(1)
+
+            # Exclude FILE/FILEPATH parameters from prompt text
+            # (they are sent separately as images to Vision API)
+            if param_name in image_params:
+                return ""  # Remove image parameters from prompt text
+
             # Return the value if exists, otherwise keep the placeholder
             return params.get(param_name, match.group(0))
 
