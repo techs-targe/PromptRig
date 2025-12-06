@@ -224,11 +224,14 @@ class JobManager:
         - Images are automatically resized if > 2048px
         - Only JPEG, PNG, GIF, WebP formats supported
         """
+        print(f"🔍 Processing image parameters from input_params: {list(input_params.keys())}")
+
         # Parse template to identify FILE and FILEPATH parameters
         param_defs = self.parser.parse_template(prompt_template)
 
         images = []
         allowed_dirs = self._get_allowed_image_directories()
+        print(f"📁 Allowed image directories: {allowed_dirs}")
 
         for param_def in param_defs:
             param_name = param_def.name
@@ -238,28 +241,37 @@ class JobManager:
             if param_type not in ["FILE", "FILEPATH"]:
                 continue
 
+            print(f"🖼️  Found image parameter: {param_name} (type={param_type})")
+
             # Get parameter value
             param_value = input_params.get(param_name)
             if not param_value:
+                print(f"⚠️  Parameter '{param_name}' has no value, skipping")
                 continue
 
             try:
                 if param_type == "FILE":
                     # FILE type: Extract Base64 from data URI
                     # Expected format: "data:image/jpeg;base64,/9j/4AAQ..."
+                    print(f"📤 Processing FILE parameter '{param_name}' (data length: {len(param_value)} chars)")
                     base64_data = self._extract_base64_from_file_param(param_value)
+                    print(f"✅ FILE '{param_name}' → Base64 length: {len(base64_data)} chars")
                     images.append(base64_data)
 
                 elif param_type == "FILEPATH":
                     # FILEPATH type: Load file and convert to Base64
+                    print(f"📂 Processing FILEPATH parameter '{param_name}': {param_value}")
                     base64_data = self._load_image_from_filepath(param_value, allowed_dirs)
+                    print(f"✅ FILEPATH '{param_name}' → Base64 length: {len(base64_data)} chars")
                     images.append(base64_data)
 
             except Exception as e:
                 logger.error(f"Error processing image parameter '{param_name}': {e}")
+                print(f"❌ Error processing '{param_name}': {e}")
                 # Continue processing other images, but log the error
                 # The LLM call may fail if image is critical, but that's expected
 
+        print(f"📊 Total images processed: {len(images)}")
         return images
 
     def _get_allowed_image_directories(self) -> List[str]:

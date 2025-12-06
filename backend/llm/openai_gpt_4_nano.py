@@ -71,12 +71,15 @@ class OpenAIGPT4NanoClient(LLMClient):
                 # Multimodal content with images
                 user_content = [{"type": "text", "text": prompt}]
                 for img_base64 in images:
+                    # Log image data length for debugging
+                    print(f"📷 Vision API: Adding image (Base64 length: {len(img_base64)} chars)")
                     user_content.append({
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:image/jpeg;base64,{img_base64}"
                         }
                     })
+                print(f"📤 Vision API: Sending {len(images)} image(s) with prompt")
             else:
                 # Text-only content
                 user_content = prompt
