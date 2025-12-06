@@ -76,7 +76,8 @@ class OpenAIGPT4NanoClient(LLMClient):
                     user_content.append({
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{img_base64}"
+                            "url": f"data:image/jpeg;base64,{img_base64}",
+                            "detail": "high"  # Required for proper image recognition
                         }
                     })
                 print(f"📤 Vision API: Sending {len(images)} image(s) with prompt")
