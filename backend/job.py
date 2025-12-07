@@ -214,7 +214,8 @@ class JobManager:
             prompt_template: Prompt template string with {{}} syntax
 
         Returns:
-            List of Base64-encoded image strings (without data URI prefix)
+            List of data URI strings (with MIME type and Base64 data)
+            Format: "data:image/png;base64,iVBORw0KGgo..."
             Empty list if no image parameters found
 
         Specification: docs/image_parameter_spec.md
@@ -251,19 +252,25 @@ class JobManager:
 
             try:
                 if param_type == "FILE":
-                    # FILE type: Extract Base64 from data URI
+                    # FILE type: Keep original data URI with MIME type
                     # Expected format: "data:image/jpeg;base64,/9j/4AAQ..."
                     print(f"📤 Processing FILE parameter '{param_name}' (data length: {len(param_value)} chars)")
+
+                    # Extract MIME type from data URI
+                    mime_type = self._extract_mime_type_from_data_uri(param_value)
                     base64_data = self._extract_base64_from_file_param(param_value)
-                    print(f"✅ FILE '{param_name}' → Base64 length: {len(base64_data)} chars")
-                    images.append(base64_data)
+
+                    # Reconstruct data URI with correct MIME type
+                    data_uri = f"data:{mime_type};base64,{base64_data}"
+                    print(f"✅ FILE '{param_name}' → {mime_type}, Base64: {len(base64_data)} chars")
+                    images.append(data_uri)
 
                 elif param_type == "FILEPATH":
-                    # FILEPATH type: Load file and convert to Base64
+                    # FILEPATH type: Load file and create data URI with correct MIME type
                     print(f"📂 Processing FILEPATH parameter '{param_name}': {param_value}")
-                    base64_data = self._load_image_from_filepath(param_value, allowed_dirs)
-                    print(f"✅ FILEPATH '{param_name}' → Base64 length: {len(base64_data)} chars")
-                    images.append(base64_data)
+                    data_uri = self._load_image_from_filepath(param_value, allowed_dirs)
+                    print(f"✅ FILEPATH '{param_name}' → {len(data_uri)} chars")
+                    images.append(data_uri)
 
             except Exception as e:
                 logger.error(f"Error processing image parameter '{param_name}': {e}")
@@ -295,6 +302,29 @@ class JobManager:
         # Resolve to absolute paths
         return [os.path.abspath(os.path.expanduser(d)) for d in dirs]
 
+    def _extract_mime_type_from_data_uri(self, data_uri: str) -> str:
+        """Extract MIME type from data URI.
+
+        Args:
+            data_uri: Data URI string like "data:image/png;base64,..."
+
+        Returns:
+            MIME type string (e.g., "image/png")
+
+        Raises:
+            ValueError: If format is invalid
+        """
+        if not data_uri.startswith("data:"):
+            raise ValueError("Invalid data URI: missing 'data:' prefix")
+
+        # Extract MIME type from "data:image/png;base64,..."
+        if ";base64," in data_uri:
+            mime_part = data_uri.split(";base64,")[0]
+            mime_type = mime_part.replace("data:", "")
+            return mime_type
+        else:
+            raise ValueError("Invalid data URI format: missing ';base64,' separator")
+
     def _extract_base64_from_file_param(self, param_value: str) -> str:
         """Extract Base64 data from FILE parameter value.
 
@@ -319,14 +349,14 @@ class JobManager:
             raise ValueError("Invalid FILE parameter format: missing ';base64,' separator")
 
     def _load_image_from_filepath(self, file_path: str, allowed_dirs: List[str]) -> str:
-        """Load image from file path and convert to Base64.
+        """Load image from file path and convert to data URI.
 
         Args:
             file_path: Path to image file on server
             allowed_dirs: List of allowed directory paths
 
         Returns:
-            Base64-encoded image string
+            Data URI string (e.g., "data:image/png;base64,iVBORw0...")
 
         Raises:
             ValueError: If path is invalid or not allowed
@@ -358,29 +388,51 @@ class JobManager:
         if not os.path.isfile(real_path):
             raise ValueError(f"Path is not a file: {file_path}")
 
-        # Load and validate image
+        # Read file directly without PIL re-encoding (preserves all metadata)
+        # This ensures LLM compatibility - PIL re-encoding can cause recognition failures
         try:
+            # First, validate format with PIL
             with Image.open(real_path) as img:
-                # Validate image format
                 if img.format not in ["JPEG", "PNG", "GIF", "WEBP"]:
                     raise ValueError(
                         f"Unsupported image format: {img.format}. "
                         "Supported: JPEG, PNG, GIF, WEBP"
                     )
 
-                # Resize if needed (max dimension 2048px)
-                img = self._resize_image_if_needed(img)
+                detected_format = img.format
 
-                # Convert to Base64
-                buffer = io.BytesIO()
-                # Save in original format, or JPEG if format not suitable
-                save_format = img.format if img.format in ["JPEG", "PNG", "GIF", "WEBP"] else "JPEG"
-                img.save(buffer, format=save_format)
-                image_bytes = buffer.getvalue()
+                # Check if resizing is needed
+                needs_resize = max(img.size) > 2048
 
-                # Encode to Base64
-                base64_data = base64.b64encode(image_bytes).decode("utf-8")
-                return base64_data
+            # If resizing is needed, use PIL
+            if needs_resize:
+                with Image.open(real_path) as img:
+                    img = self._resize_image_if_needed(img)
+                    buffer = io.BytesIO()
+                    save_format = img.format if img.format in ["JPEG", "PNG", "GIF", "WEBP"] else "JPEG"
+                    img.save(buffer, format=save_format)
+                    image_bytes = buffer.getvalue()
+                    detected_format = save_format
+            else:
+                # Read file directly for best LLM compatibility
+                with open(real_path, 'rb') as f:
+                    image_bytes = f.read()
+
+            # Encode to Base64
+            base64_data = base64.b64encode(image_bytes).decode("utf-8")
+
+            # Create MIME type from format
+            mime_type_map = {
+                "JPEG": "image/jpeg",
+                "PNG": "image/png",
+                "GIF": "image/gif",
+                "WEBP": "image/webp"
+            }
+            mime_type = mime_type_map.get(detected_format, "image/jpeg")
+
+            # Return data URI
+            data_uri = f"data:{mime_type};base64,{base64_data}"
+            return data_uri
 
         except Exception as e:
             raise IOError(f"Failed to load image from '{file_path}': {e}")
@@ -573,11 +625,15 @@ class JobManager:
 
                                 try:
                                     if param_type == "FILE":
+                                        # FILE type: Reconstruct data URI with MIME type
+                                        mime_type = self._extract_mime_type_from_data_uri(param_value)
                                         base64_data = self._extract_base64_from_file_param(param_value)
-                                        images.append(base64_data)
+                                        data_uri = f"data:{mime_type};base64,{base64_data}"
+                                        images.append(data_uri)
                                     elif param_type == "FILEPATH":
-                                        base64_data = self._load_image_from_filepath(param_value, allowed_dirs)
-                                        images.append(base64_data)
+                                        # FILEPATH type: _load_image_from_filepath now returns data URI
+                                        data_uri = self._load_image_from_filepath(param_value, allowed_dirs)
+                                        images.append(data_uri)
                                 except Exception as e:
                                     logger.error(f"Error processing image parameter '{param_name}' in item {item_id}: {e}")
 

@@ -118,6 +118,8 @@ async def import_dataset(
             row_count=row_count
         )
 
+    except HTTPException:
+        raise  # Re-raise HTTPException as-is
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -170,6 +172,8 @@ def preview_dataset(
 
         return DatasetPreviewResponse(**preview)
 
+    except HTTPException:
+        raise  # Re-raise HTTPException as-is
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

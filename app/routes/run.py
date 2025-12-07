@@ -126,6 +126,8 @@ def run_single(request: RunSingleRequest, background_tasks: BackgroundTasks, db:
             message=f"Job started with {len(items)} item(s)"
         )
 
+    except HTTPException:
+        raise  # Re-raise HTTPException as-is (preserve 404, etc.)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -217,6 +219,8 @@ def run_batch(request: RunBatchRequestWithHeader, background_tasks: BackgroundTa
             message=f"Batch job started with {len(items)} item(s)"
         )
 
+    except HTTPException:
+        raise  # Re-raise HTTPException as-is (preserve 404, etc.)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -236,6 +240,8 @@ def get_job_status(job_id: int, db: Session = Depends(get_db)):
 
         return progress
 
+    except HTTPException:
+        raise  # Re-raise HTTPException as-is
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -264,6 +270,8 @@ def cancel_job(job_id: int, db: Session = Depends(get_db)):
 
         return result
 
+    except HTTPException:
+        raise  # Re-raise HTTPException as-is
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

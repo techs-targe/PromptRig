@@ -82,11 +82,11 @@ class AzureGPT4oClient(LLMClient):
             if images:
                 # Multimodal content with images
                 user_content = [{"type": "text", "text": prompt}]
-                for img_base64 in images:
+                for img_data_uri in images:
                     user_content.append({
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{img_base64}"
+                            "url": img_data_uri  # Use data URI directly
                         }
                     })
             else:

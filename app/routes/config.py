@@ -19,8 +19,11 @@ router = APIRouter()
 
 
 @router.get("/api/config", response_model=ConfigResponse)
-def get_config(db: Session = Depends(get_db)):
+def get_config(project_id: int = 1, db: Session = Depends(get_db)):
     """Get initial configuration for the UI.
+
+    Args:
+        project_id: Project ID to load (default: 1)
 
     Returns:
     - Project information (Phase 1: fixed project ID=1)
@@ -30,10 +33,10 @@ def get_config(db: Session = Depends(get_db)):
 
     Specification: docs/req.txt section 3.2 step 2
     """
-    # Get default project (Phase 1: fixed project ID=1)
-    project = db.query(Project).filter(Project.id == 1).first()
+    # Get project (default project ID=1, or specified)
+    project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
-        raise ValueError("Default project not found. Please run database initialization.")
+        raise ValueError(f"Project with ID {project_id} not found. Please run database initialization.")
 
     # Get latest project revision
     revision = db.query(ProjectRevision).filter(
@@ -55,7 +58,9 @@ def get_config(db: Session = Depends(get_db)):
             html_type=p.html_type,
             rows=p.rows,
             accept=p.accept,
-            placeholder=p.placeholder
+            placeholder=p.placeholder,
+            required=p.required,
+            default=p.default
         )
         for p in param_defs
     ]

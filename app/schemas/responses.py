@@ -15,6 +15,8 @@ class ParameterDefinitionResponse(BaseModel):
     rows: int = 0
     accept: Optional[str] = None  # For file input (e.g., "image/*")
     placeholder: Optional[str] = None  # For text inputs
+    required: bool = True  # True if parameter is required (no | pipe)
+    default: Optional[str] = None  # Default value if optional (from |default=...)
 
 
 class JobItemResponse(BaseModel):

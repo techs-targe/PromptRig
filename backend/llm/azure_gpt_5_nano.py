@@ -104,13 +104,22 @@ class AzureGPT5NanoClient(LLMClient):
                 if images:
                     # Multimodal content with images
                     user_content = [{"type": "text", "text": prompt}]
-                    for img_base64 in images:
+                    for idx, img_data_uri in enumerate(images, 1):
+                        # Images now come as complete data URIs with correct MIME type
+                        # Extract MIME type for logging
+                        mime_type = img_data_uri.split(';')[0].replace('data:', '') if img_data_uri.startswith('data:') else 'unknown'
+                        base64_len = len(img_data_uri.split(',')[1]) if ',' in img_data_uri else 0
+
+                        print(f"🖼️  [GPT-5-nano] Image #{idx}: {mime_type}, Base64: {base64_len} chars")
+                        print(f"   Data URI prefix (first 80 chars): {img_data_uri[:80]}")
+
                         user_content.append({
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/jpeg;base64,{img_base64}"
+                                "url": img_data_uri  # Use data URI directly
                             }
                         })
+                    print(f"📤 [GPT-5-nano] Sending {len(images)} image(s) to Vision API")
                 else:
                     # Text-only content
                     user_content = prompt

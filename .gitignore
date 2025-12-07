@@ -11,10 +11,9 @@ config/config.yaml
 *.db-wal
 *.db-shm
 
-# Documentation (exclude spec files, include deployment docs)
-docs/req.txt
-docs/image_parameter_spec.md
-!docs/DEPLOYMENT.md
+# Documentation (exclude all docs from GitHub, keep locally)
+/docs/
+/doc/
 
 # Python
 __pycache__/

@@ -70,13 +70,13 @@ class OpenAIGPT4NanoClient(LLMClient):
             if images:
                 # Multimodal content with images
                 user_content = [{"type": "text", "text": prompt}]
-                for img_base64 in images:
+                for img_data_uri in images:
                     # Log image data length for debugging
-                    print(f"📷 Vision API: Adding image (Base64 length: {len(img_base64)} chars)")
+                    print(f"📷 Vision API: Adding image (data URI length: {len(img_data_uri)} chars)")
                     user_content.append({
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{img_base64}",
+                            "url": img_data_uri,  # Use data URI directly
                             "detail": "high"  # Required for proper image recognition
                         }
                     })
