@@ -12,6 +12,61 @@ let allProjects = [];
 let allDatasets = [];
 let currentProjectId = 1;
 
+/**
+ * Format date to JST (Japan Standard Time)
+ * Database timestamps are stored in UTC without timezone suffix.
+ * This function interprets them as UTC and converts to JST for display.
+ *
+ * @param {string|Date} dateInput - Date string or Date object (stored in UTC)
+ * @param {boolean} includeSeconds - Whether to include seconds (default: false)
+ * @returns {string} Formatted date string in JST (YYYY/MM/DD HH:MM)
+ */
+function formatJST(dateInput, includeSeconds = false) {
+    if (!dateInput) return '-';
+    try {
+        let date;
+
+        if (dateInput instanceof Date) {
+            date = dateInput;
+        } else {
+            // Convert input to string
+            let dateStr = String(dateInput);
+
+            // Database timestamps are UTC but stored without 'Z' suffix
+            // Append 'Z' to mark as UTC if no timezone info present
+            // This ensures proper UTC -> JST conversion (+9 hours)
+            if (!dateStr.endsWith('Z') && !dateStr.includes('+') && !dateStr.includes('-', 10)) {
+                // Replace space with 'T' for ISO format if needed
+                dateStr = dateStr.replace(' ', 'T');
+                dateStr = dateStr + 'Z';
+            }
+
+            date = new Date(dateStr);
+        }
+
+        if (isNaN(date.getTime())) return '-';
+
+        // Format in JST timezone (UTC+9)
+        const options = {
+            timeZone: 'Asia/Tokyo',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        };
+
+        if (includeSeconds) {
+            options.second = '2-digit';
+        }
+
+        return date.toLocaleString('ja-JP', options);
+    } catch (e) {
+        return '-';
+    }
+}
+
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', () => {
     setupTabNavigation();
@@ -86,6 +141,7 @@ function loadTabData(tabName) {
         case 'settings':
             loadSettings();
             loadAvailableModels();
+            loadModelConfigurationSettings();
             loadJobParallelism();
             break;
         case 'datasets':
@@ -335,8 +391,8 @@ function renderHistory(jobs) {
     }
 
     container.innerHTML = jobs.map(job => {
-        const createdAt = new Date(job.created_at).toLocaleString('ja-JP');
-        const finishedAt = job.finished_at ? new Date(job.finished_at).toLocaleString('ja-JP') : '-';
+        const createdAt = formatJST(job.created_at);
+        const finishedAt = formatJST(job.finished_at);
         const turnaround = job.turnaround_ms ? `${(job.turnaround_ms / 1000).toFixed(1)}s` : 'N/A';
         const itemCount = job.items ? job.items.length : 0;
         const modelName = job.model_name || '-';
@@ -930,9 +986,24 @@ async function onProjectChange(e) {
  */
 async function showEditPromptModal() {
     try {
-        const response = await fetch(`/api/projects/${currentProjectId}`);
-        if (!response.ok) throw new Error('Failed to load project');
-        const project = await response.json();
+        // Fetch project and revisions in parallel
+        const [projectResponse, revisionsResponse] = await Promise.all([
+            fetch(`/api/projects/${currentProjectId}`),
+            fetch(`/api/projects/${currentProjectId}/revisions`)
+        ]);
+
+        if (!projectResponse.ok) throw new Error('Failed to load project');
+        const project = await projectResponse.json();
+        const revisions = revisionsResponse.ok ? await revisionsResponse.json() : [];
+
+        // Build revision selector options
+        const revisionOptions = revisions.map(rev => {
+            const date = formatJST(rev.created_at);
+            const isCurrent = rev.revision === project.revision_count;
+            return `<option value="${rev.revision}" ${isCurrent ? 'selected' : ''}>
+                Rev.${rev.revision} (${date})${isCurrent ? ' - 現在' : ''}
+            </option>`;
+        }).join('');
 
         const modalContent = `
             <div class="modal-header">
@@ -943,6 +1014,15 @@ async function showEditPromptModal() {
                 <div class="form-group">
                     <label>プロジェクト / Project: ${project.name}</label>
                 </div>
+                <div class="form-group" style="display: flex; align-items: center; gap: 10px;">
+                    <label style="margin: 0;">リビジョン / Revision:</label>
+                    <select id="revision-selector" onchange="loadRevisionContent(this.value, 'prompt')" style="flex: 1;">
+                        ${revisionOptions}
+                    </select>
+                    <button class="btn btn-secondary" onclick="restoreRevision('prompt')" style="background-color: #e67e22;" title="選択したリビジョンを復元 / Restore selected revision">
+                        🔄 復元 / Restore
+                    </button>
+                </div>
                 <div class="form-group">
                     <label>プロンプトテンプレート / Prompt Template:</label>
                     <textarea id="edit-prompt-template" rows="15" style="font-family: 'Courier New', monospace; width: 100%; box-sizing: border-box;">${project.prompt_template}</textarea>
@@ -951,7 +1031,6 @@ async function showEditPromptModal() {
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeModal()">キャンセル / Cancel</button>
                 <button class="btn btn-primary" onclick="savePromptRevision()">保存 / Save</button>
-                <button class="btn btn-primary" onclick="rebuildPromptRevision()" style="background-color: #27ae60;">リビルド / Rebuild</button>
             </div>
         `;
         showModal(modalContent);
@@ -962,6 +1041,7 @@ async function showEditPromptModal() {
 
 /**
  * Save (update) current prompt revision
+ * Smart save: Creates new revision only if content changed
  * Specification: docs/req.txt section 4.4.3 - 保存ボタン
  */
 async function savePromptRevision() {
@@ -980,45 +1060,87 @@ async function savePromptRevision() {
             })
         });
 
-        if (!response.ok) throw new Error('Failed to update revision');
+        if (!response.ok) throw new Error('Failed to save revision');
 
+        const result = await response.json();
         closeModal();
         await loadConfig();
-        alert('プロンプトテンプレートを保存しました / Prompt template saved');
+
+        if (result.is_new) {
+            alert(`新しいリビジョン ${result.revision} を作成しました / New revision ${result.revision} created`);
+        } else {
+            alert('変更がありませんでした / No changes detected');
+        }
     } catch (error) {
         alert(`エラー / Error: ${error.message}`);
     }
 }
 
 /**
- * Rebuild (create new) prompt revision
- * Specification: docs/req.txt section 4.4.3 - リビルドボタン
+ * Load revision content into the editor
+ * @param {number} revisionNumber - The revision number to load
+ * @param {string} type - 'prompt' or 'parser'
  */
-async function rebuildPromptRevision() {
-    const newTemplate = document.getElementById('edit-prompt-template').value;
-    if (!newTemplate.trim()) {
-        alert('プロンプトテンプレートを入力してください / Please enter a prompt template');
+async function loadRevisionContent(revisionNumber, type) {
+    try {
+        const response = await fetch(`/api/projects/${currentProjectId}/revisions`);
+        if (!response.ok) throw new Error('Failed to load revisions');
+
+        const revisions = await response.json();
+        const revision = revisions.find(r => r.revision === parseInt(revisionNumber));
+
+        if (!revision) {
+            alert('リビジョンが見つかりません / Revision not found');
+            return;
+        }
+
+        if (type === 'prompt') {
+            document.getElementById('edit-prompt-template').value = revision.prompt_template;
+        } else if (type === 'parser') {
+            const parserConfig = revision.parser_config ? JSON.parse(revision.parser_config) : {type: 'none'};
+            document.getElementById('edit-parser-type').value = parserConfig.type || 'none';
+            document.getElementById('edit-parser-config').value = JSON.stringify(parserConfig, null, 2);
+        }
+    } catch (error) {
+        alert(`エラー / Error: ${error.message}`);
+    }
+}
+
+/**
+ * Restore a past revision (creates new revision with old content)
+ * @param {string} type - 'prompt' or 'parser' (for context, restore applies to both)
+ */
+async function restoreRevision(type) {
+    const selector = document.getElementById('revision-selector');
+    if (!selector) {
+        alert('リビジョンセレクタが見つかりません / Revision selector not found');
         return;
     }
 
-    if (!confirm('新しいリビジョンを作成しますか？\n{{}}構造の変更を伴う場合に使用してください。\n\nCreate a new revision?\nUse this when changing {{}} structure.')) {
+    const revisionNumber = parseInt(selector.value);
+    const selectedOption = selector.options[selector.selectedIndex];
+    const isCurrent = selectedOption.text.includes('現在');
+
+    if (isCurrent) {
+        alert('現在のリビジョンは復元できません（既に最新です）\nCannot restore current revision (already latest)');
+        return;
+    }
+
+    if (!confirm(`リビジョン ${revisionNumber} を復元しますか？\n新しいリビジョンとして作成されます。\n\nRestore revision ${revisionNumber}?\nThis will create a new revision.`)) {
         return;
     }
 
     try {
-        const response = await fetch(`/api/projects/${currentProjectId}/revisions`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                prompt_template: newTemplate
-            })
+        const response = await fetch(`/api/projects/${currentProjectId}/revisions/${revisionNumber}/restore`, {
+            method: 'POST'
         });
 
-        if (!response.ok) throw new Error('Failed to create revision');
+        if (!response.ok) throw new Error('Failed to restore revision');
 
+        const result = await response.json();
         closeModal();
         await loadConfig();
-        alert('新しいリビジョンを作成しました / New revision created');
+        alert(`リビジョン ${revisionNumber} を復元しました（新リビジョン: ${result.revision}）\nRestored revision ${revisionNumber} (new revision: ${result.revision})`);
     } catch (error) {
         alert(`エラー / Error: ${error.message}`);
     }
@@ -1030,12 +1152,27 @@ async function rebuildPromptRevision() {
  */
 async function showEditParserModal() {
     try {
-        const response = await fetch(`/api/projects/${currentProjectId}`);
-        if (!response.ok) throw new Error('Failed to load project');
-        const project = await response.json();
+        // Fetch project and revisions in parallel
+        const [projectResponse, revisionsResponse] = await Promise.all([
+            fetch(`/api/projects/${currentProjectId}`),
+            fetch(`/api/projects/${currentProjectId}/revisions`)
+        ]);
+
+        if (!projectResponse.ok) throw new Error('Failed to load project');
+        const project = await projectResponse.json();
+        const revisions = revisionsResponse.ok ? await revisionsResponse.json() : [];
 
         const parserConfig = project.parser_config || {type: 'none'};
         const parserJson = JSON.stringify(parserConfig, null, 2);
+
+        // Build revision selector options
+        const revisionOptions = revisions.map(rev => {
+            const date = formatJST(rev.created_at);
+            const isCurrent = rev.revision === project.revision_count;
+            return `<option value="${rev.revision}" ${isCurrent ? 'selected' : ''}>
+                Rev.${rev.revision} (${date})${isCurrent ? ' - 現在' : ''}
+            </option>`;
+        }).join('');
 
         const modalContent = `
             <div class="modal-header">
@@ -1045,6 +1182,15 @@ async function showEditParserModal() {
             <div class="modal-body">
                 <div class="form-group">
                     <label>プロジェクト / Project: ${project.name}</label>
+                </div>
+                <div class="form-group" style="display: flex; align-items: center; gap: 10px;">
+                    <label style="margin: 0;">リビジョン / Revision:</label>
+                    <select id="revision-selector" onchange="loadRevisionContent(this.value, 'parser')" style="flex: 1;">
+                        ${revisionOptions}
+                    </select>
+                    <button class="btn btn-secondary" onclick="restoreRevision('parser')" style="background-color: #e67e22;" title="選択したリビジョンを復元 / Restore selected revision">
+                        🔄 復元 / Restore
+                    </button>
                 </div>
                 <div class="form-group">
                     <label>パーサータイプ / Parser Type:</label>
@@ -1068,7 +1214,6 @@ async function showEditParserModal() {
                 <div style="display: flex; gap: 0.5rem;">
                     <button class="btn btn-secondary" onclick="closeModal()">キャンセル / Cancel</button>
                     <button class="btn btn-primary" onclick="saveParserRevision()">保存 / Save</button>
-                    <button class="btn btn-primary" onclick="rebuildParserRevision()" style="background-color: #27ae60;">リビルド / Rebuild</button>
                 </div>
             </div>
         `;
@@ -1080,6 +1225,7 @@ async function showEditParserModal() {
 
 /**
  * Save (update) current parser revision
+ * Smart save: Creates new revision only if content changed
  * Specification: docs/req.txt section 4.4.3 - 保存ボタン
  */
 async function saveParserRevision() {
@@ -1104,51 +1250,17 @@ async function saveParserRevision() {
             })
         });
 
-        if (!response.ok) throw new Error('Failed to update revision');
+        if (!response.ok) throw new Error('Failed to save revision');
 
+        const result = await response.json();
         closeModal();
         await loadConfig();
-        alert('パーサー設定を保存しました / Parser configuration saved');
-    } catch (error) {
-        alert(`エラー / Error: ${error.message}`);
-    }
-}
 
-/**
- * Rebuild (create new) parser revision
- * Specification: docs/req.txt section 4.4.3 - リビルドボタン
- */
-async function rebuildParserRevision() {
-    const parserType = document.getElementById('edit-parser-type').value;
-    const parserConfigText = document.getElementById('edit-parser-config').value;
-
-    let parserConfig;
-    try {
-        parserConfig = JSON.parse(parserConfigText);
-        parserConfig.type = parserType; // Ensure type matches selection
-    } catch (error) {
-        alert('パーサー設定のJSON形式が不正です / Invalid JSON format for parser configuration');
-        return;
-    }
-
-    if (!confirm('新しいリビジョンを作成しますか？\n\nCreate a new revision?')) {
-        return;
-    }
-
-    try {
-        const response = await fetch(`/api/projects/${currentProjectId}/revisions`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                parser_config: JSON.stringify(parserConfig)
-            })
-        });
-
-        if (!response.ok) throw new Error('Failed to create revision');
-
-        closeModal();
-        await loadConfig();
-        alert('新しいリビジョンを作成しました / New revision created');
+        if (result.is_new) {
+            alert(`新しいリビジョン ${result.revision} を作成しました / New revision ${result.revision} created`);
+        } else {
+            alert('変更がありませんでした / No changes detected');
+        }
     } catch (error) {
         alert(`エラー / Error: ${error.message}`);
     }
@@ -1188,7 +1300,6 @@ async function showBatchEditPromptModal() {
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeModal()">キャンセル / Cancel</button>
                 <button class="btn btn-primary" onclick="saveBatchPromptRevision(${projectId})">保存 / Save</button>
-                <button class="btn btn-primary" onclick="rebuildBatchPromptRevision(${projectId})" style="background-color: #27ae60;">リビルド / Rebuild</button>
             </div>
         `;
         showModal(modalContent);
@@ -1199,6 +1310,7 @@ async function showBatchEditPromptModal() {
 
 /**
  * Save batch prompt revision
+ * Smart save: Creates new revision only if content changed
  */
 async function saveBatchPromptRevision(projectId) {
     const newTemplate = document.getElementById('edit-prompt-template').value;
@@ -1216,42 +1328,16 @@ async function saveBatchPromptRevision(projectId) {
             })
         });
 
-        if (!response.ok) throw new Error('Failed to update revision');
+        if (!response.ok) throw new Error('Failed to save revision');
 
+        const result = await response.json();
         closeModal();
-        alert('プロンプトテンプレートを保存しました / Prompt template saved');
-    } catch (error) {
-        alert(`エラー / Error: ${error.message}`);
-    }
-}
 
-/**
- * Rebuild batch prompt revision
- */
-async function rebuildBatchPromptRevision(projectId) {
-    const newTemplate = document.getElementById('edit-prompt-template').value;
-    if (!newTemplate.trim()) {
-        alert('プロンプトテンプレートを入力してください / Please enter a prompt template');
-        return;
-    }
-
-    if (!confirm('新しいリビジョンを作成しますか？\n{{}}構造の変更を伴う場合に使用してください。\n\nCreate a new revision?\nUse this when changing {{}} structure.')) {
-        return;
-    }
-
-    try {
-        const response = await fetch(`/api/projects/${projectId}/revisions`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                prompt_template: newTemplate
-            })
-        });
-
-        if (!response.ok) throw new Error('Failed to create revision');
-
-        closeModal();
-        alert('新しいリビジョンを作成しました / New revision created');
+        if (result.is_new) {
+            alert(`新しいリビジョン ${result.revision} を作成しました / New revision ${result.revision} created`);
+        } else {
+            alert('変更がありませんでした / No changes detected');
+        }
     } catch (error) {
         alert(`エラー / Error: ${error.message}`);
     }
@@ -1304,7 +1390,6 @@ async function showBatchEditParserModal() {
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeModal()">キャンセル / Cancel</button>
                 <button class="btn btn-primary" onclick="saveBatchParserRevision(${projectId})">保存 / Save</button>
-                <button class="btn btn-primary" onclick="rebuildBatchParserRevision(${projectId})" style="background-color: #27ae60;">リビルド / Rebuild</button>
             </div>
         `;
         showModal(modalContent);
@@ -1315,6 +1400,7 @@ async function showBatchEditParserModal() {
 
 /**
  * Save batch parser revision
+ * Smart save: Creates new revision only if content changed
  */
 async function saveBatchParserRevision(projectId) {
     const parserType = document.getElementById('edit-parser-type').value;
@@ -1338,48 +1424,16 @@ async function saveBatchParserRevision(projectId) {
             })
         });
 
-        if (!response.ok) throw new Error('Failed to update revision');
+        if (!response.ok) throw new Error('Failed to save revision');
 
+        const result = await response.json();
         closeModal();
-        alert('パーサー設定を保存しました / Parser configuration saved');
-    } catch (error) {
-        alert(`エラー / Error: ${error.message}`);
-    }
-}
 
-/**
- * Rebuild batch parser revision
- */
-async function rebuildBatchParserRevision(projectId) {
-    const parserType = document.getElementById('edit-parser-type').value;
-    const parserConfigText = document.getElementById('edit-parser-config').value;
-
-    let parserConfig;
-    try {
-        parserConfig = JSON.parse(parserConfigText);
-        parserConfig.type = parserType;
-    } catch (error) {
-        alert('パーサー設定のJSON形式が不正です / Invalid JSON format for parser configuration');
-        return;
-    }
-
-    if (!confirm('新しいリビジョンを作成しますか？\nパーサー構造の変更を伴う場合に使用してください。\n\nCreate a new revision?\nUse this when changing parser structure.')) {
-        return;
-    }
-
-    try {
-        const response = await fetch(`/api/projects/${projectId}/revisions`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                parser_config: JSON.stringify(parserConfig)
-            })
-        });
-
-        if (!response.ok) throw new Error('Failed to create revision');
-
-        closeModal();
-        alert('新しいリビジョンを作成しました / New revision created');
+        if (result.is_new) {
+            alert(`新しいリビジョン ${result.revision} を作成しました / New revision ${result.revision} created`);
+        } else {
+            alert('変更がありませんでした / No changes detected');
+        }
     } catch (error) {
         alert(`エラー / Error: ${error.message}`);
     }
@@ -1429,8 +1483,8 @@ function renderBatchHistory(jobs) {
     }
 
     container.innerHTML = jobs.map(job => {
-        const createdAt = new Date(job.created_at).toLocaleString('ja-JP');
-        const finishedAt = job.finished_at ? new Date(job.finished_at).toLocaleString('ja-JP') : '-';
+        const createdAt = formatJST(job.created_at);
+        const finishedAt = formatJST(job.finished_at);
         const turnaround = job.turnaround_ms ? `${(job.turnaround_ms / 1000).toFixed(1)}s` : 'N/A';
         const itemCount = job.items ? job.items.length : 0;
         const modelName = job.model_name || '-';
@@ -1670,7 +1724,7 @@ function renderProjects() {
             </div>
             <div class="item-description">${project.description || ''}</div>
             <div class="item-meta">
-                リビジョン数: ${project.revision_count} | 作成日: ${new Date(project.created_at).toLocaleString('ja-JP')}
+                リビジョン数: ${project.revision_count} | 作成日: ${formatJST(project.created_at)}
             </div>
         </div>
     `).join('');
@@ -1855,46 +1909,163 @@ async function loadAvailableModels() {
             `<div class="badge badge-info">${model.display_name || model.name || model}</div>`
         ).join(' ');
 
-        // Also load model enable settings
-        await loadModelEnableSettings();
+        // Also load model configuration settings
+        await loadModelConfigurationSettings();
     } catch (error) {
         // Failed to load models - silently continue
     }
 }
 
-async function loadModelEnableSettings() {
+/**
+ * Load unified model configuration settings
+ * Shows enable/disable toggle and parameters for each model
+ */
+async function loadModelConfigurationSettings() {
+    const container = document.getElementById('model-configuration-settings');
+    if (!container) return;
+
     try {
-        const response = await fetch('/api/settings/models/all');
-        const models = await response.json();
+        // Load all models with their status
+        const modelsResponse = await fetch('/api/settings/models/all');
+        const models = await modelsResponse.json();
 
-        const container = document.getElementById('model-enable-settings');
-        if (!container) return;
+        // Load parameters for each model
+        const modelsWithParams = await Promise.all(
+            models.map(async (model) => {
+                try {
+                    const paramsResponse = await fetch(`/api/settings/models/${model.name}/parameters`);
+                    if (!paramsResponse.ok) return { ...model, parameters: null };
+                    const paramsData = await paramsResponse.json();
+                    return {
+                        ...model,
+                        parameters: paramsData.active_parameters || paramsData.default_parameters || {},
+                        defaultParameters: paramsData.default_parameters || {}
+                    };
+                } catch (e) {
+                    return { ...model, parameters: null };
+                }
+            })
+        );
 
-        container.innerHTML = models.map(model => `
-            <div class="model-toggle" style="display: flex; align-items: center; padding: 0.5rem; border-bottom: 1px solid #ecf0f1;">
-                <label style="flex: 1; margin: 0; cursor: pointer;">
-                    <input type="checkbox"
-                           class="model-enable-checkbox"
-                           data-model-name="${model.name}"
-                           ${model.enabled ? 'checked' : ''}
-                           onchange="toggleModelEnabled('${model.name}', this.checked)"
-                           style="margin-right: 0.5rem; cursor: pointer;">
-                    <strong>${model.display_name}</strong>
-                    <span style="color: #7f8c8d; font-size: 0.85rem; margin-left: 0.5rem;">(${model.name})</span>
-                </label>
-                <span class="badge ${model.enabled ? 'badge-success' : 'badge-secondary'}" style="font-size: 0.75rem;">
-                    ${model.enabled ? '有効 / Enabled' : '無効 / Disabled'}
-                </span>
-            </div>
-        `).join('');
+        container.innerHTML = modelsWithParams.map(model => {
+            const isAzureGPT5 = model.name.includes('azure-gpt-5');
+            const isOpenAIGPT5 = model.name.includes('openai-gpt-5');
+            const params = model.parameters || {};
+            const defaultParams = model.defaultParameters || {};
+
+            // Build parameter inputs based on model type
+            let paramInputs = '';
+
+            // Azure GPT-5 models: show max_output_tokens
+            if (isAzureGPT5) {
+                const maxTokens = params.max_output_tokens || defaultParams.max_output_tokens || 8192;
+                paramInputs = `
+                    <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap;">
+                        <span style="color: #7f8c8d; font-size: 0.85rem; min-width: 130px;">max_output_tokens:</span>
+                        <input type="number"
+                               id="param-max_output_tokens-${model.name}"
+                               value="${maxTokens}"
+                               min="1024"
+                               max="65536"
+                               step="1024"
+                               style="width: 100px;">
+                        <button class="btn btn-primary btn-sm"
+                                onclick="saveModelParameter('${model.name}', 'max_output_tokens')"
+                                style="padding: 0.25rem 0.5rem; font-size: 0.8rem;">
+                            保存
+                        </button>
+                        <span id="param-status-${model.name}" style="color: #27ae60; font-size: 0.85rem;"></span>
+                    </div>
+                `;
+            }
+            // OpenAI GPT-5 models: show verbosity and reasoning_effort
+            else if (isOpenAIGPT5) {
+                const verbosity = params.verbosity || defaultParams.verbosity || 'medium';
+                const reasoningEffort = params.reasoning_effort || defaultParams.reasoning_effort || 'minimal';
+                paramInputs = `
+                    <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap;">
+                        <span style="color: #7f8c8d; font-size: 0.85rem; min-width: 80px;">verbosity:</span>
+                        <select id="param-verbosity-${model.name}" style="width: 100px;">
+                            <option value="low" ${verbosity === 'low' ? 'selected' : ''}>low</option>
+                            <option value="medium" ${verbosity === 'medium' ? 'selected' : ''}>medium</option>
+                            <option value="high" ${verbosity === 'high' ? 'selected' : ''}>high</option>
+                        </select>
+                        <span style="color: #7f8c8d; font-size: 0.85rem; min-width: 110px; margin-left: 0.5rem;">reasoning_effort:</span>
+                        <select id="param-reasoning_effort-${model.name}" style="width: 100px;">
+                            <option value="minimal" ${reasoningEffort === 'minimal' ? 'selected' : ''}>minimal</option>
+                            <option value="medium" ${reasoningEffort === 'medium' ? 'selected' : ''}>medium</option>
+                        </select>
+                        <button class="btn btn-primary btn-sm"
+                                onclick="saveOpenAIGPT5Parameters('${model.name}')"
+                                style="padding: 0.25rem 0.5rem; font-size: 0.8rem; margin-left: 0.5rem;">
+                            保存
+                        </button>
+                        <span id="param-status-${model.name}" style="color: #27ae60; font-size: 0.85rem;"></span>
+                    </div>
+                `;
+            }
+            // GPT-4 and other models: show temperature if available
+            else if (params.temperature !== undefined || defaultParams.temperature !== undefined) {
+                const temp = params.temperature !== undefined ? params.temperature : (defaultParams.temperature || 0.7);
+                paramInputs = `
+                    <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap;">
+                        <span style="color: #7f8c8d; font-size: 0.85rem; min-width: 100px;">temperature:</span>
+                        <input type="number"
+                               id="param-temperature-${model.name}"
+                               value="${temp}"
+                               min="0"
+                               max="2"
+                               step="0.1"
+                               style="width: 80px;">
+                        <button class="btn btn-primary btn-sm"
+                                onclick="saveModelParameter('${model.name}', 'temperature')"
+                                style="padding: 0.25rem 0.5rem; font-size: 0.8rem;">
+                            保存
+                        </button>
+                        <span id="param-status-${model.name}" style="color: #27ae60; font-size: 0.85rem;"></span>
+                    </div>
+                `;
+            }
+
+            return `
+                <div class="model-config-item" style="padding: 0.75rem; border-bottom: 1px solid #ecf0f1;">
+                    <div style="display: flex; align-items: center; justify-content: space-between;">
+                        <label style="flex: 1; margin: 0; cursor: pointer; display: flex; align-items: center;">
+                            <input type="checkbox"
+                                   class="model-enable-checkbox"
+                                   data-model-name="${model.name}"
+                                   ${model.enabled ? 'checked' : ''}
+                                   onchange="toggleModelEnabled('${model.name}', this.checked)"
+                                   style="margin-right: 0.5rem; cursor: pointer; width: 18px; height: 18px;">
+                            <strong>${model.display_name}</strong>
+                            <span style="color: #7f8c8d; font-size: 0.85rem; margin-left: 0.5rem;">(${model.name})</span>
+                        </label>
+                        <span class="badge ${model.enabled ? 'badge-success' : 'badge-secondary'}" style="font-size: 0.75rem;">
+                            ${model.enabled ? '有効' : '無効'}
+                        </span>
+                    </div>
+                    ${paramInputs}
+                </div>
+            `;
+        }).join('');
+
+        // Add help text at bottom
+        container.innerHTML += `
+            <p class="info" style="margin-top: 1rem; font-size: 0.85rem; color: #7f8c8d;">
+                <strong>Azure GPT-5:</strong> max_output_tokens 推奨値 8192〜16384（出力が切れる場合は増加）<br>
+                <strong>OpenAI GPT-5:</strong> verbosity (low/medium/high), reasoning_effort (minimal/medium)<br>
+                <strong>GPT-4:</strong> temperature 0.0〜2.0（低い値=確定的、高い値=創造的）
+            </p>
+        `;
+
     } catch (error) {
-        const container = document.getElementById('model-enable-settings');
-        if (container) {
-            container.innerHTML = '<p class="error">モデル設定の読み込みに失敗しました / Failed to load model settings</p>';
-        }
+        container.innerHTML = '<p class="error">モデル設定の読み込みに失敗しました / Failed to load model settings</p>';
     }
 }
 
+/**
+ * Toggle model enabled/disabled status
+ */
 async function toggleModelEnabled(modelName, enabled) {
     try {
         const response = await fetch(`/api/settings/models/${modelName}/enable?enabled=${enabled}`, {
@@ -1907,26 +2078,95 @@ async function toggleModelEnabled(modelName, enabled) {
 
         // Reload model lists
         await loadAvailableModels();
-
-        // Show success message
-        const message = enabled ?
-            `${modelName} を有効化しました / Enabled ${modelName}` :
-            `${modelName} を無効化しました / Disabled ${modelName}`;
-
-        // Create temporary success message
-        const container = document.getElementById('model-enable-settings');
-        const successMsg = document.createElement('div');
-        successMsg.className = 'success-message';
-        successMsg.style.cssText = 'background: #27ae60; color: white; padding: 0.5rem; margin: 0.5rem 0; border-radius: 4px;';
-        successMsg.textContent = message;
-        container.insertBefore(successMsg, container.firstChild);
-
-        setTimeout(() => successMsg.remove(), 3000);
+        await loadModelConfigurationSettings();
 
     } catch (error) {
         alert(`エラー / Error: ${error.message}`);
         // Reload to reset checkbox state
-        await loadModelEnableSettings();
+        await loadModelConfigurationSettings();
+    }
+}
+
+/**
+ * Save a single model parameter
+ */
+async function saveModelParameter(modelName, paramName) {
+    const input = document.getElementById(`param-${paramName}-${modelName}`);
+    const statusSpan = document.getElementById(`param-status-${modelName}`);
+
+    if (!input) return;
+
+    let value = parseFloat(input.value);
+    if (paramName === 'max_output_tokens') {
+        value = parseInt(input.value, 10);
+        if (isNaN(value) || value < 1024 || value > 65536) {
+            alert('max_output_tokens は 1024 から 65536 の間で指定してください');
+            return;
+        }
+    } else if (paramName === 'temperature') {
+        if (isNaN(value) || value < 0 || value > 2) {
+            alert('temperature は 0 から 2 の間で指定してください');
+            return;
+        }
+    }
+
+    try {
+        const response = await fetch(`/api/settings/models/${modelName}/parameters`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ [paramName]: value })
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to save parameter');
+        }
+
+        // Show success feedback
+        if (statusSpan) {
+            statusSpan.textContent = '✓ 保存完了';
+            setTimeout(() => { statusSpan.textContent = ''; }, 3000);
+        }
+
+    } catch (error) {
+        alert(`エラー / Error: ${error.message}`);
+    }
+}
+
+/**
+ * Save OpenAI GPT-5 parameters (verbosity and reasoning_effort)
+ */
+async function saveOpenAIGPT5Parameters(modelName) {
+    const verbositySelect = document.getElementById(`param-verbosity-${modelName}`);
+    const reasoningSelect = document.getElementById(`param-reasoning_effort-${modelName}`);
+    const statusSpan = document.getElementById(`param-status-${modelName}`);
+
+    if (!verbositySelect || !reasoningSelect) return;
+
+    const verbosity = verbositySelect.value;
+    const reasoningEffort = reasoningSelect.value;
+
+    try {
+        const response = await fetch(`/api/settings/models/${modelName}/parameters`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                verbosity: verbosity,
+                reasoning_effort: reasoningEffort
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to save parameters');
+        }
+
+        // Show success feedback
+        if (statusSpan) {
+            statusSpan.textContent = '✓ 保存完了';
+            setTimeout(() => { statusSpan.textContent = ''; }, 3000);
+        }
+
+    } catch (error) {
+        alert(`エラー / Error: ${error.message}`);
     }
 }
 
@@ -1961,7 +2201,7 @@ function renderDatasets() {
                 </div>
             </div>
             <div class="item-meta">
-                ファイル: ${dataset.source_file_name} | 行数: ${dataset.row_count} | 作成日: ${new Date(dataset.created_at).toLocaleString('ja-JP')}
+                ファイル: ${dataset.source_file_name} | 行数: ${dataset.row_count} | 作成日: ${formatJST(dataset.created_at)}
             </div>
         </div>
     `).join('');
@@ -2488,35 +2728,52 @@ async function loadModelParameters() {
         const active = currentModelParams.active_parameters;
         const defaults = currentModelParams.default_parameters;
 
-        // Check if GPT-5 model
+        // Check model type
         const isGPT5 = modelName.includes('gpt-5') || modelName.includes('gpt5');
+        const isAzureGPT5 = isGPT5 && modelName.includes('azure');
+        const isOpenAIGPT5 = isGPT5 && modelName.includes('openai');
 
         // Get all parameter groups
         const temperatureGroup = document.getElementById('param-temperature-group');
         const maxTokensGroup = document.getElementById('param-max-tokens-group');
         const topPGroup = document.getElementById('param-top-p-group');
+        const maxOutputTokensGroup = document.getElementById('param-max-output-tokens-group');
         const verbosityGroup = document.getElementById('param-verbosity-group');
         const reasoningEffortGroup = document.getElementById('param-reasoning-effort-group');
 
-        if (isGPT5) {
-            // GPT-5: Hide traditional parameters, show GPT-5 specific parameters
+        if (isAzureGPT5) {
+            // Azure GPT-5: Show max_output_tokens only
             temperatureGroup.style.display = 'none';
             maxTokensGroup.style.display = 'none';
             topPGroup.style.display = 'none';
+            maxOutputTokensGroup.style.display = 'block';
+            verbosityGroup.style.display = 'none';
+            reasoningEffortGroup.style.display = 'none';
+
+            // Set Azure GPT-5 parameter values
+            document.getElementById('param-max-output-tokens').value = active.max_output_tokens || defaults.max_output_tokens || 8192;
+            document.getElementById('default-max-output-tokens').textContent = `(デフォルト / Default: ${defaults.max_output_tokens || 8192})`;
+        } else if (isOpenAIGPT5) {
+            // OpenAI GPT-5: Show verbosity and reasoning_effort
+            temperatureGroup.style.display = 'none';
+            maxTokensGroup.style.display = 'none';
+            topPGroup.style.display = 'none';
+            maxOutputTokensGroup.style.display = 'none';
             verbosityGroup.style.display = 'block';
             reasoningEffortGroup.style.display = 'block';
 
-            // Set GPT-5 parameter values
+            // Set OpenAI GPT-5 parameter values
             document.getElementById('param-verbosity').value = active.verbosity || defaults.verbosity || 'medium';
             document.getElementById('param-reasoning-effort').value = active.reasoning_effort || defaults.reasoning_effort || 'medium';
 
             document.getElementById('default-verbosity').textContent = `(デフォルト / Default: ${defaults.verbosity || 'medium'})`;
             document.getElementById('default-reasoning-effort').textContent = `(デフォルト / Default: ${defaults.reasoning_effort || 'medium'})`;
         } else {
-            // Non-GPT-5: Show traditional parameters, hide GPT-5 specific parameters
+            // Non-GPT-5: Show traditional parameters
             temperatureGroup.style.display = 'block';
             maxTokensGroup.style.display = 'block';
             topPGroup.style.display = 'block';
+            maxOutputTokensGroup.style.display = 'none';
             verbosityGroup.style.display = 'none';
             reasoningEffortGroup.style.display = 'none';
 
@@ -2538,11 +2795,18 @@ async function loadModelParameters() {
 async function saveModelParameters() {
     const modelName = document.getElementById('param-model-select').value;
     const isGPT5 = modelName.includes('gpt-5') || modelName.includes('gpt5');
+    const isAzureGPT5 = isGPT5 && modelName.includes('azure');
+    const isOpenAIGPT5 = isGPT5 && modelName.includes('openai');
 
     let parameters;
 
-    if (isGPT5) {
-        // GPT-5: Only send GPT-5 specific parameters
+    if (isAzureGPT5) {
+        // Azure GPT-5: Send max_output_tokens only
+        parameters = {
+            max_output_tokens: parseInt(document.getElementById('param-max-output-tokens').value)
+        };
+    } else if (isOpenAIGPT5) {
+        // OpenAI GPT-5: Send verbosity and reasoning_effort
         parameters = {
             verbosity: document.getElementById('param-verbosity').value,
             reasoning_effort: document.getElementById('param-reasoning-effort').value
@@ -2720,8 +2984,15 @@ async function cancelBatchJob() {
     const jobId = currentBatchJobId;
     const projectId = document.getElementById('batch-project-select')?.value;
 
-    await cancelJob(currentBatchJobId, 'btn-stop-batch', 'batch-results-area');
+    // Use dedicated status element instead of batch-results-area to avoid overwriting results
+    await cancelJob(currentBatchJobId, 'btn-stop-batch', 'batch-execution-status');
     hideBatchStopButton();
+
+    // Show the status element
+    const statusEl = document.getElementById('batch-execution-status');
+    if (statusEl) {
+        statusEl.style.display = 'block';
+    }
 
     // Reload job state and history after cancellation
     if (jobId && projectId) {

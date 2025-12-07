@@ -61,6 +61,7 @@ class RevisionResponse(BaseModel):
     prompt_template: str
     parser_config: str
     created_at: str
+    is_new: bool = False  # Indicates if a new revision was created
 
 
 @router.get("/api/projects", response_model=List[ProjectResponse])
@@ -283,11 +284,16 @@ def create_revision(
 
     next_revision = (latest.revision + 1) if latest else 1
 
+    # Normalize parser config to prevent double-encoding
+    parser_config = request.parser_config or create_default_parser_config()
+    normalized_parser = normalize_json_for_comparison(parser_config)
+    parser_to_store = normalized_parser if normalized_parser else parser_config
+
     revision = ProjectRevision(
         project_id=project_id,
         revision=next_revision,
         prompt_template=request.prompt_template,
-        parser_config=request.parser_config or create_default_parser_config()
+        parser_config=parser_to_store
     )
     db.add(revision)
     db.commit()
@@ -303,15 +309,132 @@ def create_revision(
     )
 
 
+@router.post("/api/projects/{project_id}/revisions/{revision_number}/restore", response_model=RevisionResponse)
+def restore_revision(
+    project_id: int,
+    revision_number: int,
+    db: Session = Depends(get_db)
+):
+    """Restore a past revision by creating a new revision with its content.
+
+    Example: If current is revision 10, restoring revision 7 creates revision 11
+    with the content of revision 7.
+
+    Specification: Enhanced revision management
+    Phase 2
+    """
+    # Find the revision to restore
+    target_revision = db.query(ProjectRevision).filter(
+        ProjectRevision.project_id == project_id,
+        ProjectRevision.revision == revision_number
+    ).first()
+
+    if not target_revision:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Revision {revision_number} not found for this project"
+        )
+
+    # Get latest revision number
+    latest = db.query(ProjectRevision).filter(
+        ProjectRevision.project_id == project_id
+    ).order_by(ProjectRevision.revision.desc()).first()
+
+    next_revision = (latest.revision + 1) if latest else 1
+
+    # Normalize parser config when restoring (in case old revision had double-encoded data)
+    normalized_parser = normalize_json_for_comparison(target_revision.parser_config or "")
+    parser_to_store = normalized_parser if normalized_parser else target_revision.parser_config
+
+    # Create new revision with content from target revision
+    new_revision = ProjectRevision(
+        project_id=project_id,
+        revision=next_revision,
+        prompt_template=target_revision.prompt_template,
+        parser_config=parser_to_store
+    )
+    db.add(new_revision)
+    db.commit()
+    db.refresh(new_revision)
+
+    return RevisionResponse(
+        id=new_revision.id,
+        project_id=new_revision.project_id,
+        revision=new_revision.revision,
+        prompt_template=new_revision.prompt_template,
+        parser_config=new_revision.parser_config or "",
+        created_at=new_revision.created_at,
+        is_new=True
+    )
+
+
+def unwrap_json_string(value):
+    """Recursively unwrap a JSON value until we get a dict/list or non-JSON string.
+
+    This handles cases where JSON was double/triple encoded:
+    - '{"type":"none"}' -> {"type": "none"} (dict)
+    - '"{\\"type\\":\\"none\\"}"' -> {"type": "none"} (dict)
+    """
+    import json as json_module
+
+    # If it's already a dict or list, we're done
+    if isinstance(value, (dict, list)):
+        return value
+
+    # If it's not a string, return as-is
+    if not isinstance(value, str):
+        return value
+
+    # Try to parse as JSON
+    try:
+        parsed = json_module.loads(value)
+        # If we got a string, it might be double-encoded, try again
+        if isinstance(parsed, str):
+            return unwrap_json_string(parsed)
+        # If we got a dict or list, we're done
+        return parsed
+    except (json_module.JSONDecodeError, TypeError):
+        # Not valid JSON, return original string
+        return value
+
+
+def normalize_json_for_comparison(json_str: str) -> str:
+    """Normalize JSON string for comparison by parsing and re-serializing.
+
+    This ensures consistent formatting regardless of whitespace or key order.
+    Also handles double/triple encoded JSON strings.
+    Returns empty string if parsing fails or input is empty.
+    """
+    import json
+    if not json_str or not json_str.strip():
+        return ""
+    try:
+        # Unwrap any double/triple encoding first
+        unwrapped = unwrap_json_string(json_str)
+
+        # If we got a dict or list, serialize it consistently
+        if isinstance(unwrapped, (dict, list)):
+            return json.dumps(unwrapped, sort_keys=True, ensure_ascii=False)
+
+        # If it's still a string (non-JSON content), return as-is
+        return str(unwrapped)
+    except (json.JSONDecodeError, TypeError):
+        return json_str  # Return as-is if not valid JSON
+
+
 @router.put("/api/projects/{project_id}/revisions/latest", response_model=RevisionResponse)
 def update_latest_revision(
     project_id: int,
     request: RevisionUpdate,
     db: Session = Depends(get_db)
 ):
-    """Update latest revision for project (Save button).
+    """Smart save for project revision.
 
-    Specification: docs/req.txt section 4.4.3 - 保存ボタン
+    Behavior:
+    - If content is different from latest revision, create NEW revision
+    - If content is identical, return existing revision without changes
+
+    Specification: docs/req.txt section 4.4.3 - 保存ボタン (enhanced)
     Phase 2
     """
     # Get latest revision
@@ -322,22 +445,57 @@ def update_latest_revision(
     if not latest:
         raise HTTPException(status_code=404, detail="No revision found for this project")
 
-    # Update existing revision
-    if request.prompt_template:
-        latest.prompt_template = request.prompt_template
-    if request.parser_config:
-        latest.parser_config = request.parser_config
+    # Determine new values (use existing if not provided)
+    new_prompt = request.prompt_template if request.prompt_template else latest.prompt_template
+    new_parser = request.parser_config if request.parser_config else latest.parser_config
 
+    # Normalize parser configs for comparison (handles double-encoding and formatting differences)
+    normalized_new_parser = normalize_json_for_comparison(new_parser or "")
+    normalized_existing_parser = normalize_json_for_comparison(latest.parser_config or "")
+
+    # Check if there are any changes
+    # For prompt: direct string comparison
+    has_prompt_change = new_prompt != latest.prompt_template
+
+    # For parser: compare normalized versions
+    has_parser_change = normalized_new_parser != normalized_existing_parser
+
+    if not has_prompt_change and not has_parser_change:
+        # No changes - return existing revision
+        return RevisionResponse(
+            id=latest.id,
+            project_id=latest.project_id,
+            revision=latest.revision,
+            prompt_template=latest.prompt_template,
+            parser_config=latest.parser_config or "",
+            created_at=latest.created_at,
+            is_new=False
+        )
+
+    # Changes detected - create new revision
+    # Store the normalized parser config to prevent double-encoding
+    parser_to_store = normalized_new_parser if normalized_new_parser else (
+        normalized_existing_parser if normalized_existing_parser else ""
+    )
+
+    new_revision = ProjectRevision(
+        project_id=project_id,
+        revision=latest.revision + 1,
+        prompt_template=new_prompt,
+        parser_config=parser_to_store
+    )
+    db.add(new_revision)
     db.commit()
-    db.refresh(latest)
+    db.refresh(new_revision)
 
     return RevisionResponse(
-        id=latest.id,
-        project_id=latest.project_id,
-        revision=latest.revision,
-        prompt_template=latest.prompt_template,
-        parser_config=latest.parser_config or "",
-        created_at=latest.created_at
+        id=new_revision.id,
+        project_id=new_revision.project_id,
+        revision=new_revision.revision,
+        prompt_template=new_revision.prompt_template,
+        parser_config=new_revision.parser_config or "",
+        created_at=new_revision.created_at,
+        is_new=True
     )
 
 

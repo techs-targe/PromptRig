@@ -217,9 +217,20 @@ class ModelParametersUpdate(BaseModel):
 
     Parameters can be float (temperature, max_tokens, top_p) or
     string (verbosity, reasoning_effort for GPT-5 models).
+
+    Note: model_name is optional since it's also provided in the URL path.
+    If provided in both, the URL path takes precedence.
+
+    Simple usage (just the parameters):
+      {"max_output_tokens": 16384}
+
+    Full usage:
+      {"model_name": "azure-gpt-5-mini", "parameters": {"max_output_tokens": 16384}}
     """
-    model_name: str
-    parameters: Dict[str, Union[float, int, str]]
+    model_name: Optional[str] = None
+    parameters: Optional[Dict[str, Union[float, int, str]]] = None
+    # Allow arbitrary extra fields for simple parameter passing
+    model_config = {"extra": "allow"}
 
 
 @router.get("/api/settings/models/available")
@@ -330,8 +341,10 @@ def update_model_parameters(
     """Update default parameters for a specific model.
 
     Args:
-        model_name: The model name
-        request: New parameter values
+        model_name: The model name (from URL path)
+        request: New parameter values. Supports two formats:
+            1. Simple: {"max_output_tokens": 16384}
+            2. Full: {"parameters": {"max_output_tokens": 16384}}
     """
     # Validate model exists
     models = get_available_models()
@@ -340,11 +353,34 @@ def update_model_parameters(
     if not model_info:
         raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
 
-    # Store custom parameters
+    # Handle both request formats
+    # If parameters is provided explicitly, use it
+    # Otherwise, collect all extra fields as parameters
+    if request.parameters:
+        params_to_save = request.parameters
+    else:
+        # Get all fields except model_name and parameters (which are None)
+        extra_data = request.model_dump(exclude={"model_name", "parameters"}, exclude_none=True)
+        if extra_data:
+            params_to_save = extra_data
+        else:
+            raise HTTPException(status_code=400, detail="No parameters provided")
+
+    # Store custom parameters (merge with existing if any)
     setting_key = f"model_params_{model_name}"
     setting = db.query(SystemSetting).filter(SystemSetting.key == setting_key).first()
 
-    params_json = json.dumps(request.parameters)
+    # Load existing params and merge
+    existing_params = {}
+    if setting and setting.value:
+        try:
+            existing_params = json.loads(setting.value)
+        except json.JSONDecodeError:
+            existing_params = {}
+
+    # Merge new params with existing
+    merged_params = {**existing_params, **params_to_save}
+    params_json = json.dumps(merged_params)
 
     if setting:
         setting.value = params_json
@@ -357,7 +393,7 @@ def update_model_parameters(
 
     return {
         "model_name": model_name,
-        "parameters": request.parameters
+        "parameters": merged_params
     }
 
 

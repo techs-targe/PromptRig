@@ -142,6 +142,10 @@ class JobManager:
         # Get parallelism setting (default: 1)
         parallelism = self._get_parallelism_setting()
 
+        # Get model parameters from system settings (for max_output_tokens, etc.)
+        actual_model_name = model_name or llm_client.get_model_name()
+        model_params = self._get_model_parameters(actual_model_name)
+
         # Execute all pending job items
         job_items = self.db.query(JobItem).filter(
             JobItem.job_id == job_id,
@@ -157,10 +161,10 @@ class JobManager:
 
         if parallelism == 1:
             # Serial execution (original behavior)
-            error_count = self._execute_items_serial(job_items, llm_client, revision, temperature)
+            error_count = self._execute_items_serial(job_items, llm_client, revision, temperature, model_params)
         else:
             # Parallel execution
-            error_count = self._execute_items_parallel(job_items, llm_client, revision, temperature, parallelism)
+            error_count = self._execute_items_parallel(job_items, llm_client, revision, temperature, parallelism, model_params)
 
         # Merge CSV outputs for batch jobs and repeated single executions (Phase 2)
         if job.job_type == "batch" or (job.job_type == "single" and len(job_items) > 1):
@@ -183,6 +187,50 @@ class JobManager:
         self.db.refresh(job)
 
         return job
+
+    def _get_model_parameters(self, model_name: str) -> dict:
+        """Get custom model parameters from system settings.
+
+        Args:
+            model_name: Name of the LLM model
+
+        Returns:
+            Dictionary of model parameters (empty if not customized)
+            Filtered to only include parameters applicable to the model type.
+        """
+        import json as json_module
+        setting_key = f"model_params_{model_name}"
+        setting = self.db.query(SystemSetting).filter(
+            SystemSetting.key == setting_key
+        ).first()
+
+        if setting and setting.value:
+            try:
+                params = json_module.loads(setting.value)
+            except (json_module.JSONDecodeError, TypeError):
+                return {}
+        else:
+            return {}
+
+        # Filter parameters based on model type
+        # This prevents conflicts like "temperature" being passed to GPT-5 models
+        is_gpt5 = "gpt-5" in model_name or "gpt5" in model_name
+        is_azure_gpt5 = is_gpt5 and "azure" in model_name
+        is_openai_gpt5 = is_gpt5 and "openai" in model_name
+
+        if is_azure_gpt5:
+            # Azure GPT-5: Only allow max_output_tokens
+            allowed_keys = {"max_output_tokens"}
+        elif is_openai_gpt5:
+            # OpenAI GPT-5: Allow verbosity and reasoning_effort
+            allowed_keys = {"verbosity", "reasoning_effort", "max_output_tokens"}
+        else:
+            # GPT-4 and other models: Allow temperature, max_tokens, top_p
+            allowed_keys = {"temperature", "max_tokens", "top_p"}
+
+        # Filter to only allowed parameters
+        filtered_params = {k: v for k, v in params.items() if k in allowed_keys}
+        return filtered_params
 
     def _get_parallelism_setting(self) -> int:
         """Get job parallelism setting from system settings.
@@ -463,7 +511,8 @@ class JobManager:
         job_items: List[JobItem],
         llm_client: LLMClient,
         revision: ProjectRevision,
-        temperature: float
+        temperature: float,
+        model_params: dict = None
     ) -> int:
         """Execute job items serially (one at a time).
 
@@ -472,11 +521,13 @@ class JobManager:
             llm_client: LLM client instance
             revision: Project revision for parser
             temperature: LLM temperature
+            model_params: Additional model parameters (e.g., max_output_tokens)
 
         Returns:
             Number of errors encountered
         """
         error_count = 0
+        model_params = model_params or {}
 
         for item in job_items:
             # Check if item was cancelled
@@ -503,12 +554,26 @@ class JobManager:
                         logger.error(f"Error processing images for item {item.id}: {e}")
                         # Continue without images if processing fails
 
-                # Call LLM with prompt and optional images
-                response = llm_client.call(
-                    item.raw_prompt,
-                    images=images if images else None,
-                    temperature=temperature
-                )
+                # Call LLM with prompt, optional images, and model parameters
+                # GPT-5 models don't use temperature parameter
+                model_name = llm_client.get_model_name()
+                is_gpt5 = "gpt-5" in model_name or "gpt5" in model_name
+
+                if is_gpt5:
+                    # GPT-5: Don't pass temperature
+                    response = llm_client.call(
+                        item.raw_prompt,
+                        images=images if images else None,
+                        **model_params
+                    )
+                else:
+                    # GPT-4 and other models: Pass temperature
+                    response = llm_client.call(
+                        item.raw_prompt,
+                        images=images if images else None,
+                        temperature=temperature,
+                        **model_params
+                    )
 
                 if response.success:
                     item.status = "done"
@@ -543,7 +608,8 @@ class JobManager:
         llm_client: LLMClient,
         revision: ProjectRevision,
         temperature: float,
-        max_workers: int
+        max_workers: int,
+        model_params: dict = None
     ) -> int:
         """Execute job items in parallel using ThreadPoolExecutor.
 
@@ -553,6 +619,7 @@ class JobManager:
             revision: Project revision for parser
             temperature: LLM temperature
             max_workers: Maximum number of parallel workers
+            model_params: Additional model parameters (e.g., max_output_tokens)
 
         Returns:
             Number of errors encountered
@@ -560,6 +627,7 @@ class JobManager:
         from backend.database import SessionLocal
 
         error_count = 0
+        model_params = model_params or {}
 
         def execute_single_item(
             item_id: int,
@@ -640,12 +708,26 @@ class JobManager:
                         except Exception as e:
                             logger.error(f"Error processing images for item {item_id}: {e}")
 
-                    # Call LLM with prompt and optional images
-                    response = llm_client.call(
-                        raw_prompt,
-                        images=images if images else None,
-                        temperature=temperature
-                    )
+                    # Call LLM with prompt, optional images, and model parameters
+                    # GPT-5 models don't use temperature parameter
+                    model_name = llm_client.get_model_name()
+                    is_gpt5 = "gpt-5" in model_name or "gpt5" in model_name
+
+                    if is_gpt5:
+                        # GPT-5: Don't pass temperature
+                        response = llm_client.call(
+                            raw_prompt,
+                            images=images if images else None,
+                            **model_params
+                        )
+                    else:
+                        # GPT-4 and other models: Pass temperature
+                        response = llm_client.call(
+                            raw_prompt,
+                            images=images if images else None,
+                            temperature=temperature,
+                            **model_params
+                        )
 
                     if response.success:
                         item.status = "done"
@@ -734,6 +816,20 @@ class JobManager:
 
             try:
                 parsed = json.loads(item.parsed_response)
+
+                # Handle double-encoded JSON (string instead of dict)
+                if isinstance(parsed, str):
+                    try:
+                        parsed = json.loads(parsed)
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning(f"CSV merge: Item {item.id} has double-encoded JSON that couldn't be parsed")
+                        continue
+
+                # Ensure parsed is a dictionary
+                if not isinstance(parsed, dict):
+                    logger.warning(f"CSV merge: Item {item.id} parsed_response is not a dict: {type(parsed)}")
+                    continue
+
                 csv_output = parsed.get("csv_output", "")
 
                 logger.debug(f"CSV merge: Item {item.id} - has_csv_output={bool(csv_output)}, parsed_keys={list(parsed.keys())}")
@@ -756,7 +852,7 @@ class JobManager:
                 csv_lines.append(csv_output)
                 logger.debug(f"CSV merge: Added line from item {item.id}: {csv_output[:100]}")
 
-            except (json.JSONDecodeError, KeyError) as e:
+            except (json.JSONDecodeError, KeyError, AttributeError, TypeError) as e:
                 # Skip items with invalid parsed response
                 logger.error(f"CSV merge: Error parsing item {item.id}: {e}")
                 continue

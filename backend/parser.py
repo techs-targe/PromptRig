@@ -48,10 +48,48 @@ class ResponseParser:
 
         if parser_config:
             try:
-                self.config = json.loads(parser_config)
-                self.parser_type = ParserType(self.config.get("type", "none"))
+                self.config = self._unwrap_json(parser_config)
+                if isinstance(self.config, dict):
+                    self.parser_type = ParserType(self.config.get("type", "none"))
+                else:
+                    # If unwrap failed to produce a dict, reset
+                    self.config = {}
+                    self.parser_type = ParserType.NONE
             except (json.JSONDecodeError, ValueError):
                 self.parser_type = ParserType.NONE
+
+    def _unwrap_json(self, value: Any, max_depth: int = 10) -> Any:
+        """Recursively unwrap JSON-encoded strings until we get the actual value.
+
+        Handles multi-encoded JSON like: '"\\"{\\\\\\"type\\\\\\":\\\\\\"json_path\\\\\\"}"'
+
+        Args:
+            value: The value to unwrap (string or already decoded)
+            max_depth: Maximum recursion depth to prevent infinite loops
+
+        Returns:
+            The unwrapped value (dict, list, or primitive)
+        """
+        if max_depth <= 0:
+            return value
+
+        # If it's already a dict or list, return as-is
+        if isinstance(value, (dict, list)):
+            return value
+
+        # If it's not a string, return as-is
+        if not isinstance(value, str):
+            return value
+
+        # Try to parse as JSON
+        try:
+            parsed = json.loads(value)
+            # If the result is still a string, it might be double-encoded
+            if isinstance(parsed, str):
+                return self._unwrap_json(parsed, max_depth - 1)
+            return parsed
+        except (json.JSONDecodeError, TypeError):
+            return value
 
     def parse(self, raw_response: str) -> Dict[str, Any]:
         """Parse raw LLM response according to configuration.

@@ -71,7 +71,7 @@ class AzureGPT5NanoClient(LLMClient):
             prompt: The prompt text to send
             images: Optional list of base64-encoded image strings for Vision API
             **kwargs: Optional parameters
-                - max_tokens (int): Maximum completion tokens (default: 4096)
+                - max_output_tokens (int): Maximum completion tokens (default: 8192)
 
         Note:
             GPT-5 models use chat.completions.create() API.
@@ -98,7 +98,8 @@ class AzureGPT5NanoClient(LLMClient):
 
             try:
                 # Get parameters with defaults
-                max_tokens = kwargs.get("max_tokens", 4096)
+                # Support both max_output_tokens (GPT-5 style) and max_tokens (legacy)
+                max_tokens = kwargs.get("max_output_tokens", kwargs.get("max_tokens", 8192))
 
                 # Build user content (text + optional images for Vision API)
                 if images:
@@ -260,11 +261,14 @@ class AzureGPT5NanoClient(LLMClient):
 
         Note:
             GPT-5 models have simplified parameters.
-            Only max_tokens is configurable.
-            Temperature is fixed at 1.0.
+            max_output_tokens controls the maximum response length.
+            Temperature is fixed at 1.0 by default.
+
+            Reference: OpenAI GPT-5 documentation
+            - max_output_tokens: 1-65536 (recommended: 4096-16384)
         """
         return {
-            "max_tokens": 4096
+            "max_output_tokens": 8192  # Increased default for longer responses
         }
 
     def get_model_name(self) -> str:
