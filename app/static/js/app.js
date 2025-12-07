@@ -225,12 +225,76 @@ function renderParameterInputs() {
 
         const label = document.createElement('label');
         label.setAttribute('for', `param-${param.name}`);
-        label.textContent = `${param.name} (${param.type})`;
+
+        // Add required asterisk if parameter is required
+        if (param.required) {
+            label.innerHTML = `${param.name} (${param.type}) <span class="required-asterisk">*</span>`;
+        } else {
+            label.textContent = `${param.name} (${param.type})`;
+        }
 
         let input;
         if (param.html_type === 'textarea') {
             input = document.createElement('textarea');
             input.rows = param.rows || 5;  // Default to 5 rows
+            input.id = `param-${param.name}`;
+            input.name = param.name;
+            input.required = param.required;
+
+            // Set default value if provided
+            if (param.default) {
+                input.value = param.default;
+            }
+
+            group.appendChild(label);
+            group.appendChild(input);
+            container.appendChild(group);
+            return; // Skip the default input append
+        } else if (param.html_type === 'file') {
+            // Enhanced FILE input with preview, info, and reset button
+            input = document.createElement('input');
+            input.type = 'file';
+            input.id = `param-${param.name}`;
+            input.name = param.name;
+            input.required = param.required;
+
+            if (param.accept) {
+                input.accept = param.accept;
+            }
+
+            // Create wrapper for file input with drag & drop support
+            const fileWrapper = document.createElement('div');
+            fileWrapper.className = 'file-input-wrapper';
+            fileWrapper.innerHTML = `
+                <div class="file-drop-zone" id="drop-zone-${param.name}">
+                    <div class="file-drop-icon">📁</div>
+                    <div class="file-drop-text">クリックまたはドラッグ&ドロップ<br>Click or drag & drop image here</div>
+                </div>
+                <div class="file-info-container" id="file-info-${param.name}" style="display: none;">
+                    <div class="file-info-header">
+                        <span class="file-info-name" id="file-name-${param.name}"></span>
+                        <button type="button" class="btn-file-clear" id="clear-${param.name}">✕ クリア</button>
+                    </div>
+                    <div class="file-info-details">
+                        <span class="file-info-size" id="file-size-${param.name}"></span>
+                        <span class="file-info-type" id="file-type-${param.name}"></span>
+                    </div>
+                </div>
+                <div class="image-preview-container" id="preview-container-${param.name}" style="display: none;">
+                    <img class="image-preview" id="preview-${param.name}" alt="Preview">
+                </div>
+            `;
+
+            // Insert hidden file input
+            fileWrapper.insertBefore(input, fileWrapper.firstChild);
+
+            group.appendChild(label);
+            group.appendChild(fileWrapper);
+            container.appendChild(group);
+
+            // Setup file input handlers after DOM insertion
+            setupFileInputHandlers(param.name);
+            return; // Skip the default input append
         } else {
             input = document.createElement('input');
             input.type = param.html_type;
@@ -244,11 +308,16 @@ function renderParameterInputs() {
             if (param.placeholder) {
                 input.placeholder = param.placeholder;
             }
+
+            // Set default value if provided
+            if (param.default) {
+                input.value = param.default;
+            }
         }
 
         input.id = `param-${param.name}`;
         input.name = param.name;
-        input.required = true;
+        input.required = param.required;
 
         group.appendChild(label);
         group.appendChild(input);
@@ -536,7 +605,9 @@ async function executePrompt(repeat) {
 
             try {
                 const file = input.files[0];
+                console.log(`📁 FILE parameter "${param.name}": ${file.name}, size: ${file.size} bytes`);
                 const base64 = await fileToBase64(file);
+                console.log(`📦 Base64 encoded length: ${base64.length} chars`);
                 inputParams[param.name] = base64;
             } catch (error) {
                 valid = false;
@@ -571,17 +642,22 @@ async function executePrompt(repeat) {
         const paramsData = await paramsResponse.json();
         const modelParams = paramsData.active_parameters || {};
 
+        const requestBody = {
+            project_id: currentProjectId || 1,
+            input_params: inputParams,
+            repeat: repeat,
+            model_name: modelName,
+            include_csv_header: includeCsvHeader,
+            ...modelParams  // Include all model parameters from system settings
+        };
+
+        console.log('🚀 Sending request to /api/run/single');
+        console.log('📊 Request body size:', JSON.stringify(requestBody).length, 'chars');
+
         const response = await fetch('/api/run/single', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                project_id: currentProjectId || 1,
-                input_params: inputParams,
-                repeat: repeat,
-                model_name: modelName,
-                include_csv_header: includeCsvHeader,
-                ...modelParams  // Include all model parameters from system settings
-            })
+            body: JSON.stringify(requestBody)
         });
 
         if (!response.ok) {
@@ -704,6 +780,124 @@ function fileToBase64(file) {
     });
 }
 
+/**
+ * Setup event handlers for FILE type input
+ * @param {string} paramName - Parameter name for the FILE input
+ */
+function setupFileInputHandlers(paramName) {
+    const fileInput = document.getElementById(`param-${paramName}`);
+    const dropZone = document.getElementById(`drop-zone-${paramName}`);
+    const fileInfo = document.getElementById(`file-info-${paramName}`);
+    const previewContainer = document.getElementById(`preview-container-${paramName}`);
+    const preview = document.getElementById(`preview-${paramName}`);
+    const fileName = document.getElementById(`file-name-${paramName}`);
+    const fileSize = document.getElementById(`file-size-${paramName}`);
+    const fileType = document.getElementById(`file-type-${paramName}`);
+    const clearBtn = document.getElementById(`clear-${paramName}`);
+
+    if (!fileInput || !dropZone) return;
+
+    // Click on drop zone opens file picker
+    dropZone.addEventListener('click', () => {
+        fileInput.click();
+    });
+
+    // Handle file selection
+    fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            handleFileSelect(file);
+        }
+    });
+
+    // Drag & drop handlers
+    dropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.classList.add('dragover');
+    });
+
+    dropZone.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.classList.remove('dragover');
+    });
+
+    dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.classList.remove('dragover');
+
+        const files = e.dataTransfer.files;
+        if (files.length > 0) {
+            fileInput.files = files;  // Update file input
+            handleFileSelect(files[0]);
+        }
+    });
+
+    // Clear button handler
+    if (clearBtn) {
+        clearBtn.addEventListener('click', (e) => {
+            e.stopPropagation();  // Don't trigger drop zone click
+            clearFileInput();
+        });
+    }
+
+    function handleFileSelect(file) {
+        // Validate file type
+        const validTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+        if (!validTypes.includes(file.type)) {
+            alert(`無効なファイル形式です / Invalid file type: ${file.type}\nサポート形式 / Supported: JPEG, PNG, GIF, WebP`);
+            clearFileInput();
+            return;
+        }
+
+        // Validate file size (20MB max)
+        const maxSize = 20 * 1024 * 1024;  // 20MB
+        if (file.size > maxSize) {
+            alert(`ファイルサイズが大きすぎます / File too large: ${(file.size / 1024 / 1024).toFixed(2)}MB\n最大サイズ / Max size: 20MB`);
+            clearFileInput();
+            return;
+        }
+
+        // Show file info
+        if (fileName) fileName.textContent = file.name;
+        if (fileSize) fileSize.textContent = formatFileSize(file.size);
+        if (fileType) fileType.textContent = file.type.split('/')[1].toUpperCase();
+
+        // Hide drop zone, show file info
+        if (dropZone) dropZone.style.display = 'none';
+        if (fileInfo) fileInfo.style.display = 'block';
+
+        // Load and show preview for images
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            if (preview) {
+                preview.src = e.target.result;
+                if (previewContainer) previewContainer.style.display = 'block';
+            }
+        };
+        reader.readAsDataURL(file);
+    }
+
+    function clearFileInput() {
+        // Clear file input
+        fileInput.value = '';
+
+        // Reset UI
+        if (dropZone) dropZone.style.display = 'flex';
+        if (fileInfo) fileInfo.style.display = 'none';
+        if (previewContainer) previewContainer.style.display = 'none';
+        if (preview) preview.src = '';
+    }
+
+    function formatFileSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+    }
+}
+
 function showStatus(message, type) {
     const statusDiv = document.getElementById('execution-status');
     if (!statusDiv) return;
@@ -741,25 +935,17 @@ async function showEditPromptModal() {
         const project = await response.json();
 
         const modalContent = `
-            <div class="modal-header">プロンプトテンプレート編集 / Edit Prompt Template</div>
+            <div class="modal-header">
+                プロンプトテンプレート編集 / Edit Prompt Template
+                <button onclick="showPromptTemplateHelp()" style="background: none; border: none; cursor: pointer; font-size: 1.2rem; margin-left: 10px;" title="ヘルプを表示 / Show Help">❓</button>
+            </div>
             <div class="modal-body">
                 <div class="form-group">
                     <label>プロジェクト / Project: ${project.name}</label>
                 </div>
                 <div class="form-group">
                     <label>プロンプトテンプレート / Prompt Template:</label>
-                    <textarea id="edit-prompt-template" rows="15" style="font-family: 'Courier New', monospace;">${project.prompt_template}</textarea>
-                    <small style="color: #7f8c8d; display: block; margin-top: 0.5rem;">
-                        {{PARAM_NAME}} または {{PARAM_NAME:TYPE}} の形式で入力パラメータを定義<br>
-                        <strong>サポートされているTYPE / Supported TYPEs:</strong><br>
-                        • TEXT5 (5行テキストエリア / 5-line textarea) - デフォルト<br>
-                        • TEXT10 (10行テキストエリア / 10-line textarea)<br>
-                        • NUM (数値入力 / Number input)<br>
-                        • DATE (日付選択 / Date picker)<br>
-                        • DATETIME (日時選択 / DateTime picker)<br>
-                        • <strong>FILE</strong> (画像アップロード / Image upload) - Vision API対応<br>
-                        • <strong>FILEPATH</strong> (サーバーパス / Server file path) - バッチ処理用
-                    </small>
+                    <textarea id="edit-prompt-template" rows="15" style="font-family: 'Courier New', monospace; width: 100%; box-sizing: border-box;">${project.prompt_template}</textarea>
                 </div>
             </div>
             <div class="modal-footer">
@@ -877,10 +1063,13 @@ async function showEditParserModal() {
                     </small>
                 </div>
             </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="closeModal()">キャンセル / Cancel</button>
-                <button class="btn btn-primary" onclick="saveParserRevision()">保存 / Save</button>
-                <button class="btn btn-primary" onclick="rebuildParserRevision()" style="background-color: #27ae60;">リビルド / Rebuild</button>
+            <div class="modal-footer" style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
+                <button class="btn" onclick="showJsonToCsvConverter()" style="background-color: #9b59b6;">📊 結果からCSVに変換 / Convert JSON to CSV</button>
+                <div style="display: flex; gap: 0.5rem;">
+                    <button class="btn btn-secondary" onclick="closeModal()">キャンセル / Cancel</button>
+                    <button class="btn btn-primary" onclick="saveParserRevision()">保存 / Save</button>
+                    <button class="btn btn-primary" onclick="rebuildParserRevision()" style="background-color: #27ae60;">リビルド / Rebuild</button>
+                </div>
             </div>
         `;
         showModal(modalContent);
@@ -983,25 +1172,17 @@ async function showBatchEditPromptModal() {
         const project = await response.json();
 
         const modalContent = `
-            <div class="modal-header">プロンプトテンプレート編集 / Edit Prompt Template</div>
+            <div class="modal-header">
+                プロンプトテンプレート編集 / Edit Prompt Template
+                <button onclick="showPromptTemplateHelp()" style="background: none; border: none; cursor: pointer; font-size: 1.2rem; margin-left: 10px;" title="ヘルプを表示 / Show Help">❓</button>
+            </div>
             <div class="modal-body">
                 <div class="form-group">
                     <label>プロジェクト / Project: ${project.name}</label>
                 </div>
                 <div class="form-group">
                     <label>プロンプトテンプレート / Prompt Template:</label>
-                    <textarea id="edit-prompt-template" rows="15" style="font-family: 'Courier New', monospace;">${project.prompt_template}</textarea>
-                    <small style="color: #7f8c8d; display: block; margin-top: 0.5rem;">
-                        {{PARAM_NAME}} または {{PARAM_NAME:TYPE}} の形式で入力パラメータを定義<br>
-                        <strong>サポートされているTYPE / Supported TYPEs:</strong><br>
-                        • TEXT5 (5行テキストエリア / 5-line textarea) - デフォルト<br>
-                        • TEXT10 (10行テキストエリア / 10-line textarea)<br>
-                        • NUM (数値入力 / Number input)<br>
-                        • DATE (日付選択 / Date picker)<br>
-                        • DATETIME (日時選択 / DateTime picker)<br>
-                        • <strong>FILE</strong> (画像アップロード / Image upload) - Vision API対応<br>
-                        • <strong>FILEPATH</strong> (サーバーパス / Server file path) - バッチ処理用
-                    </small>
+                    <textarea id="edit-prompt-template" rows="15" style="font-family: 'Courier New', monospace; width: 100%; box-sizing: border-box;">${project.prompt_template}</textarea>
                 </div>
             </div>
             <div class="modal-footer">
@@ -1916,10 +2097,27 @@ function closeModal() {
     }
 }
 
+function showModal2(content) {
+    const modal = document.getElementById('modal-overlay-2');
+    const modalContent = document.getElementById('modal-content-2');
+    if (modal && modalContent) {
+        modalContent.innerHTML = content;
+        modal.classList.add('show');
+    }
+}
+
+function closeModal2() {
+    const modal = document.getElementById('modal-overlay-2');
+    if (modal) {
+        modal.classList.remove('show');
+    }
+}
+
 function showParserHelp() {
     const helpContent = `
-        <div class="modal-header">
-            パーサー設定ヘルプ / Parser Configuration Help
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>パーサー設定ヘルプ / Parser Configuration Help</span>
+            <button class="btn btn-secondary" onclick="closeModal2()" style="margin: 0;">閉じる / Close</button>
         </div>
         <div class="modal-body" style="max-height: 70vh; overflow-y: auto;">
             <h3 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 0.5rem;">📖 パーサー設定の概要 / Parser Configuration Overview</h3>
@@ -2030,11 +2228,133 @@ Product B,2000,4.2,false
                 </ul>
             </div>
         </div>
-        <div class="modal-footer">
-            <button class="btn btn-primary" onclick="closeModal()">閉じる / Close</button>
+    `;
+    showModal2(helpContent);
+}
+
+function showPromptTemplateHelp() {
+    const helpContent = `
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>プロンプトテンプレート構文ヘルプ / Prompt Template Syntax Help</span>
+            <button class="btn btn-secondary" onclick="closeModal2()" style="margin: 0;">閉じる / Close</button>
+        </div>
+        <div class="modal-body" style="max-height: 75vh; overflow-y: auto; overflow-x: auto;">
+            <h3 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 0.5rem;">📖 プロンプトテンプレート構文の概要 / Prompt Template Syntax Overview</h3>
+            <p style="margin: 1rem 0;">
+                プロンプトテンプレートは、動的なパラメータを含むテキストです。<br>
+                <code>{{ }}</code> で囲まれた部分がパラメータとして自動的に入力フォームに変換されます。
+            </p>
+            <p style="margin: 1rem 0; font-style: italic; color: #7f8c8d;">
+                Prompt templates are text with dynamic parameters.<br>
+                Parts enclosed in <code>{{ }}</code> are automatically converted to input forms.
+            </p>
+
+            <h3 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 0.5rem; margin-top: 2rem;">📝 基本構文 / Basic Syntax</h3>
+
+            <h4 style="color: #27ae60; margin-top: 1rem;">必須パラメータ / Required Parameters</h4>
+            <pre style="background: #f8f9fa; padding: 1rem; border-radius: 4px; overflow-x: auto;"><code>{{PARAM_NAME:TYPE}}</code></pre>
+            <ul style="margin: 0.5rem 0 1rem 2rem;">
+                <li>ユーザーは必ず値を入力する必要があります / User must provide a value</li>
+                <li>入力フォームに赤いアスタリスク (<span style="color: #e74c3c;">*</span>) が表示されます / Red asterisk displayed in form</li>
+                <li>例 / Example: <code>{{name:TEXT1}}</code> → 1行テキスト入力（必須）</li>
+            </ul>
+
+            <h4 style="color: #27ae60; margin-top: 1rem;">任意パラメータ（デフォルト値なし）/ Optional Parameters (No Default)</h4>
+            <pre style="background: #f8f9fa; padding: 1rem; border-radius: 4px; overflow-x: auto;"><code>{{PARAM_NAME:TYPE|}}</code></pre>
+            <ul style="margin: 0.5rem 0 1rem 2rem;">
+                <li><strong>重要:</strong> パラメータ名の後に <code>|</code> (パイプ) を付けます / Add <code>|</code> (pipe) after parameter name</li>
+                <li>ユーザーは空欄のまま実行できます / User can leave blank</li>
+                <li>アスタリスクは表示されません / No asterisk displayed</li>
+                <li>例 / Example: <code>{{phone:TEXT1|}}</code> → 1行テキスト入力（任意、空欄可）</li>
+            </ul>
+
+            <h4 style="color: #27ae60; margin-top: 1rem;">任意パラメータ（デフォルト値あり）/ Optional Parameters (With Default)</h4>
+            <pre style="background: #f8f9fa; padding: 1rem; border-radius: 4px; overflow-x: auto;"><code>{{PARAM_NAME:TYPE|default=値}}</code></pre>
+            <ul style="margin: 0.5rem 0 1rem 2rem;">
+                <li><code>|default=</code> の後にデフォルト値を指定 / Specify default value after <code>|default=</code></li>
+                <li>ユーザーが空欄の場合、デフォルト値が使用されます / Default value used if left blank</li>
+                <li>入力フォームに初期値として表示されます / Displayed as initial value in form</li>
+                <li>例 / Example: <code>{{preferred_time:TEXT1|default=平日10-18時}}</code></li>
+            </ul>
+
+            <h4 style="color: #27ae60; margin-top: 1rem;">タイプ省略時のデフォルト / Default When Type Omitted</h4>
+            <pre style="background: #f8f9fa; padding: 1rem; border-radius: 4px; overflow-x: auto;"><code>{{PARAM_NAME}}</code></pre>
+            <ul style="margin: 0.5rem 0 1rem 2rem;">
+                <li>タイプを省略すると、デフォルトで <code>TEXT5</code>（5行テキストエリア、必須）になります</li>
+                <li>If type is omitted, defaults to <code>TEXT5</code> (5-line textarea, required)</li>
+            </ul>
+
+            <h3 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 0.5rem; margin-top: 2rem;">📌 パラメータタイプ一覧 / Parameter Types</h3>
+
+            <h4 style="color: #27ae60; margin-top: 1rem;">テキスト入力 / Text Input</h4>
+            <ul style="margin: 0.5rem 0 1rem 2rem;">
+                <li><strong>TEXT1 〜 TEXT20</strong>: テキストエリア（1〜20行）/ Textarea (1-20 lines)</li>
+                <li>例 / Example: <code>{{description:TEXT5}}</code> → 5行のテキストエリア</li>
+            </ul>
+
+            <h4 style="color: #27ae60; margin-top: 1rem;">数値・日時入力 / Numeric & DateTime Input</h4>
+            <ul style="margin: 0.5rem 0 1rem 2rem;">
+                <li><strong>NUM</strong>: 数値入力 / Number input</li>
+                <li><strong>DATE</strong>: 日付選択 / Date picker (YYYY-MM-DD)</li>
+                <li><strong>DATETIME</strong>: 日時選択 / DateTime picker (YYYY-MM-DD HH:MM)</li>
+            </ul>
+
+            <h4 style="color: #27ae60; margin-top: 1rem;">画像・ファイル入力 / Image & File Input</h4>
+            <ul style="margin: 0.5rem 0 1rem 2rem;">
+                <li><strong>FILE</strong>: 画像アップロード（Vision API対応）/ Image upload (Vision API compatible)
+                    <ul style="margin-top: 0.3rem;">
+                        <li>対応形式 / Supported: JPEG, PNG, GIF, WebP</li>
+                        <li>最大サイズ / Max size: 20MB</li>
+                        <li>ブラウザから画像をアップロードして、LLMのVision APIに送信 / Upload from browser and send to Vision API</li>
+                        <li>ドラッグ＆ドロップ対応 / Drag & drop supported</li>
+                    </ul>
+                </li>
+                <li><strong>FILEPATH</strong>: サーバーファイルパス（バッチ処理用）/ Server file path (for batch processing)
+                    <ul style="margin-top: 0.3rem;">
+                        <li>サーバー上のファイルパスを指定 / Specify file path on server</li>
+                        <li>バッチ実行時、データセットにファイルパスを記載して使用 / Use by specifying file paths in dataset for batch execution</li>
+                    </ul>
+                </li>
+            </ul>
+
+            <h3 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 0.5rem; margin-top: 2rem;">✨ 実例 / Complete Examples</h3>
+
+            <h4 style="color: #27ae60; margin-top: 1rem;">例1: お問い合わせフォーム / Example 1: Contact Form</h4>
+            <pre style="background: #f8f9fa; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap;"><code>以下の情報に基づいてお問い合わせメールを作成してください。
+
+【必須項目】
+お名前: {{name:TEXT1}}
+メールアドレス: {{email:TEXT1}}
+お問い合わせ内容: {{inquiry:TEXT5}}
+
+【任意項目】
+電話番号: {{phone:TEXT1|}}
+会社名: {{company:TEXT1|}}
+希望連絡時間: {{preferred_time:TEXT1|default=平日10-18時}}
+備考: {{notes:TEXT5|default=特になし}}</code></pre>
+
+            <h4 style="color: #27ae60; margin-top: 1rem;">例2: 画像分析プロンプト / Example 2: Image Analysis Prompt</h4>
+            <pre style="background: #f8f9fa; padding: 1rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap;"><code>添付された画像を分析してください。
+
+画像ファイル: {{image:FILE}}
+分析の観点: {{analysis_focus:TEXT1|default=全体的な内容と特徴}}
+
+上記の観点で、画像の内容を詳しく説明してください。</code></pre>
+
+            <div style="background: #e8f8f5; border-left: 4px solid #27ae60; padding: 1rem; margin: 1.5rem 0;">
+                <strong>💡 ヒント / Tips:</strong>
+                <ul style="margin: 0.5rem 0 0 1.5rem;">
+                    <li>必須項目は最小限にして、ユーザーの入力負担を減らしましょう</li>
+                    <li>Minimize required fields to reduce user input burden</li>
+                    <li>デフォルト値を設定すると、入力の手間が省けます</li>
+                    <li>Setting default values saves input effort</li>
+                    <li>同じパラメータ名を複数箇所で使用すると、同じ値が展開されます</li>
+                    <li>Using the same parameter name in multiple places expands to the same value</li>
+                </ul>
+            </div>
         </div>
     `;
-    showModal(helpContent);
+    showModal2(helpContent);
 }
 
 // ========== SETTINGS MANAGEMENT ==========
@@ -2421,5 +2741,165 @@ async function cancelBatchJob() {
         } catch (error) {
             console.error('Error reloading job after cancel:', error);
         }
+    }
+}
+
+/**
+ * Show JSON to CSV template converter modal
+ * Allows user to paste JSON sample and generate parser config automatically
+ */
+function showJsonToCsvConverter() {
+    const converterContent = `
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>📊 JSON → CSV テンプレート変換 / JSON to CSV Template Converter</span>
+            <button class="btn btn-secondary" onclick="closeModal2()" style="margin: 0;">閉じる / Close</button>
+        </div>
+        <div class="modal-body" style="max-height: 70vh; overflow-y: auto;">
+            <div class="form-group">
+                <label style="font-weight: bold;">1. サンプルJSONを貼り付け / Paste Sample JSON:</label>
+                <textarea id="json-sample-input" rows="15" style="font-family: 'Courier New', monospace; width: 100%;" placeholder='{
+  "field1": { "score": 1, "reason": "理由" },
+  "field2": { "nested": { "value": "test" } }
+}'></textarea>
+                <small style="color: #7f8c8d;">
+                    LLMからの期待されるJSON出力形式を貼り付けてください。<br>
+                    Paste the expected JSON output format from the LLM.
+                </small>
+            </div>
+            <div class="form-group" style="margin-top: 1rem;">
+                <button class="btn btn-primary" onclick="convertJsonToCsvTemplate()" style="width: 100%;">
+                    🔄 変換 / Convert
+                </button>
+            </div>
+            <div class="form-group" style="margin-top: 1rem;">
+                <label style="font-weight: bold;">2. 生成されたパーサー設定 / Generated Parser Config:</label>
+                <textarea id="generated-parser-config" rows="15" style="font-family: 'Courier New', monospace; width: 100%;" readonly placeholder="変換後のパーサー設定がここに表示されます / Generated parser config will appear here"></textarea>
+            </div>
+            <div class="form-group" style="margin-top: 1rem;">
+                <label style="font-weight: bold;">3. CSVヘッダープレビュー / CSV Header Preview:</label>
+                <textarea id="csv-header-preview" rows="3" style="font-family: 'Courier New', monospace; width: 100%; background: #f8f9fa;" readonly placeholder="CSVヘッダーがここに表示されます / CSV header will appear here"></textarea>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal2()">閉じる / Close</button>
+            <button class="btn btn-primary" onclick="applyGeneratedParserConfig()" style="background-color: #27ae60;">
+                ✅ パーサー設定に適用 / Apply to Parser Config
+            </button>
+        </div>
+    `;
+    showModal2(converterContent);
+}
+
+/**
+ * Convert JSON sample to CSV template parser config
+ * Recursively extracts all leaf paths from the JSON structure
+ */
+function convertJsonToCsvTemplate() {
+    const jsonInput = document.getElementById('json-sample-input').value.trim();
+    const outputArea = document.getElementById('generated-parser-config');
+    const headerPreview = document.getElementById('csv-header-preview');
+
+    if (!jsonInput) {
+        alert('JSONを入力してください / Please enter JSON');
+        return;
+    }
+
+    try {
+        // Remove <...> placeholders and replace with sample values for parsing
+        let cleanedJson = jsonInput
+            // Handle "<...>" (quoted placeholder) -> "sample"
+            .replace(/"<[^>]+>"/g, '"sample"')
+            // Handle <...> (unquoted placeholder) -> "sample"
+            .replace(/<[^>]+>/g, '"sample"')
+            // Fix trailing commas
+            .replace(/,\s*}/g, '}')
+            .replace(/,\s*]/g, ']');
+
+        const jsonData = JSON.parse(cleanedJson);
+
+        // Extract all leaf paths
+        const paths = {};
+        const fieldNames = [];
+        extractPaths(jsonData, '$', paths, fieldNames);
+
+        // Generate CSV template
+        const csvTemplate = fieldNames.map(name => '$' + name + '$').join(',');
+
+        // Generate parser config
+        const parserConfig = {
+            type: 'json_path',
+            paths: paths,
+            csv_template: csvTemplate
+        };
+
+        outputArea.value = JSON.stringify(parserConfig, null, 2);
+        headerPreview.value = fieldNames.join(',');
+
+    } catch (error) {
+        alert('JSONの解析に失敗しました / Failed to parse JSON: ' + error.message);
+        outputArea.value = 'Error: ' + error.message;
+        headerPreview.value = '';
+    }
+}
+
+/**
+ * Recursively extract paths from JSON object
+ * @param {any} obj - Current object/value
+ * @param {string} currentPath - Current JSON path (e.g., "$.field")
+ * @param {object} paths - Output object for path mappings
+ * @param {array} fieldNames - Output array for field names (in order)
+ */
+function extractPaths(obj, currentPath, paths, fieldNames) {
+    if (obj === null || obj === undefined) {
+        return;
+    }
+
+    if (typeof obj === 'object' && !Array.isArray(obj)) {
+        // Object: recurse into properties
+        for (const key of Object.keys(obj)) {
+            const newPath = currentPath === '$' ? '$.' + key : currentPath + '.' + key;
+            extractPaths(obj[key], newPath, paths, fieldNames);
+        }
+    } else if (Array.isArray(obj)) {
+        // Array: skip arrays for now (complex to handle in CSV)
+        // Could be extended to handle arrays if needed
+    } else {
+        // Leaf value (string, number, boolean)
+        // Generate field name from path (replace dots with underscores)
+        const fieldName = currentPath.replace(/^\$\./, '').replace(/\./g, '_');
+        paths[fieldName] = currentPath;
+        fieldNames.push(fieldName);
+    }
+}
+
+/**
+ * Apply generated parser config to the main parser config textarea
+ */
+function applyGeneratedParserConfig() {
+    const generatedConfig = document.getElementById('generated-parser-config').value;
+
+    if (!generatedConfig || generatedConfig.startsWith('Error:')) {
+        alert('有効なパーサー設定がありません / No valid parser config available');
+        return;
+    }
+
+    try {
+        // Validate JSON
+        const config = JSON.parse(generatedConfig);
+
+        // Apply to main parser config
+        const mainConfigArea = document.getElementById('edit-parser-config');
+        const parserTypeSelect = document.getElementById('edit-parser-type');
+
+        if (mainConfigArea && parserTypeSelect) {
+            mainConfigArea.value = generatedConfig;
+            parserTypeSelect.value = config.type || 'json_path';
+        }
+
+        closeModal2();
+        alert('パーサー設定に適用しました。保存ボタンで保存してください。\n\nApplied to parser config. Click Save to save.');
+
+    } catch (error) {
+        alert('パーサー設定の適用に失敗しました / Failed to apply parser config: ' + error.message);
     }
 }

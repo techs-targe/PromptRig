@@ -165,7 +165,9 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
                 html_type=p.html_type,
                 rows=p.rows,
                 accept=p.accept,
-                placeholder=p.placeholder
+                placeholder=p.placeholder,
+                required=p.required,
+                default=p.default
             )
             for p in param_defs
         ]
