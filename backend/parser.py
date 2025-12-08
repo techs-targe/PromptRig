@@ -255,7 +255,7 @@ def create_json_parser_config(paths: Dict[str, str]) -> str:
 
 
 def create_regex_parser_config(patterns: Dict[str, str]) -> str:
-    """Create regex parser configuration.
+    r"""Create regex parser configuration.
 
     Args:
         patterns: Dictionary mapping field names to regex patterns
