@@ -815,31 +815,44 @@ async function executePrompt(repeat) {
 
         if (param.html_type === 'file') {
             // Handle FILE type - convert to Base64
-            if (!input || !input.files || input.files.length === 0) {
+            const hasFile = input && input.files && input.files.length > 0;
+
+            // Check if required parameter has file
+            if (param.required && !hasFile) {
                 valid = false;
                 showStatus(`ファイル "${param.name}" を選択してください`, 'error');
                 break;
             }
 
-            try {
-                const file = input.files[0];
-                console.log(`📁 FILE parameter "${param.name}": ${file.name}, size: ${file.size} bytes`);
-                const base64 = await fileToBase64(file);
-                console.log(`📦 Base64 encoded length: ${base64.length} chars`);
-                inputParams[param.name] = base64;
-            } catch (error) {
-                valid = false;
-                showStatus(`ファイル "${param.name}" の読み込みに失敗しました: ${error.message}`, 'error');
-                break;
+            // Process file if provided
+            if (hasFile) {
+                try {
+                    const file = input.files[0];
+                    console.log(`📁 FILE parameter "${param.name}": ${file.name}, size: ${file.size} bytes`);
+                    const base64 = await fileToBase64(file);
+                    console.log(`📦 Base64 encoded length: ${base64.length} chars`);
+                    inputParams[param.name] = base64;
+                } catch (error) {
+                    valid = false;
+                    showStatus(`ファイル "${param.name}" の読み込みに失敗しました: ${error.message}`, 'error');
+                    break;
+                }
             }
         } else {
-            // Handle other types (text, number, date, etc.)
-            if (!input || !input.value.trim()) {
+            // Handle other types (text, number, date, FILEPATH, etc.)
+            const value = input ? input.value.trim() : '';
+
+            // Check if required parameter has value
+            if (param.required && !value) {
                 valid = false;
                 showStatus(`パラメータ "${param.name}" を入力してください`, 'error');
                 break;
             }
-            inputParams[param.name] = input.value;
+
+            // Only include in params if there's a value (or if required)
+            if (value || param.required) {
+                inputParams[param.name] = input ? input.value : '';
+            }
         }
     }
 
