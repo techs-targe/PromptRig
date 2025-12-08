@@ -17,18 +17,6 @@ let singleHistoryOffset = 0;
 const SINGLE_HISTORY_PAGE_SIZE = 10;
 let singleHistoryHasMore = true;
 
-// FILEPATH pending files (stored until form submit)
-let filepathPendingFiles = {};
-
-// Helper function to format file size
-function formatFileSize(bytes) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
 /**
  * Format date to JST (Japan Standard Time)
  * Database timestamps are stored in UTC without timezone suffix.
@@ -467,75 +455,22 @@ function renderParameterInputs() {
             setupFileInputHandlers(param.name);
             return; // Skip the default input append
         } else if (param.type === 'FILEPATH') {
-            // FILEPATH: Text input with file picker button
-            // File is stored in memory and uploaded when form is submitted
-            const filepathWrapper = document.createElement('div');
-            filepathWrapper.className = 'filepath-input-wrapper';
-
-            // Hidden file input for triggering file picker
-            const hiddenFileInput = document.createElement('input');
-            hiddenFileInput.type = 'file';
-            hiddenFileInput.id = `filepath-picker-${param.name}`;
-            hiddenFileInput.style.display = 'none';
-            hiddenFileInput.accept = 'image/*,.pdf,.xlsx,.xls,.csv,.txt,.json';
-
-            // Text input for path display
+            // FILEPATH: Simple text input for server file path
+            // User manually enters the path (e.g., /path/to/file.jpg or C:\path\to\file.jpg)
+            // For file picker dialog, use FILE type instead
             input = document.createElement('input');
             input.type = 'text';
             input.id = `param-${param.name}`;
             input.name = param.name;
             input.required = param.required;
-            input.placeholder = param.placeholder || 'サーバーパス または 参照でファイル選択';
+            input.placeholder = param.placeholder || '/path/to/file.jpg';
             input.className = 'filepath-text-input';
             if (param.default) {
                 input.value = param.default;
             }
 
-            // Browse button
-            const browseBtn = document.createElement('button');
-            browseBtn.type = 'button';
-            browseBtn.className = 'btn btn-secondary filepath-browse-btn';
-            browseBtn.textContent = '参照...';
-            browseBtn.title = 'ファイルを選択（送信時にアップロード）';
-
-            // Click handler for browse button
-            browseBtn.addEventListener('click', () => {
-                hiddenFileInput.click();
-            });
-
-            // File selection handler - stores file for upload on submit
-            hiddenFileInput.addEventListener('change', (e) => {
-                const file = e.target.files[0];
-                if (!file) return;
-
-                // Store the file object for later upload on submit
-                filepathPendingFiles[param.name] = file;
-
-                // Show filename in the text input with visual indicator
-                input.value = file.name;
-                input.title = `選択中: ${file.name} (${formatFileSize(file.size)}) - 送信時にアップロードされます`;
-                input.dataset.pendingUpload = 'true';
-                input.style.backgroundColor = '#e8f6e8';
-                input.style.borderColor = '#27ae60';
-            });
-
-            // Clear pending file when user manually edits the text
-            input.addEventListener('input', () => {
-                if (filepathPendingFiles[param.name]) {
-                    delete filepathPendingFiles[param.name];
-                    input.dataset.pendingUpload = '';
-                    input.style.backgroundColor = '';
-                    input.style.borderColor = '';
-                    input.title = '';
-                }
-            });
-
-            filepathWrapper.appendChild(hiddenFileInput);
-            filepathWrapper.appendChild(input);
-            filepathWrapper.appendChild(browseBtn);
-
             group.appendChild(label);
-            group.appendChild(filepathWrapper);
+            group.appendChild(input);
             container.appendChild(group);
             return; // Skip the default input append
         } else {
@@ -897,46 +832,6 @@ function populateInputForm(params) {
 async function executePrompt(repeat) {
     const inputParams = {};
     let valid = true;
-
-    // First, upload any pending FILEPATH files
-    for (const paramName in filepathPendingFiles) {
-        const file = filepathPendingFiles[paramName];
-        showStatus(`ファイルをアップロード中: ${file.name}...`, 'info');
-
-        try {
-            const formData = new FormData();
-            formData.append('file', file);
-
-            const uploadResponse = await fetch('/api/upload/filepath', {
-                method: 'POST',
-                body: formData
-            });
-
-            if (!uploadResponse.ok) {
-                throw new Error(`Upload failed: ${uploadResponse.statusText}`);
-            }
-
-            const uploadResult = await uploadResponse.json();
-
-            // Update the input field with the server path
-            const input = document.getElementById(`param-${paramName}`);
-            if (input) {
-                input.value = uploadResult.path;
-                input.style.backgroundColor = '';
-                input.style.borderColor = '';
-                input.dataset.pendingUpload = '';
-            }
-
-            console.log(`📤 FILEPATH "${paramName}" uploaded: ${uploadResult.path}`);
-        } catch (error) {
-            valid = false;
-            showStatus(`ファイル "${paramName}" のアップロードに失敗しました: ${error.message}`, 'error');
-            return;
-        }
-    }
-
-    // Clear pending files after upload
-    filepathPendingFiles = {};
 
     // Process parameters (including FILE type)
     for (const param of currentParameters) {
