@@ -1372,6 +1372,7 @@ async function saveParserRevision() {
 
 /**
  * Show batch edit prompt modal
+ * Enhanced with revision selector and restore button (same as single execution)
  */
 async function showBatchEditPromptModal() {
     const projectId = document.getElementById('batch-project-select').value;
@@ -1381,9 +1382,24 @@ async function showBatchEditPromptModal() {
     }
 
     try {
-        const response = await fetch(`/api/projects/${projectId}`);
-        if (!response.ok) throw new Error('Failed to load project');
-        const project = await response.json();
+        // Fetch project and revisions in parallel
+        const [projectResponse, revisionsResponse] = await Promise.all([
+            fetch(`/api/projects/${projectId}`),
+            fetch(`/api/projects/${projectId}/revisions`)
+        ]);
+
+        if (!projectResponse.ok) throw new Error('Failed to load project');
+        const project = await projectResponse.json();
+        const revisions = revisionsResponse.ok ? await revisionsResponse.json() : [];
+
+        // Build revision selector options
+        const revisionOptions = revisions.map(rev => {
+            const date = formatJST(rev.created_at);
+            const isCurrent = rev.revision === project.revision_count;
+            return `<option value="${rev.revision}" ${isCurrent ? 'selected' : ''}>
+                Rev.${rev.revision} (${date})${isCurrent ? ' - 現在' : ''}
+            </option>`;
+        }).join('');
 
         const modalContent = `
             <div class="modal-header">
@@ -1393,6 +1409,15 @@ async function showBatchEditPromptModal() {
             <div class="modal-body">
                 <div class="form-group">
                     <label>プロジェクト / Project: ${project.name}</label>
+                </div>
+                <div class="form-group" style="display: flex; align-items: center; gap: 10px;">
+                    <label style="margin: 0;">リビジョン / Revision:</label>
+                    <select id="batch-revision-selector" onchange="loadBatchRevisionContent(this.value, 'prompt', ${projectId})" style="flex: 1;">
+                        ${revisionOptions}
+                    </select>
+                    <button class="btn btn-secondary" onclick="restoreBatchRevision('prompt', ${projectId})" style="background-color: #e67e22;" title="選択したリビジョンを復元 / Restore selected revision">
+                        🔄 復元 / Restore
+                    </button>
                 </div>
                 <div class="form-group">
                     <label>プロンプトテンプレート / Prompt Template:</label>
