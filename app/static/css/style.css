@@ -170,6 +170,33 @@ main {
     color: #856404;
 }
 
+/* Load More Link for history pagination */
+.load-more-link {
+    text-align: center;
+    padding: 0.75rem 1rem;
+    margin-top: 0.5rem;
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-radius: 6px;
+    cursor: pointer;
+    color: #3498db;
+    font-size: 0.9rem;
+    font-weight: 500;
+    transition: all 0.2s ease;
+    border: 1px solid #dee2e6;
+}
+
+.load-more-link:hover {
+    background: linear-gradient(135deg, #e9ecef 0%, #dee2e6 100%);
+    color: #2980b9;
+    transform: translateY(-1px);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.load-more-link:active {
+    transform: translateY(0);
+    box-shadow: none;
+}
+
 /* Right Pane: Form + Results */
 .right-pane {
     flex: 1;

@@ -12,6 +12,15 @@ let allProjects = [];
 let allDatasets = [];
 let currentProjectId = 1;
 
+// History pagination state
+let singleHistoryOffset = 0;
+const SINGLE_HISTORY_PAGE_SIZE = 10;
+let singleHistoryHasMore = true;
+
+let batchHistoryOffset = 0;
+const BATCH_HISTORY_PAGE_SIZE = 10;
+let batchHistoryHasMore = true;
+
 /**
  * Format date to JST (Japan Standard Time)
  * Database timestamps are stored in UTC without timezone suffix.
@@ -314,18 +323,26 @@ async function loadConfig(projectId = null) {
         // Use provided projectId or currentProjectId, fallback to project 1
         const pid = projectId || currentProjectId || 1;
 
+        // Reset pagination state for single execution history
+        singleHistoryOffset = 0;
+        singleHistoryHasMore = true;
+
         // Get project details
         const projectResponse = await fetch(`/api/projects/${pid}`);
         if (!projectResponse.ok) throw new Error(`Failed to load project ${pid}`);
         const project = await projectResponse.json();
 
-        // Get jobs for this project
-        const jobsResponse = await fetch(`/api/projects/${pid}/jobs`);
+        // Get jobs for this project (first page only)
+        const jobsResponse = await fetch(`/api/projects/${pid}/jobs?limit=${SINGLE_HISTORY_PAGE_SIZE}&offset=0`);
         if (!jobsResponse.ok) throw new Error(`Failed to load jobs for project ${pid}`);
         const allJobs = await jobsResponse.json();
 
         // Filter single-type jobs
         const singleJobs = allJobs.filter(job => job.job_type === 'single');
+
+        // Check if there might be more jobs
+        singleHistoryHasMore = allJobs.length >= SINGLE_HISTORY_PAGE_SIZE;
+        singleHistoryOffset = allJobs.length;
 
         // Use parameters from API (parsed by backend)
         const parameters = project.parameters || [];
@@ -470,16 +487,18 @@ function renderParameterInputs() {
     });
 }
 
-function renderHistory(jobs) {
+function renderHistory(jobs, append = false) {
     const container = document.getElementById('history-list');
     if (!container) return;
 
     if (!jobs || jobs.length === 0) {
-        container.innerHTML = '<p class="info">履歴がありません / No history</p>';
+        if (!append) {
+            container.innerHTML = '<p class="info">履歴がありません / No history</p>';
+        }
         return;
     }
 
-    container.innerHTML = jobs.map(job => {
+    const jobsHtml = jobs.map(job => {
         const createdAt = formatJST(job.created_at);
         const finishedAt = formatJST(job.finished_at);
         const turnaround = job.turnaround_ms ? `${(job.turnaround_ms / 1000).toFixed(1)}s` : 'N/A';
@@ -496,6 +515,47 @@ function renderHistory(jobs) {
             </div>
         `;
     }).join('');
+
+    // Add "Load more" link if there are more jobs
+    const loadMoreHtml = singleHistoryHasMore ? `
+        <div class="load-more-link" onclick="loadMoreSingleHistory()">
+            さらに表示 / Load more...
+        </div>
+    ` : '';
+
+    if (append) {
+        // Remove existing "Load more" link before appending
+        const existingLoadMore = container.querySelector('.load-more-link');
+        if (existingLoadMore) {
+            existingLoadMore.remove();
+        }
+        container.insertAdjacentHTML('beforeend', jobsHtml + loadMoreHtml);
+    } else {
+        container.innerHTML = jobsHtml + loadMoreHtml;
+    }
+}
+
+async function loadMoreSingleHistory() {
+    try {
+        const pid = currentProjectId || 1;
+
+        // Fetch next page of jobs
+        const response = await fetch(`/api/projects/${pid}/jobs?limit=${SINGLE_HISTORY_PAGE_SIZE}&offset=${singleHistoryOffset}`);
+        if (!response.ok) throw new Error('Failed to load more jobs');
+        const allJobs = await response.json();
+
+        // Filter single-type jobs
+        const singleJobs = allJobs.filter(job => job.job_type === 'single');
+
+        // Update pagination state
+        singleHistoryHasMore = allJobs.length >= SINGLE_HISTORY_PAGE_SIZE;
+        singleHistoryOffset += allJobs.length;
+
+        // Append to existing history
+        renderHistory(singleJobs, true);
+    } catch (error) {
+        showStatus('履歴の読み込みに失敗しました / Failed to load more history', 'error');
+    }
 }
 
 function selectHistoryItem(jobId) {
@@ -1696,12 +1756,20 @@ async function loadBatchJobs() {
 
 async function loadBatchJobHistory(projectId) {
     try {
-        // Get jobs for this project using new API
-        const response = await fetch(`/api/projects/${projectId}/jobs`);
+        // Reset pagination state for batch history
+        batchHistoryOffset = 0;
+        batchHistoryHasMore = true;
+
+        // Get jobs for this project using new API (first page only)
+        const response = await fetch(`/api/projects/${projectId}/jobs?limit=${BATCH_HISTORY_PAGE_SIZE}&offset=0`);
         const allJobs = await response.json();
 
         // Filter batch jobs only
         const batchJobs = allJobs.filter(job => job.job_type === 'batch');
+
+        // Update pagination state
+        batchHistoryHasMore = allJobs.length >= BATCH_HISTORY_PAGE_SIZE;
+        batchHistoryOffset = allJobs.length;
 
         renderBatchHistory(batchJobs);
     } catch (error) {
@@ -1714,19 +1782,25 @@ async function loadBatchJobHistory(projectId) {
 
 let currentBatchJobs = [];
 
-function renderBatchHistory(jobs) {
+function renderBatchHistory(jobs, append = false) {
     const container = document.getElementById('batch-jobs-list');
     if (!container) return;
 
     // Store jobs for later use
-    currentBatchJobs = jobs || [];
+    if (append) {
+        currentBatchJobs = [...currentBatchJobs, ...(jobs || [])];
+    } else {
+        currentBatchJobs = jobs || [];
+    }
 
     if (!jobs || jobs.length === 0) {
-        container.innerHTML = '<p class="info">バッチジョブの履歴はまだありません / No batch jobs yet</p>';
+        if (!append) {
+            container.innerHTML = '<p class="info">バッチジョブの履歴はまだありません / No batch jobs yet</p>';
+        }
         return;
     }
 
-    container.innerHTML = jobs.map(job => {
+    const jobsHtml = jobs.map(job => {
         const createdAt = formatJST(job.created_at);
         const finishedAt = formatJST(job.finished_at);
         const turnaround = job.turnaround_ms ? `${(job.turnaround_ms / 1000).toFixed(1)}s` : 'N/A';
@@ -1744,6 +1818,24 @@ function renderBatchHistory(jobs) {
         `;
     }).join('');
 
+    // Add "Load more" link if there are more jobs
+    const loadMoreHtml = batchHistoryHasMore ? `
+        <div class="load-more-link" onclick="loadMoreBatchHistory()">
+            さらに表示 / Load more...
+        </div>
+    ` : '';
+
+    if (append) {
+        // Remove existing "Load more" link before appending
+        const existingLoadMore = container.querySelector('.load-more-link');
+        if (existingLoadMore) {
+            existingLoadMore.remove();
+        }
+        container.insertAdjacentHTML('beforeend', jobsHtml + loadMoreHtml);
+    } else {
+        container.innerHTML = jobsHtml + loadMoreHtml;
+    }
+
     // Add click event listeners after rendering
     document.querySelectorAll('#batch-jobs-list .history-item').forEach(item => {
         item.addEventListener('click', () => {
@@ -1751,6 +1843,32 @@ function renderBatchHistory(jobs) {
             selectBatchJob(jobId);
         });
     });
+}
+
+async function loadMoreBatchHistory() {
+    try {
+        const projectSelect = document.getElementById('batch-project-select');
+        if (!projectSelect || !projectSelect.value) return;
+
+        const projectId = parseInt(projectSelect.value);
+
+        // Fetch next page of jobs
+        const response = await fetch(`/api/projects/${projectId}/jobs?limit=${BATCH_HISTORY_PAGE_SIZE}&offset=${batchHistoryOffset}`);
+        if (!response.ok) throw new Error('Failed to load more jobs');
+        const allJobs = await response.json();
+
+        // Filter batch jobs only
+        const batchJobs = allJobs.filter(job => job.job_type === 'batch');
+
+        // Update pagination state
+        batchHistoryHasMore = allJobs.length >= BATCH_HISTORY_PAGE_SIZE;
+        batchHistoryOffset += allJobs.length;
+
+        // Append to existing history
+        renderBatchHistory(batchJobs, true);
+    } catch (error) {
+        showStatus('履歴の読み込みに失敗しました / Failed to load more history', 'error');
+    }
 }
 
 async function selectBatchJob(jobId) {
