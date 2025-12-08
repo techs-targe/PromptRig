@@ -2537,7 +2537,10 @@ async function previewDataset(id) {
         }).join('');
 
         showModal(`
-            <div class="modal-header">データセットプレビュー / Dataset Preview: ${preview.name}</div>
+            <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center;">
+                <span>データセットプレビュー / Dataset Preview: ${preview.name}</span>
+                <button onclick="closeModal()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #7f8c8d; padding: 0 0.5rem;" title="閉じる / Close">×</button>
+            </div>
             <div class="modal-body">
                 <p>総行数 / Total Rows: ${preview.total_count}</p>
                 <div style="overflow-x: auto;">
