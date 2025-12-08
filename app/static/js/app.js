@@ -637,19 +637,22 @@ function displayJobResults(job, targetContainer = null) {
                     } else {
                         // Check if CSV output is available (priority display)
                         if (parsed.csv_output) {
+                            // Store item CSV in global storage with unique key
+                            const itemCsvKey = `item_${job.id}_${index}`;
+                            storeCsvContent(itemCsvKey, parsed.csv_output);
                             parsedContent = `
                                 <div style="margin-top: 1rem;">
                                     <h4 style="color: #27ae60; margin-bottom: 0.5rem;">📊 パーサー結果 (CSV形式) / Parsed Results (CSV):</h4>
                                     <div class="response-box" style="background-color: #e8f8f5; font-family: 'Courier New', monospace;">
-                                        <pre style="white-space: pre-wrap; word-wrap: break-word;">${parsed.csv_output}</pre>
+                                        <pre style="white-space: pre-wrap; word-wrap: break-word;">${escapeHtml(parsed.csv_output)}</pre>
                                     </div>
-                                    <button onclick="navigator.clipboard.writeText('${parsed.csv_output.replace(/'/g, "\\'")}').then(() => alert('CSVをクリップボードにコピーしました / CSV copied to clipboard'))"
+                                    <button onclick="copyCsvToClipboard('${itemCsvKey}')"
                                             style="margin-top: 0.5rem; padding: 0.5rem 1rem; background: #27ae60; color: white; border: none; border-radius: 4px; cursor: pointer;">
                                         📋 CSVをコピー / Copy CSV
                                     </button>
                                     <details style="margin-top: 0.5rem;">
                                         <summary style="cursor: pointer; color: #7f8c8d;">フィールド詳細を表示 / Show Field Details</summary>
-                                        <pre style="margin-top: 0.5rem;">${JSON.stringify(parsed.fields || {}, null, 2)}</pre>
+                                        <pre style="margin-top: 0.5rem;">${escapeHtml(JSON.stringify(parsed.fields || {}, null, 2))}</pre>
                                     </details>
                                 </div>
                             `;
