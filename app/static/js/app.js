@@ -67,8 +67,68 @@ function formatJST(dateInput, includeSeconds = false) {
     }
 }
 
+// Global storage for CSV content (to avoid escaping issues in onclick)
+const csvStorage = {};
+
+/**
+ * Store CSV content for a job
+ * @param {number} jobId - The job ID
+ * @param {string} csvContent - The CSV content
+ */
+function storeCsvContent(jobId, csvContent) {
+    csvStorage[jobId] = csvContent;
+}
+
+/**
+ * Copy CSV content to clipboard
+ * @param {number} jobId - The job ID
+ */
+function copyCsvToClipboard(jobId) {
+    const content = csvStorage[jobId];
+    if (!content) {
+        alert('CSVデータが見つかりません / CSV data not found');
+        return;
+    }
+    navigator.clipboard.writeText(content).then(() => {
+        alert('統合CSVをクリップボードにコピーしました / Merged CSV copied to clipboard');
+    }).catch(err => {
+        alert('コピーに失敗しました / Copy failed: ' + err.message);
+    });
+}
+
 /**
  * Download CSV content as a file
+ * @param {number} jobId - The job ID
+ * @param {string} filename - The filename for download
+ */
+function downloadCsvByJobId(jobId, filename) {
+    const content = csvStorage[jobId];
+    if (!content) {
+        alert('CSVデータが見つかりません / CSV data not found');
+        return;
+    }
+    try {
+        // Add BOM for Excel compatibility with Japanese characters
+        const bom = '\uFEFF';
+        const blob = new Blob([bom + content], { type: 'text/csv;charset=utf-8;' });
+
+        // Create download link
+        const link = document.createElement('a');
+        const url = URL.createObjectURL(blob);
+        link.setAttribute('href', url);
+        link.setAttribute('download', filename);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+    } catch (e) {
+        alert('ダウンロードに失敗しました / Download failed: ' + e.message);
+    }
+}
+
+/**
+ * Legacy download function for backward compatibility
  * @param {string} csvContent - The CSV content (escaped with \n for newlines)
  * @param {string} filename - The filename for download
  */
@@ -521,10 +581,13 @@ function displayJobResults(job, targetContainer = null) {
     // Display merged CSV output for batch jobs and repeated single executions (Priority display)
     let mergedCsvSection = '';
     if (job.merged_csv_output) {
-        const escapedCsv = job.merged_csv_output.replace(/'/g, "\\'").replace(/\n/g, '\\n');
+        // Store CSV content in global storage to avoid escaping issues
+        storeCsvContent(job.id, job.merged_csv_output);
         const isBatch = job.job_type === 'batch';
         const title = isBatch ? 'バッチ実行結果 (CSV統合) / Batch Results (Merged CSV)' : 'n回送信結果 (CSV統合) / Repeated Execution Results (Merged CSV)';
         const csvFilename = `job_${job.id}_results_${new Date().toISOString().slice(0,10)}.csv`;
+        // Escape HTML entities for display in <pre> tag
+        const displayCsv = escapeHtml(job.merged_csv_output);
         mergedCsvSection = `
             <div class="result-item" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-left: 5px solid #f39c12;">
                 <div class="item-header" style="color: white; font-size: 1.2rem;">
@@ -532,14 +595,14 @@ function displayJobResults(job, targetContainer = null) {
                 </div>
                 <div style="margin-top: 1rem; background: white; color: #2c3e50; padding: 1rem; border-radius: 4px;">
                     <div class="response-box" style="background-color: #f8f9fa; font-family: 'Courier New', monospace; max-height: 400px; overflow-y: auto;">
-                        <pre style="white-space: pre-wrap; word-wrap: break-word;">${job.merged_csv_output}</pre>
+                        <pre style="white-space: pre-wrap; word-wrap: break-word;">${displayCsv}</pre>
                     </div>
                     <div style="margin-top: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap;">
-                        <button onclick="navigator.clipboard.writeText('${escapedCsv}').then(() => alert('統合CSVをクリップボードにコピーしました / Merged CSV copied to clipboard'))"
+                        <button onclick="copyCsvToClipboard(${job.id})"
                                 style="padding: 0.5rem 1.5rem; background: #27ae60; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">
                             📋 統合CSVをコピー / Copy Merged CSV
                         </button>
-                        <button onclick="downloadCsv('${escapedCsv}', '${csvFilename}')"
+                        <button onclick="downloadCsvByJobId(${job.id}, 'job_${job.id}_results_${new Date().toISOString().slice(0,10)}.csv')"
                                 style="padding: 0.5rem 1.5rem; background: #3498db; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">
                             💾 CSVをダウンロード / Download CSV
                         </button>
