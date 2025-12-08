@@ -2531,11 +2531,6 @@ async function previewDataset(id) {
         const response = await fetch(`/api/datasets/${id}/preview`);
         const preview = await response.json();
 
-        const rowsHtml = preview.rows.map(row => {
-            const cells = preview.columns.map(col => `<td>${escapeHtml(row[col]) || ''}</td>`).join('');
-            return `<tr>${cells}</tr>`;
-        }).join('');
-
         // Helper function for escaping HTML in this context
         function escapeHtml(unsafe) {
             if (unsafe === null || unsafe === undefined) return '';
@@ -2547,6 +2542,17 @@ async function previewDataset(id) {
                 .replace(/'/g, "&#039;");
         }
 
+        const rowsHtml = preview.rows.map(row => {
+            const cells = preview.columns.map(col => {
+                const cellValue = row[col];
+                const displayValue = escapeHtml(cellValue) || '';
+                // Add title attribute for tooltip showing full content on hover
+                const tooltipValue = String(cellValue ?? '').replace(/"/g, '&quot;');
+                return `<td title="${tooltipValue}" style="border: 1px solid #ddd; padding: 8px;">${displayValue}</td>`;
+            }).join('');
+            return `<tr>${cells}</tr>`;
+        }).join('');
+
         showModal(`
             <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center;">
                 <span>データセットプレビュー / Dataset Preview: ${preview.name}</span>
@@ -2557,12 +2563,16 @@ async function previewDataset(id) {
                     <p style="margin: 0;">総行数 / Total Rows: ${preview.total_count}</p>
                     <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
                         <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer; user-select: none;">
-                            <input type="checkbox" id="preview-truncate" onchange="togglePreviewTruncate(this.checked)">
+                            <input type="checkbox" id="preview-truncate" checked onchange="togglePreviewTruncate(this.checked)">
                             <span style="font-size: 0.9rem;">折り返し省略 / Truncate</span>
                         </label>
                         <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer; user-select: none;">
-                            <input type="checkbox" id="preview-sticky-header" onchange="togglePreviewStickyHeader(this.checked)">
+                            <input type="checkbox" id="preview-sticky-header" checked onchange="togglePreviewStickyHeader(this.checked)">
                             <span style="font-size: 0.9rem;">ヘッダ固定 / Fix Header</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer; user-select: none;">
+                            <input type="checkbox" id="preview-grid-lines" checked onchange="togglePreviewGridLines(this.checked)">
+                            <span style="font-size: 0.9rem;">罫線表示 / Grid Lines</span>
                         </label>
                     </div>
                 </div>
@@ -2579,6 +2589,11 @@ async function previewDataset(id) {
                 <button class="btn btn-primary" onclick="closeModal()">閉じる / Close</button>
             </div>
         `);
+
+        // Apply default styles (all checkboxes checked by default)
+        togglePreviewTruncate(true);
+        togglePreviewStickyHeader(true);
+        togglePreviewGridLines(true);
     } catch (error) {
         alert(`エラー / Error: ${error.message}`);
     }
@@ -2631,6 +2646,41 @@ function togglePreviewStickyHeader(enabled) {
         thead.style.zIndex = '';
         headerCells.forEach(th => {
             th.style.boxShadow = '';
+        });
+    }
+}
+
+/**
+ * Toggle grid lines and zebra striping for dataset preview table
+ */
+function togglePreviewGridLines(enabled) {
+    const table = document.getElementById('preview-table');
+    if (!table) return;
+
+    const allCells = table.querySelectorAll('th, td');
+    const rows = table.querySelectorAll('tbody tr');
+
+    if (enabled) {
+        // Add colored borders to all cells
+        allCells.forEach(cell => {
+            cell.style.border = '1px solid #3498db';
+        });
+        // Add zebra striping (odd rows get light blue background)
+        rows.forEach((row, index) => {
+            if (index % 2 === 0) {
+                row.style.background = '#ebf5fb';
+            } else {
+                row.style.background = '#ffffff';
+            }
+        });
+    } else {
+        // Reset to default borders
+        allCells.forEach(cell => {
+            cell.style.border = '1px solid #ddd';
+        });
+        // Reset row backgrounds
+        rows.forEach(row => {
+            row.style.background = '';
         });
     }
 }
