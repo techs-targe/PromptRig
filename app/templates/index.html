@@ -167,145 +167,242 @@
 
     <!-- System Settings Tab -->
     <div id="tab-settings" class="tab-content">
-        <div class="section">
-            <h2>システム設定 / System Settings</h2>
-        </div>
-
-        <div class="section">
-            <h3>デフォルトモデル設定 / Default Model Configuration</h3>
-            <div class="settings-group">
-                <label>デフォルトLLMモデル / Default LLM Model:</label>
-                <select id="default-model-select" style="margin-left: 1rem; padding: 0.5rem;">
-                    <option value="">Loading...</option>
-                </select>
-                <button id="btn-save-default-model" class="btn btn-primary" style="margin-left: 1rem;">保存 / Save</button>
-                <p class="info" style="margin-top: 0.5rem;">選択したモデルが単発実行・バッチ実行画面のデフォルトとして使用されます / Selected model will be used as default in single and batch execution screens</p>
-            </div>
-        </div>
-
-        <div class="section">
-            <h3>デフォルトプロジェクト設定 / Default Project Configuration</h3>
-            <div class="settings-group">
-                <label>デフォルトプロジェクト / Default Project:</label>
-                <select id="default-project-select" style="margin-left: 1rem; padding: 0.5rem;">
-                    <option value="">Loading...</option>
-                </select>
-                <button id="btn-save-default-project" class="btn btn-primary" style="margin-left: 1rem;">保存 / Save</button>
-                <p class="info" style="margin-top: 0.5rem;">選択したプロジェクトが単発実行画面のデフォルトとして使用されます / Selected project will be used as default in single execution screen</p>
-            </div>
-        </div>
-
-        <div class="section">
-            <h3>モデルパラメータ設定 / Model Parameters Configuration</h3>
-            <div class="settings-group">
-                <label>モデル選択 / Select Model:</label>
-                <select id="param-model-select" style="margin-left: 1rem; padding: 0.5rem;">
-                    <option value="">Loading...</option>
-                </select>
-            </div>
-            <div id="model-parameters-form" style="margin-top: 1rem; display: none;">
-                <div class="form-group" id="param-temperature-group">
-                    <label>Temperature (0-2):</label>
-                    <input type="number" id="param-temperature" min="0" max="2" step="0.1" value="0.7" style="width: 100px; margin-left: 1rem;">
-                    <span id="default-temperature" style="margin-left: 1rem; color: #7f8c8d; font-size: 0.9rem;"></span>
-                </div>
-                <div class="form-group" id="param-max-tokens-group">
-                    <label>Max Tokens:</label>
-                    <input type="number" id="param-max-tokens" min="100" max="32000" step="100" value="4000" style="width: 100px; margin-left: 1rem;">
-                    <span id="default-max-tokens" style="margin-left: 1rem; color: #7f8c8d; font-size: 0.9rem;"></span>
-                </div>
-                <div class="form-group" id="param-top-p-group">
-                    <label>Top P (0-1):</label>
-                    <input type="number" id="param-top-p" min="0" max="1" step="0.1" value="1.0" style="width: 100px; margin-left: 1rem;">
-                    <span id="default-top-p" style="margin-left: 1rem; color: #7f8c8d; font-size: 0.9rem;"></span>
-                </div>
-                <div class="form-group" id="param-max-output-tokens-group" style="display: none;">
-                    <label>Max Output Tokens (Azure GPT-5):</label>
-                    <input type="number" id="param-max-output-tokens" min="1024" max="65536" step="1024" value="8192" style="width: 120px; margin-left: 1rem;">
-                    <span id="default-max-output-tokens" style="margin-left: 1rem; color: #7f8c8d; font-size: 0.9rem;"></span>
-                    <p style="margin-top: 0.5rem; color: #7f8c8d; font-size: 0.85rem;">推奨: 8192-16384。出力が途切れる場合は増加。</p>
-                </div>
-                <div class="form-group" id="param-verbosity-group" style="display: none;">
-                    <label>Verbosity (GPT-5):</label>
-                    <select id="param-verbosity" style="width: 150px; margin-left: 1rem;">
-                        <option value="low">Low</option>
-                        <option value="medium">Medium</option>
-                        <option value="high">High</option>
-                    </select>
-                    <span id="default-verbosity" style="margin-left: 1rem; color: #7f8c8d; font-size: 0.9rem;"></span>
-                </div>
-                <div class="form-group" id="param-reasoning-effort-group" style="display: none;">
-                    <label>Reasoning Effort (GPT-5):</label>
-                    <select id="param-reasoning-effort" style="width: 150px; margin-left: 1rem;">
-                        <option value="minimal">Minimal</option>
-                        <option value="low">Low</option>
-                        <option value="medium">Medium</option>
-                        <option value="high">High</option>
-                    </select>
-                    <span id="default-reasoning-effort" style="margin-left: 1rem; color: #7f8c8d; font-size: 0.9rem;"></span>
-                </div>
-                <div style="margin-top: 1rem;">
-                    <button id="btn-save-model-params" class="btn btn-primary">パラメータ保存 / Save Parameters</button>
-                    <button id="btn-reset-model-params" class="btn btn-secondary" style="margin-left: 1rem;">デフォルトに戻す / Reset to Defaults</button>
-                </div>
-            </div>
-        </div>
-
-        <div class="section">
-            <h3>LLMモデル設定 / LLM Model Configuration</h3>
-            <div class="settings-group">
-                <label>利用可能なモデル / Available Models (有効化されたモデル):</label>
-                <div id="available-models">
-                    <p class="loading">Loading...</p>
-                </div>
+        <div class="settings-page">
+            <!-- Page Header -->
+            <div class="settings-header">
+                <h2>システム設定 / System Settings</h2>
+                <p class="settings-subtitle">アプリケーションの動作をカスタマイズします / Customize application behavior</p>
             </div>
 
-            <div class="settings-group" style="margin-top: 2rem;">
-                <label>モデル設定 / Model Configuration:</label>
-                <p class="info" style="margin-bottom: 1rem;">
-                    各モデルの有効/無効とパラメータを設定します。<br>
-                    Configure enable/disable status and parameters for each model.
-                </p>
-                <div id="model-configuration-settings">
-                    <p class="loading">Loading...</p>
+            <!-- Settings Grid Layout -->
+            <div class="settings-grid">
+                <!-- Default Settings Card -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <span class="settings-card-icon">⚙️</span>
+                        <h3>デフォルト設定 / Defaults</h3>
+                    </div>
+                    <div class="settings-card-body">
+                        <!-- Default Model -->
+                        <div class="settings-row">
+                            <div class="settings-row-label">
+                                <span class="settings-label">デフォルトLLMモデル</span>
+                                <span class="settings-label-sub">Default LLM Model</span>
+                            </div>
+                            <div class="settings-row-control">
+                                <select id="default-model-select" class="settings-select">
+                                    <option value="">Loading...</option>
+                                </select>
+                                <button id="btn-save-default-model" class="btn btn-primary btn-sm">保存</button>
+                            </div>
+                        </div>
+                        <p class="settings-hint">単発実行・バッチ実行のデフォルトモデル</p>
+
+                        <div class="settings-divider"></div>
+
+                        <!-- Default Project -->
+                        <div class="settings-row">
+                            <div class="settings-row-label">
+                                <span class="settings-label">デフォルトプロジェクト</span>
+                                <span class="settings-label-sub">Default Project</span>
+                            </div>
+                            <div class="settings-row-control">
+                                <select id="default-project-select" class="settings-select">
+                                    <option value="">Loading...</option>
+                                </select>
+                                <button id="btn-save-default-project" class="btn btn-primary btn-sm">保存</button>
+                            </div>
+                        </div>
+                        <p class="settings-hint">単発実行画面のデフォルトプロジェクト</p>
+                    </div>
                 </div>
-            </div>
-        </div>
 
-        <div class="section">
-            <h3>API設定 / API Configuration</h3>
-            <div class="settings-group">
-                <p class="info">API設定は .env ファイルで管理されます / API settings are managed in .env file</p>
-                <ul>
-                    <li>AZURE_OPENAI_ENDPOINT</li>
-                    <li>AZURE_OPENAI_API_KEY</li>
-                    <li>OPENAI_API_KEY</li>
-                    <li>AZURE_OPENAI_GPT5_MINI_DEPLOYMENT_NAME (optional, defaults to AZURE_OPENAI_DEPLOYMENT_NAME)</li>
-                    <li>AZURE_OPENAI_GPT5_NANO_DEPLOYMENT_NAME (optional, defaults to AZURE_OPENAI_DEPLOYMENT_NAME)</li>
-                </ul>
-            </div>
-        </div>
+                <!-- Job Execution Card -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <span class="settings-card-icon">🚀</span>
+                        <h3>ジョブ実行 / Execution</h3>
+                    </div>
+                    <div class="settings-card-body">
+                        <div class="settings-row">
+                            <div class="settings-row-label">
+                                <span class="settings-label">並列実行数</span>
+                                <span class="settings-label-sub">Job Parallelism (1-99)</span>
+                            </div>
+                            <div class="settings-row-control">
+                                <input type="number" id="job-parallelism" min="1" max="99" value="1" class="settings-input-number">
+                                <button id="btn-save-parallelism" class="btn btn-primary btn-sm">保存</button>
+                                <span id="parallelism-status" class="settings-status"></span>
+                            </div>
+                        </div>
+                        <p class="settings-hint">同時に実行するジョブアイテムの数（1 = 直列実行）</p>
+                    </div>
+                </div>
 
-        <div class="section">
-            <h3>データベース / Database</h3>
-            <div class="settings-group">
-                <label>データベースパス / Database Path:</label>
-                <p id="db-path">database/app.db</p>
-            </div>
-        </div>
+                <!-- Model Parameters Card -->
+                <div class="settings-card settings-card-wide">
+                    <div class="settings-card-header">
+                        <span class="settings-card-icon">🎛️</span>
+                        <h3>モデルパラメータ / Model Parameters</h3>
+                    </div>
+                    <div class="settings-card-body">
+                        <div class="settings-row">
+                            <div class="settings-row-label">
+                                <span class="settings-label">モデル選択</span>
+                                <span class="settings-label-sub">Select Model</span>
+                            </div>
+                            <div class="settings-row-control">
+                                <select id="param-model-select" class="settings-select">
+                                    <option value="">Loading...</option>
+                                </select>
+                            </div>
+                        </div>
 
-        <div class="section">
-            <h3>ジョブ実行設定 / Job Execution Settings</h3>
-            <div class="settings-group">
-                <label>並列実行数 / Job Parallelism (1-99):</label>
-                <p class="info" style="margin-bottom: 1rem;">
-                    同時に実行するジョブアイテムの数を設定します。デフォルトは1（直列実行）です。<br>
-                    Set the number of job items to execute in parallel. Default is 1 (serial execution).
-                </p>
-                <div style="display: flex; align-items: center; gap: 1rem;">
-                    <input type="number" id="job-parallelism" min="1" max="99" value="1" style="width: 100px;">
-                    <button id="btn-save-parallelism" class="btn btn-primary">保存 / Save</button>
-                    <span id="parallelism-status" style="color: #27ae60;"></span>
+                        <div id="model-parameters-form" class="model-params-form" style="display: none;">
+                            <div class="params-grid">
+                                <div class="param-item" id="param-temperature-group">
+                                    <label class="param-label">Temperature</label>
+                                    <div class="param-input-row">
+                                        <input type="number" id="param-temperature" min="0" max="2" step="0.1" value="0.7" class="settings-input-number">
+                                        <span id="default-temperature" class="param-default"></span>
+                                    </div>
+                                    <span class="param-range">0 - 2</span>
+                                </div>
+                                <div class="param-item" id="param-max-tokens-group">
+                                    <label class="param-label">Max Tokens</label>
+                                    <div class="param-input-row">
+                                        <input type="number" id="param-max-tokens" min="100" max="32000" step="100" value="4000" class="settings-input-number">
+                                        <span id="default-max-tokens" class="param-default"></span>
+                                    </div>
+                                    <span class="param-range">100 - 32000</span>
+                                </div>
+                                <div class="param-item" id="param-top-p-group">
+                                    <label class="param-label">Top P</label>
+                                    <div class="param-input-row">
+                                        <input type="number" id="param-top-p" min="0" max="1" step="0.1" value="1.0" class="settings-input-number">
+                                        <span id="default-top-p" class="param-default"></span>
+                                    </div>
+                                    <span class="param-range">0 - 1</span>
+                                </div>
+                                <div class="param-item" id="param-max-output-tokens-group" style="display: none;">
+                                    <label class="param-label">Max Output Tokens <span class="param-badge">GPT-5</span></label>
+                                    <div class="param-input-row">
+                                        <input type="number" id="param-max-output-tokens" min="1024" max="65536" step="1024" value="8192" class="settings-input-number">
+                                        <span id="default-max-output-tokens" class="param-default"></span>
+                                    </div>
+                                    <span class="param-range">推奨: 8192 - 16384</span>
+                                </div>
+                                <div class="param-item" id="param-verbosity-group" style="display: none;">
+                                    <label class="param-label">Verbosity <span class="param-badge">GPT-5</span></label>
+                                    <div class="param-input-row">
+                                        <select id="param-verbosity" class="settings-select-sm">
+                                            <option value="low">Low</option>
+                                            <option value="medium">Medium</option>
+                                            <option value="high">High</option>
+                                        </select>
+                                        <span id="default-verbosity" class="param-default"></span>
+                                    </div>
+                                </div>
+                                <div class="param-item" id="param-reasoning-effort-group" style="display: none;">
+                                    <label class="param-label">Reasoning Effort <span class="param-badge">GPT-5</span></label>
+                                    <div class="param-input-row">
+                                        <select id="param-reasoning-effort" class="settings-select-sm">
+                                            <option value="minimal">Minimal</option>
+                                            <option value="low">Low</option>
+                                            <option value="medium">Medium</option>
+                                            <option value="high">High</option>
+                                        </select>
+                                        <span id="default-reasoning-effort" class="param-default"></span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="params-actions">
+                                <button id="btn-save-model-params" class="btn btn-primary">パラメータ保存 / Save</button>
+                                <button id="btn-reset-model-params" class="btn btn-secondary">デフォルトに戻す / Reset</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Available Models Card -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <span class="settings-card-icon">🤖</span>
+                        <h3>利用可能なモデル / Available Models</h3>
+                    </div>
+                    <div class="settings-card-body">
+                        <div id="available-models" class="models-list">
+                            <p class="loading">Loading...</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Model Configuration Card -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <span class="settings-card-icon">🔧</span>
+                        <h3>モデル設定 / Model Configuration</h3>
+                    </div>
+                    <div class="settings-card-body">
+                        <p class="settings-hint" style="margin-bottom: 1rem;">各モデルの有効/無効とパラメータを設定</p>
+                        <div id="model-configuration-settings" class="model-config-list">
+                            <p class="loading">Loading...</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- API Configuration Card -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <span class="settings-card-icon">🔑</span>
+                        <h3>API設定 / API Configuration</h3>
+                    </div>
+                    <div class="settings-card-body">
+                        <div class="api-info-box">
+                            <p class="api-info-text">API設定は <code>.env</code> ファイルで管理されます</p>
+                        </div>
+                        <div class="api-keys-list">
+                            <div class="api-key-item">
+                                <span class="api-key-name">AZURE_OPENAI_ENDPOINT</span>
+                                <span class="api-key-badge required">Required</span>
+                            </div>
+                            <div class="api-key-item">
+                                <span class="api-key-name">AZURE_OPENAI_API_KEY</span>
+                                <span class="api-key-badge required">Required</span>
+                            </div>
+                            <div class="api-key-item">
+                                <span class="api-key-name">OPENAI_API_KEY</span>
+                                <span class="api-key-badge optional">Optional</span>
+                            </div>
+                            <div class="api-key-item">
+                                <span class="api-key-name">AZURE_OPENAI_GPT5_MINI_DEPLOYMENT_NAME</span>
+                                <span class="api-key-badge optional">Optional</span>
+                            </div>
+                            <div class="api-key-item">
+                                <span class="api-key-name">AZURE_OPENAI_GPT5_NANO_DEPLOYMENT_NAME</span>
+                                <span class="api-key-badge optional">Optional</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Database Card -->
+                <div class="settings-card settings-card-compact">
+                    <div class="settings-card-header">
+                        <span class="settings-card-icon">💾</span>
+                        <h3>データベース / Database</h3>
+                    </div>
+                    <div class="settings-card-body">
+                        <div class="settings-row">
+                            <div class="settings-row-label">
+                                <span class="settings-label">データベースパス</span>
+                                <span class="settings-label-sub">Database Path</span>
+                            </div>
+                            <div class="settings-row-control">
+                                <code id="db-path" class="db-path-display">database/app.db</code>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
