@@ -1161,6 +1161,61 @@ footer {
     border: 1px solid #e9ecef;
 }
 
+/* Load More Link */
+.load-more-link {
+    text-align: center;
+    padding: 0.75rem 1rem;
+    margin-top: 0.5rem;
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s;
+    border: 1px dashed #bdc3c7;
+}
+
+.load-more-link:hover {
+    background: linear-gradient(135deg, #e9ecef 0%, #dde4e6 100%);
+    border-color: #3498db;
+}
+
+.load-more-link span {
+    color: #3498db;
+    font-size: 0.9rem;
+    font-weight: 500;
+}
+
+.load-more-link:hover span {
+    color: #2980b9;
+}
+
+/* FILEPATH Input Styles */
+.filepath-input-wrapper {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.filepath-text-input {
+    flex: 1;
+    padding: 0.5rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 0.9rem;
+}
+
+.filepath-text-input:focus {
+    outline: none;
+    border-color: #3498db;
+    box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.15);
+}
+
+.filepath-browse-btn {
+    padding: 0.5rem 1rem;
+    white-space: nowrap;
+    font-size: 0.9rem;
+}
+
 /* Responsive Settings Grid */
 @media (max-width: 900px) {
     .settings-grid {

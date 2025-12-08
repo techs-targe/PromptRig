@@ -500,12 +500,13 @@ def update_latest_revision(
 
 
 @router.get("/api/projects/{project_id}/jobs", response_model=List[JobResponse])
-def get_project_jobs(project_id: int, limit: int = 50, db: Session = Depends(get_db)):
+def get_project_jobs(project_id: int, limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
     """Get job history for a specific project.
 
     Args:
         project_id: ID of the project
         limit: Maximum number of jobs to return (default 50)
+        offset: Number of jobs to skip (default 0, for pagination)
 
     Returns:
         List of jobs with their items, ordered by creation time (newest first)
@@ -530,7 +531,7 @@ def get_project_jobs(project_id: int, limit: int = 50, db: Session = Depends(get
     # Get recent jobs for all revisions of this project
     recent_jobs_data = db.query(Job).filter(
         Job.project_revision_id.in_(revision_ids)
-    ).order_by(Job.created_at.desc()).limit(limit).all()
+    ).order_by(Job.created_at.desc()).offset(offset).limit(limit).all()
 
     recent_jobs = []
     for job in recent_jobs_data:

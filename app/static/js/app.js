@@ -12,6 +12,11 @@ let allProjects = [];
 let allDatasets = [];
 let currentProjectId = 1;
 
+// Single execution history pagination
+let singleHistoryOffset = 0;
+const SINGLE_HISTORY_PAGE_SIZE = 10;
+let singleHistoryHasMore = true;
+
 /**
  * Format date to JST (Japan Standard Time)
  * Database timestamps are stored in UTC without timezone suffix.
@@ -314,15 +319,24 @@ async function loadConfig(projectId = null) {
         // Use provided projectId or currentProjectId, fallback to project 1
         const pid = projectId || currentProjectId || 1;
 
+        // Reset pagination state
+        singleHistoryOffset = 0;
+        singleHistoryHasMore = true;
+
         // Get project details
         const projectResponse = await fetch(`/api/projects/${pid}`);
         if (!projectResponse.ok) throw new Error(`Failed to load project ${pid}`);
         const project = await projectResponse.json();
 
-        // Get jobs for this project
-        const jobsResponse = await fetch(`/api/projects/${pid}/jobs`);
+        // Get jobs for this project with pagination
+        const jobsResponse = await fetch(`/api/projects/${pid}/jobs?limit=${SINGLE_HISTORY_PAGE_SIZE}&offset=0`);
         if (!jobsResponse.ok) throw new Error(`Failed to load jobs for project ${pid}`);
         const allJobs = await jobsResponse.json();
+
+        // Check if we got fewer items than requested
+        if (allJobs.length < SINGLE_HISTORY_PAGE_SIZE) {
+            singleHistoryHasMore = false;
+        }
 
         // Filter single-type jobs
         const singleJobs = allJobs.filter(job => job.job_type === 'single');
@@ -440,6 +454,87 @@ function renderParameterInputs() {
             // Setup file input handlers after DOM insertion
             setupFileInputHandlers(param.name);
             return; // Skip the default input append
+        } else if (param.type === 'FILEPATH') {
+            // FILEPATH: Text input with file picker button
+            const filepathWrapper = document.createElement('div');
+            filepathWrapper.className = 'filepath-input-wrapper';
+
+            // Hidden file input for triggering file picker
+            const hiddenFileInput = document.createElement('input');
+            hiddenFileInput.type = 'file';
+            hiddenFileInput.id = `filepath-picker-${param.name}`;
+            hiddenFileInput.style.display = 'none';
+            hiddenFileInput.accept = 'image/*,.pdf,.xlsx,.xls,.csv,.txt,.json';
+
+            // Text input for path display
+            input = document.createElement('input');
+            input.type = 'text';
+            input.id = `param-${param.name}`;
+            input.name = param.name;
+            input.required = param.required;
+            input.placeholder = param.placeholder || '/path/to/file';
+            input.className = 'filepath-text-input';
+            if (param.default) {
+                input.value = param.default;
+            }
+
+            // Browse button
+            const browseBtn = document.createElement('button');
+            browseBtn.type = 'button';
+            browseBtn.className = 'btn btn-secondary filepath-browse-btn';
+            browseBtn.textContent = '参照...';
+            browseBtn.title = 'ファイルを選択してアップロード / Select file to upload';
+
+            // Click handler for browse button
+            browseBtn.addEventListener('click', () => {
+                hiddenFileInput.click();
+            });
+
+            // File selection handler
+            hiddenFileInput.addEventListener('change', async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                // Show uploading state
+                browseBtn.disabled = true;
+                browseBtn.textContent = 'アップロード中...';
+                input.value = 'アップロード中... / Uploading...';
+
+                try {
+                    const formData = new FormData();
+                    formData.append('file', file);
+
+                    const response = await fetch('/api/upload/filepath', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Upload failed');
+                    }
+
+                    const result = await response.json();
+                    input.value = result.path;
+                    input.title = `Original: ${result.filename}`;
+                } catch (error) {
+                    console.error('File upload failed:', error);
+                    input.value = '';
+                    alert('ファイルのアップロードに失敗しました / File upload failed');
+                } finally {
+                    browseBtn.disabled = false;
+                    browseBtn.textContent = '参照...';
+                    hiddenFileInput.value = ''; // Reset for next selection
+                }
+            });
+
+            filepathWrapper.appendChild(hiddenFileInput);
+            filepathWrapper.appendChild(input);
+            filepathWrapper.appendChild(browseBtn);
+
+            group.appendChild(label);
+            group.appendChild(filepathWrapper);
+            container.appendChild(group);
+            return; // Skip the default input append
         } else {
             input = document.createElement('input');
             input.type = param.html_type;
@@ -470,16 +565,25 @@ function renderParameterInputs() {
     });
 }
 
-function renderHistory(jobs) {
+function renderHistory(jobs, append = false) {
     const container = document.getElementById('history-list');
     if (!container) return;
 
-    if (!jobs || jobs.length === 0) {
+    // Update recent_jobs when appending
+    if (append && currentConfig) {
+        currentConfig.recent_jobs = [...currentConfig.recent_jobs, ...(jobs || [])];
+    }
+
+    const allJobs = currentConfig?.recent_jobs || jobs || [];
+
+    if (!allJobs || allJobs.length === 0) {
         container.innerHTML = '<p class="info">履歴がありません / No history</p>';
         return;
     }
 
-    container.innerHTML = jobs.map(job => {
+    const jobsToRender = append ? jobs : allJobs;
+
+    const jobsHtml = jobsToRender.map(job => {
         const createdAt = formatJST(job.created_at);
         const finishedAt = formatJST(job.finished_at);
         const turnaround = job.turnaround_ms ? `${(job.turnaround_ms / 1000).toFixed(1)}s` : 'N/A';
@@ -496,6 +600,48 @@ function renderHistory(jobs) {
             </div>
         `;
     }).join('');
+
+    if (append) {
+        // Remove existing load-more link first
+        const existingLoadMore = container.querySelector('.load-more-link');
+        if (existingLoadMore) existingLoadMore.remove();
+        // Append new jobs
+        container.insertAdjacentHTML('beforeend', jobsHtml);
+    } else {
+        container.innerHTML = jobsHtml;
+    }
+
+    // Add "Load more" link if there might be more jobs
+    if (singleHistoryHasMore) {
+        const loadMoreHtml = `
+            <div class="load-more-link" onclick="loadMoreSingleHistory()">
+                <span>さらに表示... / Load more...</span>
+            </div>
+        `;
+        container.insertAdjacentHTML('beforeend', loadMoreHtml);
+    }
+}
+
+async function loadMoreSingleHistory() {
+    if (!currentConfig) return;
+    const projectId = currentConfig.project_id;
+
+    singleHistoryOffset += SINGLE_HISTORY_PAGE_SIZE;
+
+    try {
+        const response = await fetch(`/api/projects/${projectId}/jobs?limit=${SINGLE_HISTORY_PAGE_SIZE}&offset=${singleHistoryOffset}`);
+        const allJobs = await response.json();
+        const singleJobs = allJobs.filter(job => job.job_type === 'single');
+
+        // Check if we got fewer items than requested (no more to load)
+        if (allJobs.length < SINGLE_HISTORY_PAGE_SIZE) {
+            singleHistoryHasMore = false;
+        }
+
+        renderHistory(singleJobs, true);
+    } catch (error) {
+        console.error('Failed to load more single history:', error);
+    }
 }
 
 function selectHistoryItem(jobId) {
@@ -1696,9 +1842,18 @@ async function loadBatchJobs() {
 
 async function loadBatchJobHistory(projectId) {
     try {
-        // Get jobs for this project using new API
-        const response = await fetch(`/api/projects/${projectId}/jobs`);
+        // Reset pagination state
+        batchHistoryOffset = 0;
+        batchHistoryHasMore = true;
+
+        // Get jobs for this project using new API with pagination
+        const response = await fetch(`/api/projects/${projectId}/jobs?limit=${BATCH_HISTORY_PAGE_SIZE}&offset=0`);
         const allJobs = await response.json();
+
+        // Check if we got fewer items than requested
+        if (allJobs.length < BATCH_HISTORY_PAGE_SIZE) {
+            batchHistoryHasMore = false;
+        }
 
         // Filter batch jobs only
         const batchJobs = allJobs.filter(job => job.job_type === 'batch');
@@ -1713,20 +1868,29 @@ async function loadBatchJobHistory(projectId) {
 }
 
 let currentBatchJobs = [];
+let batchHistoryOffset = 0;
+const BATCH_HISTORY_PAGE_SIZE = 10;
+let batchHistoryHasMore = true;
 
-function renderBatchHistory(jobs) {
+function renderBatchHistory(jobs, append = false) {
     const container = document.getElementById('batch-jobs-list');
     if (!container) return;
 
     // Store jobs for later use
-    currentBatchJobs = jobs || [];
+    if (append) {
+        currentBatchJobs = [...currentBatchJobs, ...(jobs || [])];
+    } else {
+        currentBatchJobs = jobs || [];
+    }
 
-    if (!jobs || jobs.length === 0) {
+    if (!currentBatchJobs || currentBatchJobs.length === 0) {
         container.innerHTML = '<p class="info">バッチジョブの履歴はまだありません / No batch jobs yet</p>';
         return;
     }
 
-    container.innerHTML = jobs.map(job => {
+    const jobsToRender = append ? jobs : currentBatchJobs;
+
+    const jobsHtml = jobsToRender.map(job => {
         const createdAt = formatJST(job.created_at);
         const finishedAt = formatJST(job.finished_at);
         const turnaround = job.turnaround_ms ? `${(job.turnaround_ms / 1000).toFixed(1)}s` : 'N/A';
@@ -1744,6 +1908,26 @@ function renderBatchHistory(jobs) {
         `;
     }).join('');
 
+    if (append) {
+        // Remove existing load-more link first
+        const existingLoadMore = container.querySelector('.load-more-link');
+        if (existingLoadMore) existingLoadMore.remove();
+        // Append new jobs
+        container.insertAdjacentHTML('beforeend', jobsHtml);
+    } else {
+        container.innerHTML = jobsHtml;
+    }
+
+    // Add "Load more" link if there might be more jobs
+    if (batchHistoryHasMore) {
+        const loadMoreHtml = `
+            <div class="load-more-link" onclick="loadMoreBatchHistory()">
+                <span>さらに表示... / Load more...</span>
+            </div>
+        `;
+        container.insertAdjacentHTML('beforeend', loadMoreHtml);
+    }
+
     // Add click event listeners after rendering
     document.querySelectorAll('#batch-jobs-list .history-item').forEach(item => {
         item.addEventListener('click', () => {
@@ -1751,6 +1935,28 @@ function renderBatchHistory(jobs) {
             selectBatchJob(jobId);
         });
     });
+}
+
+async function loadMoreBatchHistory() {
+    const projectId = document.getElementById('batch-project-select')?.value;
+    if (!projectId) return;
+
+    batchHistoryOffset += BATCH_HISTORY_PAGE_SIZE;
+
+    try {
+        const response = await fetch(`/api/projects/${projectId}/jobs?limit=${BATCH_HISTORY_PAGE_SIZE}&offset=${batchHistoryOffset}`);
+        const allJobs = await response.json();
+        const batchJobs = allJobs.filter(job => job.job_type === 'batch');
+
+        // Check if we got fewer items than requested (no more to load)
+        if (allJobs.length < BATCH_HISTORY_PAGE_SIZE) {
+            batchHistoryHasMore = false;
+        }
+
+        renderBatchHistory(batchJobs, true);
+    } catch (error) {
+        console.error('Failed to load more batch history:', error);
+    }
 }
 
 async function selectBatchJob(jobId) {
