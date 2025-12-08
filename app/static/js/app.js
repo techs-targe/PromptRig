@@ -491,9 +491,27 @@ function renderHistory(jobs, append = false) {
     const container = document.getElementById('history-list');
     if (!container) return;
 
+    // Always remove existing "Load more" link first when appending
+    if (append) {
+        const existingLoadMore = container.querySelector('.load-more-link');
+        if (existingLoadMore) {
+            existingLoadMore.remove();
+        }
+    }
+
+    // Handle empty jobs
     if (!jobs || jobs.length === 0) {
         if (!append) {
             container.innerHTML = '<p class="info">履歴がありません / No history</p>';
+        }
+        // When append mode with no new items, just update Load More button state
+        // (already removed above, add back only if hasMore is still true)
+        if (append && singleHistoryHasMore) {
+            container.insertAdjacentHTML('beforeend', `
+                <div class="load-more-link" onclick="loadMoreSingleHistory()">
+                    さらに表示 / Load more...
+                </div>
+            `);
         }
         return;
     }
@@ -524,18 +542,26 @@ function renderHistory(jobs, append = false) {
     ` : '';
 
     if (append) {
-        // Remove existing "Load more" link before appending
-        const existingLoadMore = container.querySelector('.load-more-link');
-        if (existingLoadMore) {
-            existingLoadMore.remove();
-        }
         container.insertAdjacentHTML('beforeend', jobsHtml + loadMoreHtml);
     } else {
         container.innerHTML = jobsHtml + loadMoreHtml;
     }
 }
 
+let singleHistoryLoading = false;
+
 async function loadMoreSingleHistory() {
+    // Prevent duplicate clicks while loading
+    if (singleHistoryLoading) return;
+    singleHistoryLoading = true;
+
+    // Update button to show loading state
+    const loadMoreBtn = document.querySelector('#history-list .load-more-link');
+    if (loadMoreBtn) {
+        loadMoreBtn.textContent = '読み込み中... / Loading...';
+        loadMoreBtn.style.pointerEvents = 'none';
+    }
+
     try {
         const pid = currentProjectId || 1;
 
@@ -547,14 +573,17 @@ async function loadMoreSingleHistory() {
         // Filter single-type jobs
         const singleJobs = allJobs.filter(job => job.job_type === 'single');
 
-        // Update pagination state
+        // Update pagination state BEFORE rendering
+        // No more items if we got fewer than requested
         singleHistoryHasMore = allJobs.length >= SINGLE_HISTORY_PAGE_SIZE;
         singleHistoryOffset += allJobs.length;
 
-        // Append to existing history
+        // Append to existing history (or update Load More button state)
         renderHistory(singleJobs, true);
     } catch (error) {
         showStatus('履歴の読み込みに失敗しました / Failed to load more history', 'error');
+    } finally {
+        singleHistoryLoading = false;
     }
 }
 
@@ -1799,6 +1828,14 @@ function renderBatchHistory(jobs, append = false) {
     const container = document.getElementById('batch-jobs-list');
     if (!container) return;
 
+    // Always remove existing "Load more" link first when appending
+    if (append) {
+        const existingLoadMore = container.querySelector('.load-more-link');
+        if (existingLoadMore) {
+            existingLoadMore.remove();
+        }
+    }
+
     // Store jobs for later use
     if (append) {
         currentBatchJobs = [...currentBatchJobs, ...(jobs || [])];
@@ -1806,9 +1843,18 @@ function renderBatchHistory(jobs, append = false) {
         currentBatchJobs = jobs || [];
     }
 
+    // Handle empty jobs
     if (!jobs || jobs.length === 0) {
         if (!append) {
             container.innerHTML = '<p class="info">バッチジョブの履歴はまだありません / No batch jobs yet</p>';
+        }
+        // When append mode with no new items, just update Load More button state
+        if (append && batchHistoryHasMore) {
+            container.insertAdjacentHTML('beforeend', `
+                <div class="load-more-link" onclick="loadMoreBatchHistory()">
+                    さらに表示 / Load more...
+                </div>
+            `);
         }
         return;
     }
@@ -1839,11 +1885,6 @@ function renderBatchHistory(jobs, append = false) {
     ` : '';
 
     if (append) {
-        // Remove existing "Load more" link before appending
-        const existingLoadMore = container.querySelector('.load-more-link');
-        if (existingLoadMore) {
-            existingLoadMore.remove();
-        }
         container.insertAdjacentHTML('beforeend', jobsHtml + loadMoreHtml);
     } else {
         container.innerHTML = jobsHtml + loadMoreHtml;
@@ -1858,7 +1899,20 @@ function renderBatchHistory(jobs, append = false) {
     });
 }
 
+let batchHistoryLoading = false;
+
 async function loadMoreBatchHistory() {
+    // Prevent duplicate clicks while loading
+    if (batchHistoryLoading) return;
+    batchHistoryLoading = true;
+
+    // Update button to show loading state
+    const loadMoreBtn = document.querySelector('#batch-jobs-list .load-more-link');
+    if (loadMoreBtn) {
+        loadMoreBtn.textContent = '読み込み中... / Loading...';
+        loadMoreBtn.style.pointerEvents = 'none';
+    }
+
     try {
         const projectSelect = document.getElementById('batch-project-select');
         if (!projectSelect || !projectSelect.value) return;
@@ -1873,14 +1927,16 @@ async function loadMoreBatchHistory() {
         // Filter batch jobs only
         const batchJobs = allJobs.filter(job => job.job_type === 'batch');
 
-        // Update pagination state
+        // Update pagination state BEFORE rendering
         batchHistoryHasMore = allJobs.length >= BATCH_HISTORY_PAGE_SIZE;
         batchHistoryOffset += allJobs.length;
 
-        // Append to existing history
+        // Append to existing history (or update Load More button state)
         renderBatchHistory(batchJobs, true);
     } catch (error) {
         showStatus('履歴の読み込みに失敗しました / Failed to load more history', 'error');
+    } finally {
+        batchHistoryLoading = false;
     }
 }
 
