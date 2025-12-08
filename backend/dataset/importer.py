@@ -226,8 +226,11 @@ class DatasetImporter:
         result = self.db.execute(text(pragma_sql))
         columns = [row[1] for row in result if row[1] != "id"]
 
-        # Get preview data
-        select_sql = f'SELECT * FROM "{table_name}" LIMIT {limit}'
+        # Get preview data (limit=0 means no limit, show all)
+        if limit > 0:
+            select_sql = f'SELECT * FROM "{table_name}" LIMIT {limit}'
+        else:
+            select_sql = f'SELECT * FROM "{table_name}"'
         result = self.db.execute(text(select_sql))
         rows = [dict(row._mapping) for row in result]
 

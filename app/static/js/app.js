@@ -21,6 +21,9 @@ let batchHistoryOffset = 0;
 const BATCH_HISTORY_PAGE_SIZE = 10;
 let batchHistoryHasMore = true;
 
+// Dataset preview state
+let currentPreviewDatasetId = null;
+
 /**
  * Format date to JST (Japan Standard Time)
  * Database timestamps are stored in UTC without timezone suffix.
@@ -2713,9 +2716,14 @@ async function importDataset() {
     }
 }
 
-async function previewDataset(id) {
+async function previewDataset(id, showAll = false) {
     try {
-        const response = await fetch(`/api/datasets/${id}/preview`);
+        // Store dataset ID for toggle functionality
+        currentPreviewDatasetId = id;
+
+        // Fetch with limit=0 if showAll, otherwise default 10
+        const limit = showAll ? 0 : 10;
+        const response = await fetch(`/api/datasets/${id}/preview?limit=${limit}`);
         const preview = await response.json();
 
         // Helper function for escaping HTML in this context
@@ -2749,6 +2757,10 @@ async function previewDataset(id) {
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
                     <p style="margin: 0;">総行数 / Total Rows: ${preview.total_count}</p>
                     <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+                        <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer; user-select: none;">
+                            <input type="checkbox" id="preview-show-all" ${showAll ? 'checked' : ''} onchange="togglePreviewShowAll(this.checked)">
+                            <span style="font-size: 0.9rem;">全件表示 / Show All</span>
+                        </label>
                         <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer; user-select: none;">
                             <input type="checkbox" id="preview-truncate" checked onchange="togglePreviewTruncate(this.checked)">
                             <span style="font-size: 0.9rem;">折り返し省略 / Truncate</span>
@@ -2869,6 +2881,16 @@ function togglePreviewGridLines(enabled) {
         rows.forEach(row => {
             row.style.background = '';
         });
+    }
+}
+
+/**
+ * Toggle show all rows in dataset preview
+ * Re-fetches the dataset with all rows or default limit
+ */
+function togglePreviewShowAll(showAll) {
+    if (currentPreviewDatasetId) {
+        previewDataset(currentPreviewDatasetId, showAll);
     }
 }
 
