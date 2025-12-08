@@ -2894,6 +2894,203 @@ function togglePreviewShowAll(showAll) {
     }
 }
 
+// ========== DATASET ROW SELECTION FOR SINGLE EXECUTION ==========
+
+/**
+ * Show dataset selector modal for single execution
+ * Step 1: User selects a dataset from the list
+ */
+function showDatasetSelectorForSingle() {
+    // Filter datasets for current project
+    const projectDatasets = allDatasets.filter(d => d.project_id === currentProjectId);
+
+    if (projectDatasets.length === 0) {
+        alert('このプロジェクトにはデータセットがありません。\nバッチ実行タブでデータセットをインポートしてください。\n\nNo datasets for this project.\nPlease import a dataset from the Batch Execution tab.');
+        return;
+    }
+
+    const datasetListHtml = projectDatasets.map(dataset => `
+        <div class="list-item" style="cursor: pointer; padding: 0.75rem; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 0.5rem;"
+             onclick="showDatasetRowSelector(${dataset.id})"
+             onmouseover="this.style.background='#e8f4fc'"
+             onmouseout="this.style.background=''">
+            <div style="font-weight: bold;">${dataset.name}</div>
+            <div style="font-size: 0.85rem; color: #666;">
+                ファイル: ${dataset.source_file_name} | 行数: ${dataset.row_count}
+            </div>
+        </div>
+    `).join('');
+
+    showModal(`
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>データセットを選択 / Select Dataset</span>
+            <button onclick="closeModal()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #7f8c8d; padding: 0 0.5rem;" title="閉じる / Close">×</button>
+        </div>
+        <div class="modal-body">
+            <p style="margin-bottom: 1rem; color: #666;">入力フォームに反映するデータセットを選択してください / Select a dataset to populate the input form</p>
+            ${datasetListHtml}
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal()">キャンセル / Cancel</button>
+        </div>
+    `);
+}
+
+/**
+ * Show dataset preview with selectable rows
+ * Step 2: User selects a specific row from the dataset
+ */
+async function showDatasetRowSelector(datasetId, showAll = false) {
+    try {
+        currentPreviewDatasetId = datasetId;
+
+        const limit = showAll ? 0 : 10;
+        const response = await fetch(`/api/datasets/${datasetId}/preview?limit=${limit}`);
+        const preview = await response.json();
+
+        function escapeHtml(unsafe) {
+            if (unsafe === null || unsafe === undefined) return '';
+            return String(unsafe)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        // Create rows with selection capability (store row data as JSON in data attribute)
+        const rowsHtml = preview.rows.map((row, index) => {
+            const rowDataJson = encodeURIComponent(JSON.stringify(row));
+            const cells = preview.columns.map(col => {
+                const cellValue = row[col];
+                const displayValue = escapeHtml(cellValue) || '';
+                const tooltipValue = String(cellValue ?? '').replace(/"/g, '&quot;');
+                return `<td title="${tooltipValue}" style="border: 1px solid #ddd; padding: 8px;">${displayValue}</td>`;
+            }).join('');
+            return `<tr class="selectable-row" data-row="${rowDataJson}" onclick="selectDatasetRow(this)"
+                       style="cursor: pointer;"
+                       onmouseover="this.style.background='#e8f4fc'"
+                       onmouseout="this.style.background=''">${cells}</tr>`;
+        }).join('');
+
+        showModal(`
+            <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center;">
+                <span>行を選択 / Select Row: ${preview.name}</span>
+                <button onclick="closeModal()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #7f8c8d; padding: 0 0.5rem;" title="閉じる / Close">×</button>
+            </div>
+            <div class="modal-body">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
+                    <p style="margin: 0;">総行数 / Total Rows: ${preview.total_count} <span style="color: #666; font-size: 0.9rem;">（クリックで選択 / Click to select）</span></p>
+                    <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+                        <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer; user-select: none;">
+                            <input type="checkbox" id="row-select-show-all" ${showAll ? 'checked' : ''} onchange="toggleRowSelectorShowAll(this.checked)">
+                            <span style="font-size: 0.9rem;">全件表示 / Show All</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer; user-select: none;">
+                            <input type="checkbox" id="row-select-truncate" checked onchange="togglePreviewTruncate(this.checked)">
+                            <span style="font-size: 0.9rem;">折り返し省略 / Truncate</span>
+                        </label>
+                    </div>
+                </div>
+                <div id="preview-table-container" style="overflow-x: auto; max-height: 60vh; overflow-y: auto;">
+                    <table id="preview-table" style="width: 100%; border-collapse: collapse;">
+                        <thead>
+                            <tr>${preview.columns.map(col => `<th style="border: 1px solid #ddd; padding: 8px; background: #f8f9fa;">${escapeHtml(col)}</th>`).join('')}</tr>
+                        </thead>
+                        <tbody>${rowsHtml}</tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="showDatasetSelectorForSingle()">← 戻る / Back</button>
+                <button class="btn btn-secondary" onclick="closeModal()">キャンセル / Cancel</button>
+            </div>
+        `);
+
+        // Apply default styles
+        togglePreviewTruncate(true);
+    } catch (error) {
+        alert(`エラー / Error: ${error.message}`);
+    }
+}
+
+/**
+ * Toggle show all for row selector
+ */
+function toggleRowSelectorShowAll(showAll) {
+    if (currentPreviewDatasetId) {
+        showDatasetRowSelector(currentPreviewDatasetId, showAll);
+    }
+}
+
+/**
+ * Select a row from dataset and populate form
+ * Step 3: Populate the input form with selected row data
+ */
+function selectDatasetRow(rowElement) {
+    try {
+        const rowDataJson = decodeURIComponent(rowElement.dataset.row);
+        const rowData = JSON.parse(rowDataJson);
+
+        // Populate form fields based on parameter names
+        currentParameters.forEach(param => {
+            const input = document.getElementById(`param-${param.name}`);
+            if (input && rowData.hasOwnProperty(param.name)) {
+                const value = rowData[param.name];
+
+                // Handle different input types
+                if (param.type === 'FILE' || param.type === 'FILEPATH') {
+                    // For FILE/FILEPATH types, set the value if it's a path string
+                    if (typeof value === 'string' && value) {
+                        input.value = value;
+                    }
+                } else if (input.tagName === 'TEXTAREA') {
+                    input.value = value ?? '';
+                } else if (input.type === 'number') {
+                    input.value = value ?? '';
+                } else if (input.type === 'date') {
+                    // Convert date format if needed
+                    if (value) {
+                        const date = new Date(value);
+                        if (!isNaN(date)) {
+                            input.value = date.toISOString().split('T')[0];
+                        } else {
+                            input.value = value;
+                        }
+                    }
+                } else if (input.type === 'datetime-local') {
+                    // Convert datetime format if needed
+                    if (value) {
+                        const date = new Date(value);
+                        if (!isNaN(date)) {
+                            input.value = date.toISOString().slice(0, 16);
+                        } else {
+                            input.value = value;
+                        }
+                    }
+                } else {
+                    input.value = value ?? '';
+                }
+            }
+        });
+
+        closeModal();
+
+        // Show success message briefly
+        const statusDiv = document.getElementById('execution-status');
+        if (statusDiv) {
+            statusDiv.textContent = 'データセットから入力を反映しました / Form populated from dataset';
+            statusDiv.className = 'status-message success';
+            setTimeout(() => {
+                statusDiv.textContent = '';
+                statusDiv.className = 'status-message';
+            }, 3000);
+        }
+    } catch (error) {
+        alert(`エラー / Error: ${error.message}`);
+    }
+}
+
 async function deleteDataset(id) {
     if (!confirm('このデータセットを削除しますか？ / Delete this dataset?')) return;
 
