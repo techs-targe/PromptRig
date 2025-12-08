@@ -2532,9 +2532,20 @@ async function previewDataset(id) {
         const preview = await response.json();
 
         const rowsHtml = preview.rows.map(row => {
-            const cells = preview.columns.map(col => `<td>${row[col] || ''}</td>`).join('');
+            const cells = preview.columns.map(col => `<td>${escapeHtml(row[col]) || ''}</td>`).join('');
             return `<tr>${cells}</tr>`;
         }).join('');
+
+        // Helper function for escaping HTML in this context
+        function escapeHtml(unsafe) {
+            if (unsafe === null || unsafe === undefined) return '';
+            return String(unsafe)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
 
         showModal(`
             <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center;">
@@ -2542,11 +2553,23 @@ async function previewDataset(id) {
                 <button onclick="closeModal()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #7f8c8d; padding: 0 0.5rem;" title="閉じる / Close">×</button>
             </div>
             <div class="modal-body">
-                <p>総行数 / Total Rows: ${preview.total_count}</p>
-                <div style="overflow-x: auto;">
-                    <table style="width: 100%; border-collapse: collapse;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
+                    <p style="margin: 0;">総行数 / Total Rows: ${preview.total_count}</p>
+                    <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+                        <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer; user-select: none;">
+                            <input type="checkbox" id="preview-truncate" onchange="togglePreviewTruncate(this.checked)">
+                            <span style="font-size: 0.9rem;">折り返し省略 / Truncate</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer; user-select: none;">
+                            <input type="checkbox" id="preview-sticky-header" onchange="togglePreviewStickyHeader(this.checked)">
+                            <span style="font-size: 0.9rem;">ヘッダ固定 / Fix Header</span>
+                        </label>
+                    </div>
+                </div>
+                <div id="preview-table-container" style="overflow-x: auto; max-height: 60vh; overflow-y: auto;">
+                    <table id="preview-table" style="width: 100%; border-collapse: collapse;">
                         <thead>
-                            <tr>${preview.columns.map(col => `<th style="border: 1px solid #ddd; padding: 8px;">${col}</th>`).join('')}</tr>
+                            <tr>${preview.columns.map(col => `<th style="border: 1px solid #ddd; padding: 8px; background: #f8f9fa;">${escapeHtml(col)}</th>`).join('')}</tr>
                         </thead>
                         <tbody>${rowsHtml}</tbody>
                     </table>
@@ -2558,6 +2581,57 @@ async function previewDataset(id) {
         `);
     } catch (error) {
         alert(`エラー / Error: ${error.message}`);
+    }
+}
+
+/**
+ * Toggle truncate mode for dataset preview table
+ */
+function togglePreviewTruncate(enabled) {
+    const table = document.getElementById('preview-table');
+    if (!table) return;
+
+    const cells = table.querySelectorAll('td');
+    cells.forEach(cell => {
+        if (enabled) {
+            cell.style.maxWidth = '200px';
+            cell.style.whiteSpace = 'nowrap';
+            cell.style.overflow = 'hidden';
+            cell.style.textOverflow = 'ellipsis';
+        } else {
+            cell.style.maxWidth = '';
+            cell.style.whiteSpace = '';
+            cell.style.overflow = '';
+            cell.style.textOverflow = '';
+        }
+    });
+}
+
+/**
+ * Toggle sticky header for dataset preview table
+ */
+function togglePreviewStickyHeader(enabled) {
+    const table = document.getElementById('preview-table');
+    if (!table) return;
+
+    const thead = table.querySelector('thead');
+    const headerCells = table.querySelectorAll('th');
+
+    if (enabled) {
+        thead.style.position = 'sticky';
+        thead.style.top = '0';
+        thead.style.zIndex = '10';
+        headerCells.forEach(th => {
+            th.style.background = '#f8f9fa';
+            th.style.boxShadow = '0 2px 4px rgba(0,0,0,0.1)';
+        });
+    } else {
+        thead.style.position = '';
+        thead.style.top = '';
+        thead.style.zIndex = '';
+        headerCells.forEach(th => {
+            th.style.boxShadow = '';
+        });
     }
 }
 
