@@ -67,6 +67,35 @@ function formatJST(dateInput, includeSeconds = false) {
     }
 }
 
+/**
+ * Download CSV content as a file
+ * @param {string} csvContent - The CSV content (escaped with \n for newlines)
+ * @param {string} filename - The filename for download
+ */
+function downloadCsv(csvContent, filename) {
+    try {
+        // Unescape newlines and single quotes
+        const unescapedContent = csvContent.replace(/\\n/g, '\n').replace(/\\'/g, "'");
+
+        // Add BOM for Excel compatibility with Japanese characters
+        const bom = '\uFEFF';
+        const blob = new Blob([bom + unescapedContent], { type: 'text/csv;charset=utf-8;' });
+
+        // Create download link
+        const link = document.createElement('a');
+        const url = URL.createObjectURL(blob);
+        link.setAttribute('href', url);
+        link.setAttribute('download', filename);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+    } catch (e) {
+        alert('ダウンロードに失敗しました / Download failed: ' + e.message);
+    }
+}
+
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', () => {
     setupTabNavigation();
@@ -105,20 +134,20 @@ function setupTabNavigation() {
  */
 async function loadInitialData() {
     try {
-        // Load projects
+        // Load projects first (this also sets default project and loads config)
         await loadProjects();
 
         // Load settings and models
         await loadSettings();
-
-        // Load single execution config
-        await loadConfig();
 
         // Load datasets
         await loadDatasets();
 
         // Load available models
         await loadAvailableModels();
+
+        // Note: loadConfig() is now called from updateProjectSelects() after setting the default project
+        // This ensures currentProjectId matches the selected dropdown value
     } catch (error) {
         // Initialization error - silently continue
     }
@@ -495,6 +524,7 @@ function displayJobResults(job, targetContainer = null) {
         const escapedCsv = job.merged_csv_output.replace(/'/g, "\\'").replace(/\n/g, '\\n');
         const isBatch = job.job_type === 'batch';
         const title = isBatch ? 'バッチ実行結果 (CSV統合) / Batch Results (Merged CSV)' : 'n回送信結果 (CSV統合) / Repeated Execution Results (Merged CSV)';
+        const csvFilename = `job_${job.id}_results_${new Date().toISOString().slice(0,10)}.csv`;
         mergedCsvSection = `
             <div class="result-item" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-left: 5px solid #f39c12;">
                 <div class="item-header" style="color: white; font-size: 1.2rem;">
@@ -504,10 +534,16 @@ function displayJobResults(job, targetContainer = null) {
                     <div class="response-box" style="background-color: #f8f9fa; font-family: 'Courier New', monospace; max-height: 400px; overflow-y: auto;">
                         <pre style="white-space: pre-wrap; word-wrap: break-word;">${job.merged_csv_output}</pre>
                     </div>
-                    <button onclick="navigator.clipboard.writeText('${escapedCsv}').then(() => alert('統合CSVをクリップボードにコピーしました / Merged CSV copied to clipboard'))"
-                            style="margin-top: 1rem; padding: 0.5rem 1.5rem; background: #27ae60; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">
-                        📋 統合CSVをコピー / Copy Merged CSV
-                    </button>
+                    <div style="margin-top: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                        <button onclick="navigator.clipboard.writeText('${escapedCsv}').then(() => alert('統合CSVをクリップボードにコピーしました / Merged CSV copied to clipboard'))"
+                                style="padding: 0.5rem 1.5rem; background: #27ae60; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">
+                            📋 統合CSVをコピー / Copy Merged CSV
+                        </button>
+                        <button onclick="downloadCsv('${escapedCsv}', '${csvFilename}')"
+                                style="padding: 0.5rem 1.5rem; background: #3498db; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">
+                            💾 CSVをダウンロード / Download CSV
+                        </button>
+                    </div>
                     <p style="margin-top: 1rem; color: #7f8c8d; font-size: 0.9rem;">
                         ${job.items.length}件の実行結果を統合しました / Merged ${job.items.length} execution results
                     </p>
@@ -1345,6 +1381,7 @@ async function saveBatchPromptRevision(projectId) {
 
 /**
  * Show batch edit parser modal
+ * Enhanced with revision selector, restore button, and CSV converter (same as single execution)
  */
 async function showBatchEditParserModal() {
     const projectId = document.getElementById('batch-project-select').value;
@@ -1354,9 +1391,24 @@ async function showBatchEditParserModal() {
     }
 
     try {
-        const response = await fetch(`/api/projects/${projectId}`);
-        if (!response.ok) throw new Error('Failed to load project');
-        const project = await response.json();
+        // Fetch project and revisions in parallel
+        const [projectResponse, revisionsResponse] = await Promise.all([
+            fetch(`/api/projects/${projectId}`),
+            fetch(`/api/projects/${projectId}/revisions`)
+        ]);
+
+        if (!projectResponse.ok) throw new Error('Failed to load project');
+        const project = await projectResponse.json();
+        const revisions = revisionsResponse.ok ? await revisionsResponse.json() : [];
+
+        // Build revision selector options
+        const revisionOptions = revisions.map(rev => {
+            const date = formatJST(rev.created_at);
+            const isCurrent = rev.revision === project.revision_count;
+            return `<option value="${rev.revision}" ${isCurrent ? 'selected' : ''}>
+                Rev.${rev.revision} (${date})${isCurrent ? ' - 現在' : ''}
+            </option>`;
+        }).join('');
 
         const parserConfig = project.parser_config || {type: 'none'};
         const parserJson = JSON.stringify(parserConfig, null, 2);
@@ -1369,6 +1421,15 @@ async function showBatchEditParserModal() {
             <div class="modal-body">
                 <div class="form-group">
                     <label>プロジェクト / Project: ${project.name}</label>
+                </div>
+                <div class="form-group" style="display: flex; align-items: center; gap: 10px;">
+                    <label style="margin: 0;">リビジョン / Revision:</label>
+                    <select id="batch-revision-selector" onchange="loadBatchRevisionContent(this.value, 'parser', ${projectId})" style="flex: 1;">
+                        ${revisionOptions}
+                    </select>
+                    <button class="btn btn-secondary" onclick="restoreBatchRevision('parser', ${projectId})" style="background-color: #e67e22;" title="選択したリビジョンを復元 / Restore selected revision">
+                        🔄 復元 / Restore
+                    </button>
                 </div>
                 <div class="form-group">
                     <label>パーサータイプ / Parser Type:</label>
@@ -1387,9 +1448,12 @@ async function showBatchEditParserModal() {
                     </small>
                 </div>
             </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="closeModal()">キャンセル / Cancel</button>
-                <button class="btn btn-primary" onclick="saveBatchParserRevision(${projectId})">保存 / Save</button>
+            <div class="modal-footer" style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
+                <button class="btn" onclick="showJsonToCsvConverter()" style="background-color: #9b59b6;">📊 結果からCSVに変換 / Convert JSON to CSV</button>
+                <div style="display: flex; gap: 0.5rem;">
+                    <button class="btn btn-secondary" onclick="closeModal()">キャンセル / Cancel</button>
+                    <button class="btn btn-primary" onclick="saveBatchParserRevision(${projectId})">保存 / Save</button>
+                </div>
             </div>
         `;
         showModal(modalContent);
@@ -1434,6 +1498,95 @@ async function saveBatchParserRevision(projectId) {
         } else {
             alert('変更がありませんでした / No changes detected');
         }
+    } catch (error) {
+        alert(`エラー / Error: ${error.message}`);
+    }
+}
+
+/**
+ * Load revision content for batch editor
+ * @param {number} revisionNumber - The revision number to load
+ * @param {string} type - 'prompt' or 'parser'
+ * @param {number} projectId - The project ID
+ */
+async function loadBatchRevisionContent(revisionNumber, type, projectId) {
+    try {
+        const response = await fetch(`/api/projects/${projectId}/revisions`);
+        if (!response.ok) throw new Error('Failed to load revisions');
+
+        const revisions = await response.json();
+        const revision = revisions.find(r => r.revision === parseInt(revisionNumber));
+
+        if (!revision) {
+            alert('リビジョンが見つかりません / Revision not found');
+            return;
+        }
+
+        if (type === 'prompt') {
+            document.getElementById('edit-prompt-template').value = revision.prompt_template;
+        } else if (type === 'parser') {
+            const parserConfig = revision.parser_config ? JSON.parse(revision.parser_config) : {type: 'none'};
+            document.getElementById('edit-parser-type').value = parserConfig.type || 'none';
+            document.getElementById('edit-parser-config').value = JSON.stringify(parserConfig, null, 2);
+        }
+    } catch (error) {
+        alert(`エラー / Error: ${error.message}`);
+    }
+}
+
+/**
+ * Restore a past revision for batch editor (creates new revision with old content)
+ * @param {string} type - 'prompt' or 'parser'
+ * @param {number} projectId - The project ID
+ */
+async function restoreBatchRevision(type, projectId) {
+    const selector = document.getElementById('batch-revision-selector');
+    if (!selector) {
+        alert('リビジョンセレクタが見つかりません / Revision selector not found');
+        return;
+    }
+
+    const revisionNumber = parseInt(selector.value);
+    const selectedOption = selector.options[selector.selectedIndex];
+    const isCurrent = selectedOption.text.includes('現在');
+
+    if (isCurrent) {
+        alert('現在のリビジョンは復元できません（既に最新です）\nCannot restore current revision (already latest)');
+        return;
+    }
+
+    if (!confirm(`リビジョン ${revisionNumber} を復元しますか？\n新しいリビジョンとして作成されます。\n\nRestore revision ${revisionNumber}?\nThis will create a new revision.`)) {
+        return;
+    }
+
+    try {
+        // Get the revision content
+        const revisionsResponse = await fetch(`/api/projects/${projectId}/revisions`);
+        if (!revisionsResponse.ok) throw new Error('Failed to load revisions');
+
+        const revisions = await revisionsResponse.json();
+        const revision = revisions.find(r => r.revision === revisionNumber);
+
+        if (!revision) {
+            alert('リビジョンが見つかりません / Revision not found');
+            return;
+        }
+
+        // Create new revision with old content
+        const restoreResponse = await fetch(`/api/projects/${projectId}/revisions/latest`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                prompt_template: revision.prompt_template,
+                parser_config: revision.parser_config
+            })
+        });
+
+        if (!restoreResponse.ok) throw new Error('Failed to restore revision');
+
+        const result = await restoreResponse.json();
+        closeModal();
+        alert(`リビジョン ${revisionNumber} を復元しました（新しいリビジョン: ${result.revision}）\nRevision ${revisionNumber} restored (new revision: ${result.revision})`);
     } catch (error) {
         alert(`エラー / Error: ${error.message}`);
     }
@@ -1740,16 +1893,25 @@ async function updateProjectSelects() {
     if (singleSelect) {
         singleSelect.innerHTML = options;
         // Set default project if configured
+        let defaultLoaded = false;
         try {
             const response = await fetch('/api/settings/default-project');
             const data = await response.json();
             if (data.project_id) {
                 singleSelect.value = data.project_id;
+                currentProjectId = data.project_id;
                 // Trigger project change to load prompts
                 await onProjectChange();
+                defaultLoaded = true;
             }
         } catch (error) {
             console.error('Failed to load default project:', error);
+        }
+
+        // Fallback: if no default project, load config for first project in list
+        if (!defaultLoaded && singleSelect.value) {
+            currentProjectId = parseInt(singleSelect.value);
+            await loadConfig(currentProjectId);
         }
     }
 
