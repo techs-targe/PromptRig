@@ -17,6 +17,18 @@ let singleHistoryOffset = 0;
 const SINGLE_HISTORY_PAGE_SIZE = 10;
 let singleHistoryHasMore = true;
 
+// FILEPATH pending files (stored until form submit)
+let filepathPendingFiles = {};
+
+// Helper function to format file size
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
 /**
  * Format date to JST (Japan Standard Time)
  * Database timestamps are stored in UTC without timezone suffix.
@@ -456,6 +468,7 @@ function renderParameterInputs() {
             return; // Skip the default input append
         } else if (param.type === 'FILEPATH') {
             // FILEPATH: Text input with file picker button
+            // File is stored in memory and uploaded when form is submitted
             const filepathWrapper = document.createElement('div');
             filepathWrapper.className = 'filepath-input-wrapper';
 
@@ -472,7 +485,7 @@ function renderParameterInputs() {
             input.id = `param-${param.name}`;
             input.name = param.name;
             input.required = param.required;
-            input.placeholder = param.placeholder || '/path/to/file';
+            input.placeholder = param.placeholder || 'サーバーパス または 参照でファイル選択';
             input.className = 'filepath-text-input';
             if (param.default) {
                 input.value = param.default;
@@ -483,47 +496,37 @@ function renderParameterInputs() {
             browseBtn.type = 'button';
             browseBtn.className = 'btn btn-secondary filepath-browse-btn';
             browseBtn.textContent = '参照...';
-            browseBtn.title = 'ファイルを選択してアップロード / Select file to upload';
+            browseBtn.title = 'ファイルを選択（送信時にアップロード）';
 
             // Click handler for browse button
             browseBtn.addEventListener('click', () => {
                 hiddenFileInput.click();
             });
 
-            // File selection handler
-            hiddenFileInput.addEventListener('change', async (e) => {
+            // File selection handler - stores file for upload on submit
+            hiddenFileInput.addEventListener('change', (e) => {
                 const file = e.target.files[0];
                 if (!file) return;
 
-                // Show uploading state
-                browseBtn.disabled = true;
-                browseBtn.textContent = 'アップロード中...';
-                input.value = 'アップロード中... / Uploading...';
+                // Store the file object for later upload on submit
+                filepathPendingFiles[param.name] = file;
 
-                try {
-                    const formData = new FormData();
-                    formData.append('file', file);
+                // Show filename in the text input with visual indicator
+                input.value = file.name;
+                input.title = `選択中: ${file.name} (${formatFileSize(file.size)}) - 送信時にアップロードされます`;
+                input.dataset.pendingUpload = 'true';
+                input.style.backgroundColor = '#e8f6e8';
+                input.style.borderColor = '#27ae60';
+            });
 
-                    const response = await fetch('/api/upload/filepath', {
-                        method: 'POST',
-                        body: formData
-                    });
-
-                    if (!response.ok) {
-                        throw new Error('Upload failed');
-                    }
-
-                    const result = await response.json();
-                    input.value = result.path;
-                    input.title = `Original: ${result.filename}`;
-                } catch (error) {
-                    console.error('File upload failed:', error);
-                    input.value = '';
-                    alert('ファイルのアップロードに失敗しました / File upload failed');
-                } finally {
-                    browseBtn.disabled = false;
-                    browseBtn.textContent = '参照...';
-                    hiddenFileInput.value = ''; // Reset for next selection
+            // Clear pending file when user manually edits the text
+            input.addEventListener('input', () => {
+                if (filepathPendingFiles[param.name]) {
+                    delete filepathPendingFiles[param.name];
+                    input.dataset.pendingUpload = '';
+                    input.style.backgroundColor = '';
+                    input.style.borderColor = '';
+                    input.title = '';
                 }
             });
 
@@ -895,6 +898,46 @@ async function executePrompt(repeat) {
     const inputParams = {};
     let valid = true;
 
+    // First, upload any pending FILEPATH files
+    for (const paramName in filepathPendingFiles) {
+        const file = filepathPendingFiles[paramName];
+        showStatus(`ファイルをアップロード中: ${file.name}...`, 'info');
+
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const uploadResponse = await fetch('/api/upload/filepath', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!uploadResponse.ok) {
+                throw new Error(`Upload failed: ${uploadResponse.statusText}`);
+            }
+
+            const uploadResult = await uploadResponse.json();
+
+            // Update the input field with the server path
+            const input = document.getElementById(`param-${paramName}`);
+            if (input) {
+                input.value = uploadResult.path;
+                input.style.backgroundColor = '';
+                input.style.borderColor = '';
+                input.dataset.pendingUpload = '';
+            }
+
+            console.log(`📤 FILEPATH "${paramName}" uploaded: ${uploadResult.path}`);
+        } catch (error) {
+            valid = false;
+            showStatus(`ファイル "${paramName}" のアップロードに失敗しました: ${error.message}`, 'error');
+            return;
+        }
+    }
+
+    // Clear pending files after upload
+    filepathPendingFiles = {};
+
     // Process parameters (including FILE type)
     for (const param of currentParameters) {
         const input = document.getElementById(`param-${param.name}`);
@@ -919,8 +962,14 @@ async function executePrompt(repeat) {
                 break;
             }
         } else {
-            // Handle other types (text, number, date, etc.)
+            // Handle other types (text, number, date, FILEPATH, etc.)
             if (!input || !input.value.trim()) {
+                // Check if this parameter is optional
+                const paramDef = currentParameters.find(p => p.name === param.name);
+                if (paramDef && !paramDef.required) {
+                    inputParams[param.name] = input?.value || '';
+                    continue;
+                }
                 valid = false;
                 showStatus(`パラメータ "${param.name}" を入力してください`, 'error');
                 break;
