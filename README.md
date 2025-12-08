@@ -11,6 +11,53 @@
 
 PromptRig is a comprehensive prompt evaluation and benchmarking system designed for developers and researchers working with Large Language Models (LLMs). It provides a local web interface to test, evaluate, and compare prompt templates across multiple LLM models.
 
+---
+
+## 🎯 Why PromptRig?
+
+### The Problem
+
+As LLMs become essential business tools, teams face critical challenges:
+
+- **No systematic testing** — Prompts are tweaked ad-hoc without measurable comparison
+- **Data privacy concerns** — Cloud-based tools require uploading sensitive business data
+- **Complex tooling** — Most evaluation frameworks require coding expertise
+- **Scattered results** — No centralized way to track what works and what doesn't
+
+### The Solution
+
+PromptRig addresses these pain points with a unique combination:
+
+| Feature | Benefit |
+|---------|---------|
+| 🔒 **100% Local** | Your data never leaves your machine. No cloud uploads, no privacy risks. Perfect for sensitive business data, healthcare, legal, and financial use cases. |
+| 📊 **Excel-Native Workflow** | Import test datasets directly from Excel (.xlsx). No coding required. Business analysts can run evaluations without developer support. |
+| 🔄 **Version Control** | Every prompt and parser change is tracked with revision history. Compare results across versions. Roll back when needed. |
+| 📈 **Structured Output** | Built-in JSON Path and Regex parsers extract structured data from LLM responses. Export results to CSV for further analysis in Excel or BI tools. |
+| ⚡ **Parallel Execution** | Run batch evaluations with configurable parallelism. Process hundreds of test cases efficiently. |
+| 🎨 **Simple UI** | Clean bilingual interface (English/Japanese). No command-line required. Get started in minutes. |
+
+### Who Is This For?
+
+- **QA Engineers** — Systematically test prompt quality before deployment
+- **Business Analysts** — Evaluate LLM outputs against business requirements
+- **Researchers** — Benchmark prompts across different models
+- **Developers** — Iterate on prompts with measurable feedback
+- **Regulated Industries** — Healthcare, legal, finance teams who can't use cloud tools
+
+### Comparison with Alternatives
+
+| | PromptRig | Promptfoo | LangSmith | Humanloop |
+|---|:---:|:---:|:---:|:---:|
+| Local/Self-hosted | ✅ | ✅ | ❌ | ❌ |
+| No coding required | ✅ | ❌ | ❌ | ✅ |
+| Excel dataset import | ✅ | ❌ | ❌ | ❌ |
+| Built-in response parsing | ✅ | ✅ | ❌ | ❌ |
+| Free & Open Source | ✅ | ✅ | Freemium | Paid |
+| Bilingual UI | ✅ | ❌ | ❌ | ❌ |
+
+---
+
 ### Key Features
 
 ✅ **Multiple LLM Support**
