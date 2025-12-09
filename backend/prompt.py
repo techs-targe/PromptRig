@@ -8,6 +8,9 @@ Syntax:
     {{PARAM_NAME:NUM}}                - Number input, required
     {{PARAM_NAME:DATE}}               - Date input, required
     {{PARAM_NAME:DATETIME}}           - DateTime input, required
+    {{PARAM_NAME:FILE}}               - Image file upload (Vision API)
+    {{PARAM_NAME:FILEPATH}}           - Server-accessible image file path
+    {{PARAM_NAME:TEXTFILEPATH}}       - Text file path (content embedded in prompt)
     {{PARAM_NAME:TYPE|}}              - Optional parameter (no default value)
     {{PARAM_NAME:TYPE|default=値}}    - Optional parameter with default value
 
@@ -19,15 +22,19 @@ Rules:
 """
 
 import re
+import os
+import logging
 from typing import Dict, List, Tuple
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class ParameterDefinition:
     """Definition of a single parameter extracted from template."""
     name: str
-    type: str  # TEXTn, NUM, DATE, DATETIME, FILE, FILEPATH
+    type: str  # TEXTn, NUM, DATE, DATETIME, FILE, FILEPATH, TEXTFILEPATH
     html_type: str  # textarea, number, date, datetime-local, file, text
     rows: int = 5  # Only for textarea
     accept: str = None  # Only for file input (e.g., "image/*")
@@ -50,6 +57,7 @@ class PromptTemplateParser:
     TYPE_DATETIME = "DATETIME"
     TYPE_FILE = "FILE"  # Image file upload (Vision API)
     TYPE_FILEPATH = "FILEPATH"  # Server-accessible file path
+    TYPE_TEXTFILEPATH = "TEXTFILEPATH"  # Text file path (content embedded in prompt)
 
     # Default type
     DEFAULT_TYPE = "TEXT5"
@@ -101,6 +109,18 @@ class PromptTemplateParser:
         """
         if not type_spec:
             type_spec = self.DEFAULT_TYPE
+
+        # Handle TEXTFILEPATH first (before TEXT check, since it starts with "TEXT")
+        if type_spec == self.TYPE_TEXTFILEPATH:
+            return ParameterDefinition(
+                name=name,
+                type=type_spec,
+                html_type="text",
+                rows=0,
+                placeholder="/path/to/textfile.txt",
+                required=not is_optional,
+                default=default_value
+            )
 
         # Handle TEXTn format
         if type_spec.startswith(self.TYPE_TEXT):
@@ -185,12 +205,13 @@ class PromptTemplateParser:
                 default=default_value
             )
 
-    def substitute_parameters(self, template: str, params: Dict[str, str]) -> str:
+    def substitute_parameters(self, template: str, params: Dict[str, str], allowed_dirs: List[str] = None) -> str:
         """Substitute all {{}} placeholders with actual values.
 
         Args:
             template: Prompt template string with {{}} syntax
             params: Dictionary mapping parameter names to values
+            allowed_dirs: List of allowed directories for TEXTFILEPATH (security)
 
         Returns:
             Template with all placeholders replaced
@@ -199,11 +220,13 @@ class PromptTemplateParser:
         Note: Same parameter name used multiple times gets same value
         Note: FILE and FILEPATH parameters are excluded from prompt text
               (they are sent separately as images to Vision API)
+        Note: TEXTFILEPATH parameters read file content and embed in prompt
         Note: Optional parameters use default value if not provided, or empty string
         """
         # Parse template to get parameter types, defaults, and required status
         param_defs = self.parse_template(template)
         image_params = {p.name for p in param_defs if p.type in [self.TYPE_FILE, self.TYPE_FILEPATH]}
+        textfile_params = {p.name for p in param_defs if p.type == self.TYPE_TEXTFILEPATH}
         defaults = {p.name: p.default for p in param_defs if p.default is not None}
         optional_params = {p.name for p in param_defs if not p.required}
 
@@ -214,6 +237,29 @@ class PromptTemplateParser:
             # (they are sent separately as images to Vision API)
             if param_name in image_params:
                 return ""  # Remove image parameters from prompt text
+
+            # Handle TEXTFILEPATH: read file content and embed
+            if param_name in textfile_params:
+                file_path = params.get(param_name, None)
+                if file_path:
+                    try:
+                        content = self._read_text_file(file_path, allowed_dirs)
+                        return content
+                    except Exception as e:
+                        logger.error(f"Error reading text file '{file_path}' for parameter '{param_name}': {e}")
+                        return f"[Error reading file: {e}]"
+                elif param_name in defaults:
+                    # Try to read default file path
+                    try:
+                        content = self._read_text_file(defaults[param_name], allowed_dirs)
+                        return content
+                    except Exception as e:
+                        logger.error(f"Error reading default text file for parameter '{param_name}': {e}")
+                        return ""
+                elif param_name in optional_params:
+                    return ""  # Optional without value
+                else:
+                    return match.group(0)  # Required without value - keep placeholder
 
             # Get user-provided value (may be empty string)
             user_value = params.get(param_name, None)
@@ -232,6 +278,49 @@ class PromptTemplateParser:
                 return match.group(0)
 
         return self.PARAM_PATTERN.sub(replacer, template)
+
+    def _read_text_file(self, file_path: str, allowed_dirs: List[str] = None) -> str:
+        """Read text file content for TEXTFILEPATH parameter.
+
+        Args:
+            file_path: Path to the text file
+            allowed_dirs: List of allowed directories for security
+
+        Returns:
+            File content as string
+
+        Raises:
+            ValueError: If path is not allowed
+            FileNotFoundError: If file doesn't exist
+            IOError: If file cannot be read
+        """
+        if not file_path:
+            raise ValueError("Empty file path")
+
+        # Resolve real path
+        real_path = os.path.realpath(os.path.expanduser(file_path))
+
+        # Security check: verify path is within allowed directories
+        if allowed_dirs:
+            is_allowed = False
+            for allowed_dir in allowed_dirs:
+                allowed_real = os.path.realpath(os.path.expanduser(allowed_dir))
+                if real_path.startswith(allowed_real + os.sep) or real_path == allowed_real:
+                    is_allowed = True
+                    break
+            if not is_allowed:
+                raise ValueError(f"File path not in allowed directories: {file_path}")
+
+        # Check file exists
+        if not os.path.isfile(real_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        # Read file content
+        with open(real_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        logger.info(f"Read text file '{file_path}' ({len(content)} chars)")
+        return content
 
     def extract_parameter_names(self, template: str) -> List[str]:
         """Extract all unique parameter names from template.

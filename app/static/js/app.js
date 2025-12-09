@@ -3039,8 +3039,8 @@ function selectDatasetRow(rowElement) {
                 const value = rowData[param.name];
 
                 // Handle different input types
-                if (param.type === 'FILE' || param.type === 'FILEPATH') {
-                    // For FILE/FILEPATH types, set the value if it's a path string
+                if (param.type === 'FILE' || param.type === 'FILEPATH' || param.type === 'TEXTFILEPATH') {
+                    // For FILE/FILEPATH/TEXTFILEPATH types, set the value if it's a path string
                     if (typeof value === 'string' && value) {
                         input.value = value;
                     }
@@ -3335,10 +3335,17 @@ function showPromptTemplateHelp() {
                         <li>ドラッグ＆ドロップ対応 / Drag & drop supported</li>
                     </ul>
                 </li>
-                <li><strong>FILEPATH</strong>: サーバーファイルパス（バッチ処理用）/ Server file path (for batch processing)
+                <li><strong>FILEPATH</strong>: サーバー画像ファイルパス（バッチ処理用）/ Server image file path (for batch processing)
                     <ul style="margin-top: 0.3rem;">
-                        <li>サーバー上のファイルパスを指定 / Specify file path on server</li>
+                        <li>サーバー上の画像ファイルパスを指定 / Specify image file path on server</li>
                         <li>バッチ実行時、データセットにファイルパスを記載して使用 / Use by specifying file paths in dataset for batch execution</li>
+                    </ul>
+                </li>
+                <li><strong>TEXTFILEPATH</strong>: テキストファイルパス（内容をプロンプトに埋め込み）/ Text file path (content embedded in prompt)
+                    <ul style="margin-top: 0.3rem;">
+                        <li>サーバー上のテキストファイルパスを指定 / Specify text file path on server</li>
+                        <li>ファイルの内容を読み込んでプロンプト本文に展開 / File content is read and embedded in prompt</li>
+                        <li>UTF-8エンコーディングに対応 / Supports UTF-8 encoding</li>
                     </ul>
                 </li>
             </ul>
