@@ -336,7 +336,7 @@ class PromptTemplateParser:
             File content as string
 
         Raises:
-            ValueError: If path is not allowed
+            ValueError: If path is not allowed or file is binary
             FileNotFoundError: If file doesn't exist
             IOError: If file cannot be read
         """
@@ -361,11 +361,57 @@ class PromptTemplateParser:
         if not os.path.isfile(real_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        # Read file content
-        with open(real_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+        # Check if file is likely binary by reading first bytes
+        try:
+            with open(real_path, 'rb') as f:
+                chunk = f.read(8192)
 
-        logger.info(f"Read text file '{file_path}' ({len(content)} chars)")
+                # Check for known binary file signatures
+                binary_signatures = [
+                    b'%PDF',           # PDF
+                    b'\x89PNG',        # PNG
+                    b'\xff\xd8\xff',   # JPEG
+                    b'GIF8',           # GIF
+                    b'RIFF',           # WebP, WAV, AVI
+                    b'PK\x03\x04',     # ZIP, XLSX, DOCX
+                    b'\x00\x00\x00',   # Various binary formats
+                    b'\x7fELF',        # ELF executables
+                    b'MZ',             # Windows executables
+                ]
+                for sig in binary_signatures:
+                    if chunk.startswith(sig):
+                        raise ValueError(f"File appears to be binary: {file_path}")
+
+                # Check for UTF-16 BOM (valid text encoding with null bytes)
+                is_utf16 = chunk.startswith(b'\xff\xfe') or chunk.startswith(b'\xfe\xff')
+
+                # Check for null bytes (common in binary files) but skip for UTF-16
+                if not is_utf16 and b'\x00' in chunk:
+                    raise ValueError(f"File appears to be binary: {file_path}")
+        except IOError as e:
+            raise IOError(f"Cannot read file: {file_path} - {e}")
+
+        # Try multiple encodings
+        encodings = ['utf-8', 'utf-8-sig', 'utf-16', 'shift_jis', 'cp932', 'euc-jp', 'latin-1']
+        content = None
+        used_encoding = None
+
+        for encoding in encodings:
+            try:
+                with open(real_path, 'r', encoding=encoding) as f:
+                    content = f.read()
+                used_encoding = encoding
+                break
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                logger.warning(f"Error reading '{file_path}' with {encoding}: {e}")
+                continue
+
+        if content is None:
+            raise ValueError(f"Cannot decode file with any supported encoding: {file_path}")
+
+        logger.info(f"Read text file '{file_path}' ({len(content)} chars, encoding: {used_encoding})")
         return content
 
     def extract_parameter_names(self, template: str) -> List[str]:
