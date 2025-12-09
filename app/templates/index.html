@@ -244,6 +244,31 @@
                     </div>
                 </div>
 
+                <!-- File Processing Card -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <span class="settings-card-icon">📄</span>
+                        <h3>ファイル処理 / File Processing</h3>
+                    </div>
+                    <div class="settings-card-body">
+                        <div class="settings-row">
+                            <div class="settings-row-label">
+                                <span class="settings-label">テキスト拡張子</span>
+                                <span class="settings-label-sub">Text File Extensions</span>
+                            </div>
+                            <div class="settings-row-control" style="flex-direction: column; align-items: flex-start; gap: 0.5rem;">
+                                <div style="display: flex; gap: 0.5rem; width: 100%;">
+                                    <input type="text" id="text-file-extensions" class="settings-input-text" style="flex: 1;" placeholder="txt,csv,md,json...">
+                                    <button id="btn-save-text-extensions" class="btn btn-primary btn-sm">保存</button>
+                                    <button id="btn-reset-text-extensions" class="btn btn-secondary btn-sm">リセット</button>
+                                </div>
+                                <span id="text-extensions-status" class="settings-status"></span>
+                            </div>
+                        </div>
+                        <p class="settings-hint">FILEPATHパラメータでテキストとして展開する拡張子（カンマ区切り）<br>空欄にすると全てのファイルが画像としてLLMに送信されます</p>
+                    </div>
+                </div>
+
                 <!-- Model Parameters Card -->
                 <div class="settings-card settings-card-wide">
                     <div class="settings-card-header">

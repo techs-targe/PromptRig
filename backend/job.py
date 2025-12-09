@@ -29,6 +29,9 @@ class JobManager:
     Specification: docs/req.txt section 3.2, 4.2.3
     """
 
+    # Default text file extensions (must match settings.py)
+    DEFAULT_TEXT_FILE_EXTENSIONS = "txt,csv,md,json,xml,yaml,yml,log,ini,cfg,conf,html,htm,css,js,ts,py,java,c,cpp,h,hpp,cs,go,rs,rb,php,sql,sh,bash,zsh,ps1,bat,cmd"
+
     def __init__(self, db: Session):
         """Initialize job manager.
 
@@ -37,6 +40,28 @@ class JobManager:
         """
         self.db = db
         self.parser = PromptTemplateParser()
+
+    def _get_text_file_extensions(self) -> List[str]:
+        """Get list of text file extensions from system settings.
+
+        Returns:
+            List of extensions (lowercase, without dots) that should be treated as text.
+            Empty list if setting is explicitly empty (disables auto-expansion).
+        """
+        setting = self.db.query(SystemSetting).filter(
+            SystemSetting.key == "text_file_extensions"
+        ).first()
+
+        if setting is not None:
+            extensions = setting.value
+        else:
+            extensions = self.DEFAULT_TEXT_FILE_EXTENSIONS
+
+        # Parse into list (lowercase, trimmed)
+        if extensions:
+            return [ext.strip().lower() for ext in extensions.split(",") if ext.strip()]
+        else:
+            return []  # Empty list disables text expansion
 
     def create_single_job(
         self,
@@ -81,12 +106,14 @@ class JobManager:
 
         # Create job items (one per repeat)
         allowed_dirs = self._get_allowed_image_directories()  # Also used for TEXTFILEPATH
+        text_extensions = self._get_text_file_extensions()  # For FILEPATH text expansion
         for i in range(repeat):
             # Substitute parameters into template
             raw_prompt = self.parser.substitute_parameters(
                 revision.prompt_template,
                 input_params,
-                allowed_dirs
+                allowed_dirs,
+                text_extensions
             )
 
             job_item = JobItem(
@@ -959,8 +986,9 @@ class JobManager:
         # Get column names from first row's mapping (excluding id)
         columns = [col for col in rows[0]._mapping.keys() if col != "id"]
 
-        # Get allowed directories for TEXTFILEPATH
+        # Get allowed directories and text extensions
         allowed_dirs = self._get_allowed_image_directories()
+        text_extensions = self._get_text_file_extensions()
 
         # Create job items for each row
         for row in rows:
@@ -974,7 +1002,8 @@ class JobManager:
             raw_prompt = self.parser.substitute_parameters(
                 revision.prompt_template,
                 input_params,
-                allowed_dirs
+                allowed_dirs,
+                text_extensions
             )
 
             job_item = JobItem(

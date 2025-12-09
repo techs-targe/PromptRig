@@ -244,6 +244,7 @@ function loadTabData(tabName) {
             loadAvailableModels();
             loadModelConfigurationSettings();
             loadJobParallelism();
+            loadTextFileExtensions();
             break;
         case 'datasets':
             loadDatasets();
@@ -306,6 +307,10 @@ function setupEventListeners() {
 
     // Job execution settings
     document.getElementById('btn-save-parallelism')?.addEventListener('click', saveJobParallelism);
+
+    // Text file extensions buttons
+    document.getElementById('btn-save-text-extensions')?.addEventListener('click', saveTextFileExtensions);
+    document.getElementById('btn-reset-text-extensions')?.addEventListener('click', resetTextFileExtensions);
 
     // Job cancellation buttons
     document.getElementById('btn-stop-single')?.addEventListener('click', cancelSingleJob);
@@ -3689,6 +3694,76 @@ async function saveJobParallelism() {
 
         const data = await response.json();
         statusEl.textContent = '保存しました / Saved';
+        statusEl.style.color = '#27ae60';
+
+        setTimeout(() => {
+            statusEl.textContent = '';
+        }, 2000);
+
+    } catch (error) {
+        statusEl.textContent = `エラー / Error: ${error.message}`;
+        statusEl.style.color = '#e74c3c';
+    }
+}
+
+// ========================================
+// Text File Extensions Setting
+// ========================================
+
+async function loadTextFileExtensions() {
+    try {
+        const response = await fetch('/api/settings/text-file-extensions');
+        if (!response.ok) throw new Error('Failed to load text file extensions');
+
+        const data = await response.json();
+        document.getElementById('text-file-extensions').value = data.extensions || '';
+
+    } catch (error) {
+        console.error('Failed to load text file extensions:', error);
+    }
+}
+
+async function saveTextFileExtensions() {
+    const extensions = document.getElementById('text-file-extensions').value;
+    const statusEl = document.getElementById('text-extensions-status');
+
+    try {
+        const response = await fetch(`/api/settings/text-file-extensions?extensions=${encodeURIComponent(extensions)}`, {
+            method: 'PUT'
+        });
+
+        if (!response.ok) throw new Error('Failed to save text file extensions');
+
+        const data = await response.json();
+        document.getElementById('text-file-extensions').value = data.extensions;
+
+        statusEl.textContent = '保存しました / Saved';
+        statusEl.style.color = '#27ae60';
+
+        setTimeout(() => {
+            statusEl.textContent = '';
+        }, 2000);
+
+    } catch (error) {
+        statusEl.textContent = `エラー / Error: ${error.message}`;
+        statusEl.style.color = '#e74c3c';
+    }
+}
+
+async function resetTextFileExtensions() {
+    const statusEl = document.getElementById('text-extensions-status');
+
+    try {
+        const response = await fetch('/api/settings/text-file-extensions', {
+            method: 'DELETE'
+        });
+
+        if (!response.ok) throw new Error('Failed to reset text file extensions');
+
+        const data = await response.json();
+        document.getElementById('text-file-extensions').value = data.extensions;
+
+        statusEl.textContent = 'デフォルトにリセットしました / Reset to default';
         statusEl.style.color = '#27ae60';
 
         setTimeout(() => {

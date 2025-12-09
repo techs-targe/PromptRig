@@ -205,40 +205,86 @@ class PromptTemplateParser:
                 default=default_value
             )
 
-    def substitute_parameters(self, template: str, params: Dict[str, str], allowed_dirs: List[str] = None) -> str:
+    def substitute_parameters(
+        self,
+        template: str,
+        params: Dict[str, str],
+        allowed_dirs: List[str] = None,
+        text_extensions: List[str] = None
+    ) -> str:
         """Substitute all {{}} placeholders with actual values.
 
         Args:
             template: Prompt template string with {{}} syntax
             params: Dictionary mapping parameter names to values
-            allowed_dirs: List of allowed directories for TEXTFILEPATH (security)
+            allowed_dirs: List of allowed directories for file access (security)
+            text_extensions: List of extensions to treat as text files for FILEPATH
+                           (e.g., ['txt', 'csv', 'md']). If empty/None, FILEPATH
+                           files are excluded from prompt (sent as images).
 
         Returns:
             Template with all placeholders replaced
 
         Specification: docs/req.txt section 4.2.2
         Note: Same parameter name used multiple times gets same value
-        Note: FILE and FILEPATH parameters are excluded from prompt text
-              (they are sent separately as images to Vision API)
-        Note: TEXTFILEPATH parameters read file content and embed in prompt
+        Note: FILE parameters are excluded from prompt (sent as images to Vision API)
+        Note: FILEPATH parameters with text extensions embed file content in prompt
+        Note: FILEPATH parameters without text extensions are excluded (sent as images)
+        Note: TEXTFILEPATH parameters always read file content and embed in prompt
         Note: Optional parameters use default value if not provided, or empty string
         """
         # Parse template to get parameter types, defaults, and required status
         param_defs = self.parse_template(template)
-        image_params = {p.name for p in param_defs if p.type in [self.TYPE_FILE, self.TYPE_FILEPATH]}
+        file_params = {p.name for p in param_defs if p.type == self.TYPE_FILE}
+        filepath_params = {p.name: p for p in param_defs if p.type == self.TYPE_FILEPATH}
         textfile_params = {p.name for p in param_defs if p.type == self.TYPE_TEXTFILEPATH}
         defaults = {p.name: p.default for p in param_defs if p.default is not None}
         optional_params = {p.name for p in param_defs if not p.required}
 
+        # Normalize text extensions (lowercase, no dots)
+        if text_extensions:
+            text_ext_set = {ext.lower().lstrip('.') for ext in text_extensions}
+        else:
+            text_ext_set = set()
+
+        def _get_file_extension(file_path: str) -> str:
+            """Extract file extension (lowercase, without dot)."""
+            if not file_path:
+                return ""
+            ext = os.path.splitext(file_path)[1]
+            return ext.lower().lstrip('.') if ext else ""
+
+        def _is_text_file(file_path: str) -> bool:
+            """Check if file should be treated as text based on extension."""
+            if not text_ext_set:
+                return False  # No text extensions configured
+            ext = _get_file_extension(file_path)
+            return ext in text_ext_set
+
         def replacer(match):
             param_name = match.group(1)
 
-            # Exclude FILE/FILEPATH parameters from prompt text
-            # (they are sent separately as images to Vision API)
-            if param_name in image_params:
-                return ""  # Remove image parameters from prompt text
+            # Exclude FILE parameters from prompt text (always sent as images)
+            if param_name in file_params:
+                return ""  # Remove FILE parameters from prompt text
 
-            # Handle TEXTFILEPATH: read file content and embed
+            # Handle FILEPATH: check if it's a text file
+            if param_name in filepath_params:
+                file_path = params.get(param_name, None)
+                if file_path and _is_text_file(file_path):
+                    # Text file: read and embed content
+                    try:
+                        content = self._read_text_file(file_path, allowed_dirs)
+                        logger.info(f"FILEPATH '{param_name}' treated as text file: {file_path}")
+                        return content
+                    except Exception as e:
+                        logger.error(f"Error reading text file '{file_path}' for FILEPATH '{param_name}': {e}")
+                        return f"[Error reading file: {e}]"
+                else:
+                    # Not a text file or no value: exclude from prompt (send as image)
+                    return ""
+
+            # Handle TEXTFILEPATH: always read file content and embed
             if param_name in textfile_params:
                 file_path = params.get(param_name, None)
                 if file_path:

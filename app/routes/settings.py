@@ -153,6 +153,100 @@ def set_job_parallelism(parallelism: int, db: Session = Depends(get_db)):
     }
 
 
+# Default text file extensions (common text file types)
+DEFAULT_TEXT_FILE_EXTENSIONS = "txt,csv,md,json,xml,yaml,yml,log,ini,cfg,conf,html,htm,css,js,ts,py,java,c,cpp,h,hpp,cs,go,rs,rb,php,sql,sh,bash,zsh,ps1,bat,cmd"
+
+
+@router.get("/api/settings/text-file-extensions")
+def get_text_file_extensions(db: Session = Depends(get_db)):
+    """Get text file extensions for FILEPATH auto-expansion.
+
+    Files with these extensions will have their content embedded in the prompt
+    instead of being sent as images to the Vision API.
+
+    Returns:
+        Dictionary with extensions (comma-separated) and parsed list
+        If empty, no auto-expansion occurs (all files sent to LLM as-is)
+    """
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "text_file_extensions").first()
+
+    if setting is not None:
+        extensions = setting.value
+    else:
+        extensions = DEFAULT_TEXT_FILE_EXTENSIONS
+
+    # Parse into list (lowercase, trimmed)
+    if extensions:
+        ext_list = [ext.strip().lower() for ext in extensions.split(",") if ext.strip()]
+    else:
+        ext_list = []
+
+    return {
+        "extensions": extensions,
+        "extensions_list": ext_list,
+        "default": DEFAULT_TEXT_FILE_EXTENSIONS
+    }
+
+
+@router.put("/api/settings/text-file-extensions")
+def set_text_file_extensions(extensions: str, db: Session = Depends(get_db)):
+    """Set text file extensions for FILEPATH auto-expansion.
+
+    Args:
+        extensions: Comma-separated list of extensions (e.g., "txt,csv,md")
+                   Empty string disables auto-expansion
+
+    Returns:
+        Updated extensions setting
+    """
+    # Normalize: lowercase, remove dots, trim whitespace
+    if extensions:
+        ext_list = [ext.strip().lower().lstrip('.') for ext in extensions.split(",") if ext.strip()]
+        normalized = ",".join(ext_list)
+    else:
+        normalized = ""
+
+    # Update or create setting
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "text_file_extensions").first()
+
+    if setting:
+        setting.value = normalized
+    else:
+        setting = SystemSetting(key="text_file_extensions", value=normalized)
+        db.add(setting)
+
+    db.commit()
+    db.refresh(setting)
+
+    return {
+        "extensions": normalized,
+        "extensions_list": [ext.strip() for ext in normalized.split(",") if ext.strip()] if normalized else [],
+        "message": f"Text file extensions updated"
+    }
+
+
+@router.delete("/api/settings/text-file-extensions")
+def reset_text_file_extensions(db: Session = Depends(get_db)):
+    """Reset text file extensions to default value.
+
+    Returns:
+        Default extensions setting
+    """
+    setting = db.query(SystemSetting).filter(SystemSetting.key == "text_file_extensions").first()
+
+    if setting:
+        db.delete(setting)
+        db.commit()
+
+    ext_list = [ext.strip().lower() for ext in DEFAULT_TEXT_FILE_EXTENSIONS.split(",") if ext.strip()]
+
+    return {
+        "extensions": DEFAULT_TEXT_FILE_EXTENSIONS,
+        "extensions_list": ext_list,
+        "message": "Text file extensions reset to default"
+    }
+
+
 @router.get("/api/settings/{key}", response_model=SettingResponse)
 def get_setting(key: str, db: Session = Depends(get_db)):
     """Get specific setting value.
