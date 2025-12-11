@@ -6,6 +6,7 @@ Based on specification in docs/req.txt section 4.2.3 (実行処理) and 3.2 (通
 import json
 import logging
 import os
+import re
 import base64
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -201,7 +202,7 @@ class JobManager:
             self.db.expire_all()
             # Re-fetch job items to get updated status and parsed_response after execution
             job_items_for_csv = self.db.query(JobItem).filter(JobItem.job_id == job_id).all()
-            merged_csv = self._merge_csv_outputs(job_items_for_csv, include_csv_header)
+            merged_csv = self._merge_csv_outputs(job_items_for_csv, include_csv_header, revision.parser_config if revision else None)
             job.merged_csv_output = merged_csv
 
         # Calculate actual wall-clock time for job execution
@@ -815,12 +816,13 @@ class JobManager:
 
         return error_count
 
-    def _merge_csv_outputs(self, job_items: List[JobItem], include_csv_header: bool) -> str:
+    def _merge_csv_outputs(self, job_items: List[JobItem], include_csv_header: bool, parser_config: str = None) -> str:
         """Merge CSV outputs from multiple job items.
 
         Args:
             job_items: List of job items with parsed responses
             include_csv_header: If True, include header from first item
+            parser_config: Parser configuration JSON string (for extracting csv_template)
 
         Returns:
             Merged CSV string with newline-separated rows
@@ -830,6 +832,18 @@ class JobManager:
         """
         csv_lines = []
         header_added = False
+
+        # Extract csv_template from parser_config for consistent header generation
+        csv_template = None
+        if parser_config:
+            try:
+                config = json.loads(parser_config)
+                # Handle double-encoded JSON
+                if isinstance(config, str):
+                    config = json.loads(config)
+                csv_template = config.get("csv_template", "") if isinstance(config, dict) else ""
+            except (json.JSONDecodeError, TypeError):
+                csv_template = None
 
         # Sort job_items by ID to ensure consistent order, especially for parallel execution
         # This guarantees that CSV rows appear in the same order as they were created
@@ -869,13 +883,24 @@ class JobManager:
 
                 # Add header from first successful item (only once)
                 if not header_added and include_csv_header:
-                    fields = parsed.get("fields", {})
-                    if fields:
-                        # Generate header from field names in order
-                        header_line = ",".join(fields.keys())
-                        csv_lines.append(header_line)
-                        header_added = True
-                        logger.info(f"CSV merge: Added header: {header_line}")
+                    # Prefer csv_template for header (ensures same order as data rows)
+                    if csv_template:
+                        # Extract field names from csv_template: "$field1$,$field2$" -> ["field1", "field2"]
+                        field_names = re.findall(r'\$(\w+)\$', csv_template)
+                        if field_names:
+                            header_line = ",".join(field_names)
+                            csv_lines.append(header_line)
+                            header_added = True
+                            logger.info(f"CSV merge: Added header from csv_template: {header_line}")
+
+                    # Fallback to fields.keys() if csv_template not available or no fields extracted
+                    if not header_added:
+                        fields = parsed.get("fields", {})
+                        if fields:
+                            header_line = ",".join(fields.keys())
+                            csv_lines.append(header_line)
+                            header_added = True
+                            logger.info(f"CSV merge: Added header from fields: {header_line}")
 
                 # Add data line
                 csv_lines.append(csv_output)
