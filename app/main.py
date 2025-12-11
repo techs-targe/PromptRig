@@ -24,7 +24,7 @@ if str(project_root) not in sys.path:
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.routes import main, config, run, projects, datasets, settings
+from app.routes import main, config, run, projects, datasets, settings, workflows, prompts
 
 # Create FastAPI app
 app = FastAPI(
@@ -46,14 +46,66 @@ app.include_router(projects.router, tags=["projects"])
 app.include_router(datasets.router, tags=["datasets"])
 app.include_router(settings.router, tags=["settings"])
 
+# Workflow router (v2.0)
+app.include_router(workflows.router, tags=["workflows"])
+
+# Prompts router (v3.0 - new architecture)
+app.include_router(prompts.router, tags=["prompts"])
+
 
 @app.on_event("startup")
 def startup_event():
-    """Initialize database on startup.
+    """Initialize database on startup and recover stale jobs.
 
     Specification: docs/req.txt section 2.3
+
+    Job Recovery:
+    - Any jobs left in "running" status from a previous server crash
+      are marked as "error" to prevent them from staying stuck forever.
+    - This ensures users can see that those jobs were interrupted.
     """
-    from backend.database import init_db
+    from backend.database import init_db, SessionLocal
+    from backend.database.models import Job, JobItem
+    from datetime import datetime
+
     init_db()
     print("✓ Database initialized")
+
+    # Job Recovery: Mark stale "running" jobs as error
+    db = SessionLocal()
+    try:
+        # Find all jobs stuck in "running" status (from previous server crash)
+        stale_jobs = db.query(Job).filter(Job.status == "running").all()
+
+        if stale_jobs:
+            print(f"⚠ Found {len(stale_jobs)} stale job(s) in 'running' status")
+
+            for job in stale_jobs:
+                # Mark job as error
+                job.status = "error"
+                job.finished_at = datetime.utcnow().isoformat()
+
+                # Mark all running/pending items as error
+                stale_items = db.query(JobItem).filter(
+                    JobItem.job_id == job.id,
+                    JobItem.status.in_(["running", "pending"])
+                ).all()
+
+                for item in stale_items:
+                    item.status = "error"
+                    item.error_message = "Server restarted - job interrupted"
+
+                print(f"  ✓ Job {job.id}: marked as error ({len(stale_items)} items)")
+
+            db.commit()
+            print(f"✓ Job recovery completed: {len(stale_jobs)} job(s) recovered")
+        else:
+            print("✓ No stale jobs to recover")
+
+    except Exception as e:
+        print(f"⚠ Job recovery failed: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
     print("✓ Application started on http://localhost:9200")

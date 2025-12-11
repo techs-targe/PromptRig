@@ -8,6 +8,7 @@
     <div class="tab-navigation">
         <button class="tab-button active" data-tab="single">単発実行 / Single Execution</button>
         <button class="tab-button" data-tab="batch">バッチ実行 / Batch Execution</button>
+        <button class="tab-button" data-tab="workflows">ワークフロー / Workflows</button>
         <button class="tab-button" data-tab="projects">プロジェクト設定 / Projects</button>
         <button class="tab-button" data-tab="settings">システム設定 / System Settings</button>
         <button class="tab-button" data-tab="datasets">データセット / Datasets</button>
@@ -17,82 +18,123 @@
 
     <!-- Single Execution Tab -->
     <div id="tab-single" class="tab-content active">
-        <div class="section">
-            <h2>単発実行 / Single Execution</h2>
-            <div class="toolbar">
-                <label>プロジェクト / Project:</label>
-                <select id="single-project-select">
-                    <option value="">Loading...</option>
-                </select>
-                <button id="btn-edit-prompt" class="btn btn-secondary">プロンプト編集 / Edit Prompt</button>
-                <button id="btn-edit-parser" class="btn btn-secondary">パーサー編集 / Edit Parser</button>
-                <label style="margin-left: 20px;">モデル / Model:</label>
-                <select id="model-select">
-                    <option value="azure-gpt-4.1">Azure GPT-4.1</option>
-                    <option value="openai-gpt-4.1-nano">OpenAI GPT-4.1-nano</option>
-                </select>
+        <!-- Control Panel -->
+        <div class="exec-control-panel">
+            <div class="exec-control-row">
+                <div class="exec-control-group">
+                    <label class="exec-control-label">
+                        <span class="exec-control-icon">📁</span>
+                        プロジェクト / Project
+                    </label>
+                    <select id="single-project-select" class="exec-select">
+                        <option value="">Loading...</option>
+                    </select>
+                </div>
+                <div class="exec-control-group">
+                    <label class="exec-control-label">
+                        <span class="exec-control-icon">🎯</span>
+                        実行対象 / Target
+                    </label>
+                    <select id="single-target-select" class="exec-select" style="min-width: 200px;">
+                        <option value="">Loading...</option>
+                    </select>
+                </div>
+                <div class="exec-control-group">
+                    <label class="exec-control-label">
+                        <span class="exec-control-icon">🤖</span>
+                        モデル / Model
+                    </label>
+                    <select id="model-select" class="exec-select">
+                        <option value="azure-gpt-4.1">Azure GPT-4.1</option>
+                        <option value="openai-gpt-4.1-nano">OpenAI GPT-4.1-nano</option>
+                    </select>
+                </div>
+                <div class="exec-control-group exec-control-actions">
+                    <button id="btn-edit-prompt" class="btn btn-outline">
+                        <span>✏️</span> プロンプト編集
+                    </button>
+                </div>
             </div>
         </div>
 
         <div class="main-content">
-            <div class="left-pane">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                    <h3 style="margin: 0;">実行履歴 / History</h3>
-                    <button id="btn-reload-single-history" class="btn btn-secondary btn-sm" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;">🔄</button>
+            <!-- History Sidebar -->
+            <div class="left-pane exec-sidebar">
+                <div class="exec-sidebar-header">
+                    <h3><span class="exec-control-icon">📜</span> 実行履歴 / History</h3>
+                    <button id="btn-reload-single-history" class="btn btn-icon" title="更新">🔄</button>
                 </div>
                 <div id="history-list" class="history-list">
                     <p class="loading">Loading...</p>
                 </div>
             </div>
 
+            <!-- Main Content Area -->
             <div class="right-pane">
-                <div class="section">
-                    <h3>プロンプトテンプレート / Prompt Template</h3>
-                    <div class="prompt-template-box">
-                        <pre id="prompt-template">Loading...</pre>
+                <!-- Prompt Template Card -->
+                <div class="exec-card">
+                    <div class="exec-card-header">
+                        <h3><span class="exec-control-icon">📝</span> プロンプトテンプレート / Prompt Template</h3>
+                    </div>
+                    <div class="exec-card-body">
+                        <div class="prompt-template-box">
+                            <pre id="prompt-template">Loading...</pre>
+                        </div>
                     </div>
                 </div>
 
-                <div class="section">
-                    <h3>入力パラメータ / Input Parameters</h3>
-                    <div style="margin-bottom: 0.5rem;">
-                        <button type="button" id="btn-select-from-dataset" class="btn btn-secondary" onclick="showDatasetSelectorForSingle()">
-                            📋 データセットから選択 / Select from Dataset
+                <!-- Input Parameters Card -->
+                <div class="exec-card">
+                    <div class="exec-card-header">
+                        <h3><span class="exec-control-icon">⚡</span> 入力パラメータ / Input Parameters</h3>
+                        <button type="button" id="btn-select-from-dataset" class="btn btn-outline btn-sm" onclick="showDatasetSelectorForSingle()">
+                            📋 データセットから選択
                         </button>
                     </div>
-                    <form id="input-form">
-                        <div id="parameter-inputs">
-                            <p class="loading">Loading...</p>
-                        </div>
-
-                        <div class="execution-controls">
-                            <button type="button" id="btn-send-once" class="btn btn-primary">
-                                1件送信 / Send Once
-                            </button>
-                            <div class="repeat-control">
-                                <label for="repeat-count">回数 / Repeat:</label>
-                                <input type="number" id="repeat-count" min="1" max="10" value="3">
-                                <button type="button" id="btn-send-repeat" class="btn btn-secondary">
-                                    n回送信 / Send n Times
-                                </button>
-                                <label style="margin-left: 1rem;">
-                                    <input type="checkbox" id="single-include-csv-header" checked>
-                                    CSVヘッダを１行目のみに含める / Include CSV header in first row only
-                                </label>
+                    <div class="exec-card-body">
+                        <form id="input-form">
+                            <div id="parameter-inputs">
+                                <p class="loading">Loading...</p>
                             </div>
-                            <button type="button" id="btn-stop-single" class="btn btn-danger" style="display: none; margin-left: 1rem;">
-                                ⏹ 停止 / Stop
-                            </button>
-                        </div>
 
-                        <div id="execution-status" class="status-message"></div>
-                    </form>
+                            <div id="execution-status" class="status-message"></div>
+
+                            <div class="exec-action-bar">
+                                <div class="exec-action-primary">
+                                    <button type="button" id="btn-send-once" class="btn btn-primary btn-lg">
+                                        ▶️ 1件送信 / Send Once
+                                    </button>
+                                    <button type="button" id="btn-stop-single" class="btn btn-danger btn-lg" style="display: none;">
+                                        ⏹ 停止 / Stop
+                                    </button>
+                                </div>
+                                <div class="exec-action-secondary">
+                                    <div class="exec-repeat-control">
+                                        <label for="repeat-count">回数:</label>
+                                        <input type="number" id="repeat-count" min="1" max="10" value="3" class="exec-input-number">
+                                        <button type="button" id="btn-send-repeat" class="btn btn-secondary">
+                                            🔁 n回送信
+                                        </button>
+                                    </div>
+                                    <label class="exec-checkbox">
+                                        <input type="checkbox" id="single-include-csv-header" checked>
+                                        <span>CSVヘッダを１行目のみに含める</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
                 </div>
 
-                <div class="section">
-                    <h3>実行結果 / Results</h3>
-                    <div id="results-area">
-                        <p class="info">実行結果がここに表示されます / Results will be displayed here</p>
+                <!-- Results Card -->
+                <div class="exec-card">
+                    <div class="exec-card-header">
+                        <h3><span class="exec-control-icon">📊</span> 実行結果 / Results</h3>
+                    </div>
+                    <div class="exec-card-body">
+                        <div id="results-area">
+                            <p class="info">実行結果がここに表示されます / Results will be displayed here</p>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -101,56 +143,163 @@
 
     <!-- Batch Execution Tab -->
     <div id="tab-batch" class="tab-content">
-        <div class="section">
-            <h2>バッチ実行 / Batch Execution</h2>
-            <div class="toolbar">
-                <label>プロジェクト / Project:</label>
-                <select id="batch-project-select">
-                    <option value="">Loading...</option>
-                </select>
-                <button id="btn-batch-edit-prompt" class="btn btn-secondary">プロンプト編集 / Edit Prompt</button>
-                <button id="btn-batch-edit-parser" class="btn btn-secondary">パーサー編集 / Edit Parser</button>
-                <label style="margin-left: 20px;">データセット / Dataset:</label>
-                <select id="batch-dataset-select">
-                    <option value="">データセットを選択 / Select Dataset</option>
-                </select>
+        <!-- Control Panel -->
+        <div class="exec-control-panel">
+            <div class="exec-control-row">
+                <div class="exec-control-group">
+                    <label class="exec-control-label">
+                        <span class="exec-control-icon">📁</span>
+                        プロジェクト / Project
+                    </label>
+                    <select id="batch-project-select" class="exec-select">
+                        <option value="">Loading...</option>
+                    </select>
+                </div>
+                <div class="exec-control-group">
+                    <label class="exec-control-label">
+                        <span class="exec-control-icon">🎯</span>
+                        プロンプト / Prompt
+                    </label>
+                    <select id="batch-prompt-select" class="exec-select" style="min-width: 200px;">
+                        <option value="">プロンプトを選択 / Select Prompt</option>
+                    </select>
+                </div>
+                <div class="exec-control-group">
+                    <label class="exec-control-label">
+                        <span class="exec-control-icon">📋</span>
+                        データセット / Dataset
+                    </label>
+                    <select id="batch-dataset-select" class="exec-select" style="min-width: 200px;">
+                        <option value="">データセットを選択 / Select Dataset</option>
+                    </select>
+                </div>
+                <div class="exec-control-group">
+                    <label class="exec-control-label">
+                        <span class="exec-control-icon">🤖</span>
+                        モデル / Model
+                    </label>
+                    <select id="batch-model-select" class="exec-select">
+                        <option value="azure-gpt-4.1">Azure GPT-4.1</option>
+                        <option value="openai-gpt-4.1-nano">OpenAI GPT-4.1-nano</option>
+                    </select>
+                </div>
+                <div class="exec-control-group exec-control-actions">
+                    <button id="btn-batch-edit-prompt" class="btn btn-outline">
+                        <span>✏️</span> プロンプト編集
+                    </button>
+                </div>
             </div>
-            <div class="toolbar">
-                <label>モデル / Model:</label>
-                <select id="batch-model-select">
-                    <option value="azure-gpt-4.1">Azure GPT-4.1</option>
-                    <option value="openai-gpt-4.1-nano">OpenAI GPT-4.1-nano</option>
-                </select>
-                <label style="margin-left: 1rem;">
+            <div class="exec-control-row exec-control-row-actions">
+                <label class="exec-checkbox">
                     <input type="checkbox" id="batch-include-csv-header" checked>
-                    CSVヘッダを１行目のみに含める / Include CSV header in first row only
+                    <span>CSVヘッダを１行目のみに含める</span>
                 </label>
-                <button id="btn-batch-execute" class="btn btn-primary">バッチ実行開始 / Start Batch</button>
-                <button id="btn-stop-batch" class="btn btn-danger" style="display: none; margin-left: 1rem;">
-                    ⏹ 停止 / Stop
-                </button>
+                <div class="exec-batch-buttons">
+                    <button id="btn-batch-execute" class="btn btn-primary btn-lg">
+                        🚀 バッチ実行開始 / Start Batch
+                    </button>
+                    <button id="btn-stop-batch" class="btn btn-danger btn-lg" style="display: none;">
+                        ⏹ 停止 / Stop
+                    </button>
+                </div>
             </div>
         </div>
 
         <div class="main-content">
-            <div class="left-pane">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                    <h3 style="margin: 0;">バッチジョブ履歴 / Batch Job History</h3>
-                    <button id="btn-reload-batch-history" class="btn btn-secondary btn-sm" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;">🔄</button>
+            <!-- History Sidebar -->
+            <div class="left-pane exec-sidebar">
+                <div class="exec-sidebar-header">
+                    <h3><span class="exec-control-icon">📜</span> バッチジョブ履歴</h3>
+                    <button id="btn-reload-batch-history" class="btn btn-icon" title="更新">🔄</button>
                 </div>
                 <div id="batch-jobs-list" class="history-list">
                     <p class="loading">Loading...</p>
                 </div>
             </div>
 
+            <!-- Main Content Area -->
             <div class="right-pane">
-                <div class="section">
-                    <h3>バッチ実行結果 / Batch Results</h3>
-                    <div id="batch-execution-status" style="display: none;"></div>
-                    <div id="batch-results-area">
-                        <p class="info">バッチジョブを選択すると結果が表示されます / Select a batch job to view results</p>
+                <!-- Results Card -->
+                <div class="exec-card">
+                    <div class="exec-card-header">
+                        <h3><span class="exec-control-icon">📊</span> バッチ実行結果 / Batch Results</h3>
+                    </div>
+                    <div class="exec-card-body">
+                        <div id="batch-execution-status" style="display: none;"></div>
+                        <div id="batch-results-area">
+                            <p class="info">バッチジョブを選択すると結果が表示されます / Select a batch job to view results</p>
+                        </div>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Workflows Tab -->
+    <div id="tab-workflows" class="tab-content">
+        <div class="section">
+            <h2>ワークフロー / Workflows</h2>
+            <p class="section-description">複数のプロンプトを連結して実行できます / Chain multiple prompts together</p>
+
+            <!-- Project Selector for Workflows -->
+            <div class="form-group" style="margin-bottom: 1rem;">
+                <label style="font-weight: bold;">プロジェクト選択 / Select Project:</label>
+                <select id="workflow-project-select" onchange="onWorkflowProjectChange()" style="width: 300px;">
+                    <option value="">-- プロジェクトを選択 / Select Project --</option>
+                    <!-- Project options will be populated by JavaScript -->
+                </select>
+            </div>
+
+            <button id="btn-create-workflow" class="btn btn-primary" onclick="showCreateWorkflowForm()" disabled>
+                新規ワークフロー作成 / Create Workflow
+            </button>
+            <span id="workflow-project-hint" class="help-text" style="margin-left: 1rem;">
+                ※ プロジェクトを選択してください
+            </span>
+        </div>
+
+        <div class="main-content">
+            <div class="left-pane">
+                <h3>ワークフロー一覧 / Workflow List</h3>
+                <div id="workflow-list" class="history-list">
+                    <!-- Workflow list will be rendered here -->
+                </div>
+            </div>
+
+            <div class="right-pane">
+                <!-- Workflow Editor (hidden by default) -->
+                <div id="workflow-editor" class="section" style="display: none;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <h3 id="workflow-editor-title">ワークフロー作成 / Create Workflow</h3>
+                        <button class="btn btn-secondary" onclick="hideWorkflowEditor()">✕ 閉じる</button>
+                    </div>
+                    <form id="workflow-form" onsubmit="event.preventDefault(); saveWorkflow();">
+                        <div class="form-group">
+                            <label>名前 / Name:</label>
+                            <input type="text" id="workflow-name" required placeholder="ワークフロー名">
+                        </div>
+                        <div class="form-group">
+                            <label>説明 / Description:</label>
+                            <textarea id="workflow-description" rows="2" placeholder="ワークフローの説明（任意）"></textarea>
+                        </div>
+
+                        <h4>ステップ / Steps</h4>
+                        <p class="help-text">前のステップの出力を使用: <code>{% raw %}{{step1.field_name}}{% endraw %}</code></p>
+                        <div id="workflow-steps-container">
+                            <!-- Dynamic step forms will be added here -->
+                        </div>
+                        <button type="button" class="btn btn-secondary" onclick="addWorkflowStep()">
+                            + ステップ追加 / Add Step
+                        </button>
+
+                        <div class="form-actions" style="margin-top: 1rem;">
+                            <input type="hidden" id="workflow-id" value="">
+                            <button type="submit" class="btn btn-primary">保存 / Save</button>
+                            <button type="button" class="btn btn-secondary" onclick="hideWorkflowEditor()">キャンセル / Cancel</button>
+                        </div>
+                    </form>
+                </div>
+
             </div>
         </div>
     </div>
@@ -468,8 +617,107 @@
     </div>
 </div>
 
+<!-- Variable Picker Modal -->
+<div id="variable-picker-overlay" class="modal-overlay" style="z-index: 1100;">
+    <div id="variable-picker-modal" class="modal-content" style="max-width: 600px; max-height: 80vh; display: flex; flex-direction: column;">
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 1rem; border-bottom: 1px solid #ddd;">
+            <h3 style="margin: 0;">🔧 変数を挿入 / Insert Variable</h3>
+            <button class="btn btn-secondary" onclick="closeVariablePicker()">✕</button>
+        </div>
+
+        <div style="padding: 1rem 0;">
+            <input type="text" id="variable-search" placeholder="🔍 変数を検索... / Search variables..."
+                   style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 1rem;"
+                   oninput="filterVariables(this.value)">
+        </div>
+
+        <div id="variable-categories" style="flex: 1; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px;">
+            <!-- Categories will be rendered here -->
+            <p style="padding: 1rem; color: #7f8c8d;">読み込み中... / Loading...</p>
+        </div>
+
+        <div style="padding-top: 1rem; border-top: 1px solid #ddd; margin-top: 1rem;">
+            <small style="color: #7f8c8d;">
+                💡 変数をクリックすると、カーソル位置に挿入されます / Click a variable to insert at cursor position
+            </small>
+        </div>
+    </div>
+</div>
+
+<!-- Draggable Prompt Editor Window -->
+<div id="prompt-editor-window" class="draggable-window" style="display: none;">
+    <div class="draggable-header" id="prompt-editor-header">
+        <span class="draggable-title">📝 プロンプト編集 / Prompt Editor</span>
+        <div class="draggable-controls">
+            <button type="button" class="btn-minimize" onclick="minimizePromptEditor()" title="最小化">−</button>
+            <button type="button" class="btn-close" onclick="closePromptEditor()" title="閉じる">×</button>
+        </div>
+    </div>
+    <div class="draggable-body" id="prompt-editor-body">
+        <input type="hidden" id="prompt-editor-prompt-id">
+        <input type="hidden" id="prompt-editor-step-number">
+        <input type="hidden" id="prompt-editor-current-revision">
+        <div class="prompt-editor-info">
+            <span id="prompt-editor-prompt-name" style="font-weight: bold;"></span>
+            <span id="prompt-editor-revision-info" style="margin-left: 1rem; color: #7f8c8d; font-size: 0.85rem;"></span>
+        </div>
+
+        <!-- Prompt/Parser Tab Navigation -->
+        <div class="prompt-editor-tabs">
+            <button type="button" class="prompt-tab-btn active" data-tab="prompt" onclick="switchPromptEditorTab('prompt')">
+                📝 プロンプト
+            </button>
+            <button type="button" class="prompt-tab-btn" data-tab="parser" onclick="switchPromptEditorTab('parser')">
+                ⚙️ パーサー
+            </button>
+        </div>
+
+        <div class="prompt-editor-content">
+            <!-- Prompt Tab -->
+            <div id="prompt-editor-tab-prompt" class="prompt-editor-tab-content active">
+                <div class="prompt-editor-main">
+                    <label>プロンプトテンプレート / Prompt Template:</label>
+                    <textarea id="prompt-editor-template"></textarea>
+                </div>
+            </div>
+
+            <!-- Parser Tab -->
+            <div id="prompt-editor-tab-parser" class="prompt-editor-tab-content" style="display: none;">
+                <div class="prompt-editor-main">
+                    <label>パーサータイプ / Parser Type:</label>
+                    <select id="prompt-editor-parser-type" onchange="onPromptEditorParserTypeChange()">
+                        <option value="none">なし / None</option>
+                        <option value="json_path">JSON Path</option>
+                        <option value="regex">正規表現 / Regex</option>
+                        <option value="csv_template">CSV Template</option>
+                    </select>
+
+                    <label style="margin-top: 1rem; display: block;">パーサー設定 (JSON):</label>
+                    <textarea id="prompt-editor-parser-config" style="width: 100%; height: 200px; font-family: monospace; font-size: 0.85rem;" placeholder='{"type": "none"}'></textarea>
+                    <small style="color: #7f8c8d;">例: {"type": "json_path", "paths": {"field1": "$.data.value"}}</small>
+                </div>
+            </div>
+
+            <div class="prompt-editor-sidebar">
+                <div class="revision-header">
+                    <span>📜 リビジョン</span>
+                    <button type="button" class="btn btn-sm" onclick="loadPromptRevisions()" title="更新" style="padding: 2px 6px; font-size: 0.7rem;">🔄</button>
+                </div>
+                <ul class="revision-list" id="prompt-editor-revisions">
+                    <li style="padding: 0.5rem; color: #9e9e9e; font-size: 0.8rem;">読み込み中...</li>
+                </ul>
+            </div>
+        </div>
+        <div class="prompt-editor-actions">
+            <button type="button" class="btn btn-primary" onclick="savePromptFromEditor()">💾 保存 / Save</button>
+            <button type="button" class="btn btn-secondary" onclick="closePromptEditor()">閉じる / Close</button>
+            <span id="prompt-editor-status" style="margin-left: 1rem; color: #7f8c8d;"></span>
+        </div>
+    </div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/app.js?v=20251207_130930"></script>
+<script src="/static/js/app.js?v=20251212_130000"></script>
 {% endblock %}

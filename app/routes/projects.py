@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel
 
-from backend.database import get_db, Project, ProjectRevision, Job, JobItem
+from backend.database import get_db, Project, ProjectRevision, Job, JobItem, Prompt, PromptRevision
 from backend.parser import create_default_parser_config
 from backend.prompt import PromptTemplateParser
 from app.schemas.responses import JobResponse, JobItemResponse, ParameterDefinitionResponse
@@ -103,7 +103,10 @@ def create_project(request: ProjectCreate, db: Session = Depends(get_db)):
 
     Specification: docs/req.txt section 4.4.1
     Phase 2
+    NEW ARCHITECTURE: Also creates a default Prompt with initial revision.
     """
+    from datetime import datetime
+
     project = Project(
         name=request.name,
         description=request.description
@@ -112,16 +115,42 @@ def create_project(request: ProjectCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(project)
 
-    # Create initial revision
+    now = datetime.utcnow().isoformat()
+    initial_template = "プロンプトを入力してください / Enter your prompt here"
+    initial_parser_config = create_default_parser_config()
+
+    # Create initial revision (OLD - for backward compatibility)
     initial_revision = ProjectRevision(
         project_id=project.id,
         revision=1,
-        prompt_template="プロンプトを入力してください / Enter your prompt here",
-        parser_config=create_default_parser_config()
+        prompt_template=initial_template,
+        parser_config=initial_parser_config
     )
     db.add(initial_revision)
     db.commit()
     db.refresh(initial_revision)
+
+    # NEW ARCHITECTURE: Create default Prompt and PromptRevision
+    default_prompt = Prompt(
+        project_id=project.id,
+        name=f"{request.name} - Default",
+        description="Default prompt for this project",
+        created_at=now,
+        updated_at=now
+    )
+    db.add(default_prompt)
+    db.commit()
+    db.refresh(default_prompt)
+
+    prompt_revision = PromptRevision(
+        prompt_id=default_prompt.id,
+        revision=1,
+        prompt_template=initial_template,
+        parser_config=initial_parser_config,
+        created_at=now
+    )
+    db.add(prompt_revision)
+    db.commit()
 
     return ProjectResponse(
         id=project.id,
@@ -500,37 +529,66 @@ def update_latest_revision(
 
 
 @router.get("/api/projects/{project_id}/jobs", response_model=List[JobResponse])
-def get_project_jobs(project_id: int, limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
+def get_project_jobs(project_id: int, limit: int = 50, offset: int = 0, job_type: str = None, db: Session = Depends(get_db)):
     """Get job history for a specific project.
 
     Args:
         project_id: ID of the project
         limit: Maximum number of jobs to return (default 50)
         offset: Number of jobs to skip (default 0, for pagination)
+        job_type: Filter by job type ('single' or 'batch'). If None, returns all.
 
     Returns:
         List of jobs with their items, ordered by creation time (newest first)
 
     Phase 2: Support for multiple projects with job history
+    NEW ARCHITECTURE: Also includes jobs created with prompt_revision_id
     """
+    from sqlalchemy import or_, and_
+
     # Verify project exists
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Get all revisions for this project
-    revisions = db.query(ProjectRevision).filter(
+    # Get all project revision IDs (old architecture)
+    project_revisions = db.query(ProjectRevision).filter(
         ProjectRevision.project_id == project_id
     ).all()
+    project_revision_ids = [r.id for r in project_revisions]
 
-    if not revisions:
+    # Get all prompt revision IDs for prompts in this project (new architecture)
+    prompts = db.query(Prompt).filter(Prompt.project_id == project_id).all()
+    prompt_ids = [p.id for p in prompts]
+
+    prompt_revision_ids = []
+    if prompt_ids:
+        prompt_revisions = db.query(PromptRevision).filter(
+            PromptRevision.prompt_id.in_(prompt_ids)
+        ).all()
+        prompt_revision_ids = [pr.id for pr in prompt_revisions]
+
+    # Build filter conditions
+    conditions = []
+    if project_revision_ids:
+        conditions.append(Job.project_revision_id.in_(project_revision_ids))
+    if prompt_revision_ids:
+        conditions.append(Job.prompt_revision_id.in_(prompt_revision_ids))
+
+    # If no revisions at all, return empty
+    if not conditions:
         return []
 
-    revision_ids = [r.id for r in revisions]
+    # Build the main filter
+    main_filter = or_(*conditions)
 
-    # Get recent jobs for all revisions of this project
+    # Add job_type filter if specified
+    if job_type in ('single', 'batch'):
+        main_filter = and_(main_filter, Job.job_type == job_type)
+
+    # Get recent jobs matching the conditions
     recent_jobs_data = db.query(Job).filter(
-        Job.project_revision_id.in_(revision_ids)
+        main_filter
     ).order_by(Job.created_at.desc()).offset(offset).limit(limit).all()
 
     recent_jobs = []
@@ -552,6 +610,17 @@ def get_project_jobs(project_id: int, limit: int = 50, offset: int = 0, db: Sess
             for item in job_items
         ]
 
+        # Get prompt name from prompt_revision relationship
+        prompt_name = None
+        if job.prompt_revision_id:
+            prompt_revision = db.query(PromptRevision).filter(
+                PromptRevision.id == job.prompt_revision_id
+            ).first()
+            if prompt_revision:
+                prompt = db.query(Prompt).filter(Prompt.id == prompt_revision.prompt_id).first()
+                if prompt:
+                    prompt_name = prompt.name
+
         recent_jobs.append(JobResponse(
             id=job.id,
             job_type=job.job_type,
@@ -562,6 +631,7 @@ def get_project_jobs(project_id: int, limit: int = 50, offset: int = 0, db: Sess
             turnaround_ms=job.turnaround_ms,
             merged_csv_output=job.merged_csv_output,
             model_name=job.model_name,
+            prompt_name=prompt_name,
             items=items
         ))
 

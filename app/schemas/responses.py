@@ -43,6 +43,7 @@ class JobResponse(BaseModel):
     turnaround_ms: Optional[int]
     merged_csv_output: Optional[str] = None  # Merged CSV for batch jobs
     model_name: Optional[str] = None  # LLM model used for execution
+    prompt_name: Optional[str] = None  # Prompt name used for execution (NEW)
     items: List[JobItemResponse] = []
 
 

@@ -15,6 +15,7 @@ class Project(Base):
     """Project table - stores project metadata.
 
     Specification: docs/req.txt section 5.2
+    NEW ARCHITECTURE: Project contains multiple Prompts and Workflows
     """
     __tablename__ = "projects"
 
@@ -23,15 +24,20 @@ class Project(Base):
     description = Column(Text)
     created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
 
-    # Relationships
+    # Relationships - OLD (for backward compatibility during migration)
     revisions = relationship("ProjectRevision", back_populates="project", cascade="all, delete-orphan")
     datasets = relationship("Dataset", back_populates="project", cascade="all, delete-orphan")
+
+    # Relationships - NEW (for new architecture)
+    prompts = relationship("Prompt", back_populates="project", cascade="all, delete-orphan")
+    project_workflows = relationship("Workflow", back_populates="project", foreign_keys="Workflow.project_id")
 
 
 class ProjectRevision(Base):
     """Project revision table - stores prompt template and parser versions.
 
     Specification: docs/req.txt section 5.3
+    DEPRECATED: Use PromptRevision instead. Kept for backward compatibility.
     """
     __tablename__ = "project_revisions"
 
@@ -52,15 +58,70 @@ class ProjectRevision(Base):
     )
 
 
+# ========== NEW ARCHITECTURE MODELS (v3.0) ==========
+
+class Prompt(Base):
+    """Prompt definition within a project.
+
+    NEW ARCHITECTURE: A project can have multiple prompts.
+    Each prompt has its own revisions (versions).
+    """
+    __tablename__ = "prompts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    name = Column(Text, nullable=False)
+    description = Column(Text)
+    created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+    updated_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+
+    # Relationships
+    project = relationship("Project", back_populates="prompts")
+    revisions = relationship("PromptRevision", back_populates="prompt", cascade="all, delete-orphan")
+    workflow_steps = relationship("WorkflowStep", back_populates="prompt", foreign_keys="WorkflowStep.prompt_id")
+
+    __table_args__ = (
+        Index("idx_prompts_project", "project_id"),
+    )
+
+
+class PromptRevision(Base):
+    """Prompt revision - stores prompt template and parser versions.
+
+    NEW ARCHITECTURE: Replaces ProjectRevision.
+    Each prompt can have multiple revisions for version control.
+    """
+    __tablename__ = "prompt_revisions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    prompt_id = Column(Integer, ForeignKey("prompts.id"), nullable=False)
+    revision = Column(Integer, nullable=False)
+    prompt_template = Column(Text, nullable=False)  # Contains {{}} syntax
+    parser_config = Column(Text)  # JSON format
+    created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+
+    # Relationships
+    prompt = relationship("Prompt", back_populates="revisions")
+    prompt_jobs = relationship("Job", back_populates="prompt_revision", foreign_keys="Job.prompt_revision_id")
+
+    __table_args__ = (
+        Index("idx_prompt_revision", "prompt_id", "revision"),
+    )
+
+
 class Job(Base):
     """Job table - stores execution job metadata.
 
     Specification: docs/req.txt section 5.4
+    NEW ARCHITECTURE: Uses prompt_revision_id (project_revision_id kept for backward compatibility)
     """
     __tablename__ = "jobs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_revision_id = Column(Integer, ForeignKey("project_revisions.id"), nullable=False)
+    # OLD: kept for backward compatibility during migration
+    project_revision_id = Column(Integer, ForeignKey("project_revisions.id"), nullable=True)
+    # NEW: reference to prompt revision
+    prompt_revision_id = Column(Integer, ForeignKey("prompt_revisions.id"), nullable=True)
     job_type = Column(Text, nullable=False)  # 'single' or 'batch'
     status = Column(Text, nullable=False, default="pending")  # pending/running/done/error
     dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=True)  # Only for batch jobs
@@ -71,8 +132,10 @@ class Job(Base):
     turnaround_ms = Column(Integer, nullable=True)
     merged_csv_output = Column(Text, nullable=True)  # Merged CSV output for batch jobs
 
-    # Relationships
+    # Relationships - OLD (backward compatibility)
     project_revision = relationship("ProjectRevision", back_populates="jobs")
+    # Relationships - NEW
+    prompt_revision = relationship("PromptRevision", back_populates="prompt_jobs", foreign_keys=[prompt_revision_id])
     job_items = relationship("JobItem", back_populates="job", cascade="all, delete-orphan")
     dataset = relationship("Dataset", foreign_keys=[dataset_id])
 
@@ -139,3 +202,123 @@ class SystemSetting(Base):
 
     key = Column(Text, primary_key=True)
     value = Column(Text)
+
+
+# ========== WORKFLOW TABLES (v2.0) ==========
+
+class Workflow(Base):
+    """Workflow table - defines multi-step prompt pipelines.
+
+    NEW ARCHITECTURE: Workflows belong to a project and chain prompts together.
+    """
+    __tablename__ = "workflows"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # NEW: workflow belongs to a project
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)
+    name = Column(Text, nullable=False)
+    description = Column(Text)
+    created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+    updated_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+
+    # Relationships
+    project = relationship("Project", back_populates="project_workflows", foreign_keys=[project_id])
+    steps = relationship("WorkflowStep", back_populates="workflow", cascade="all, delete-orphan", order_by="WorkflowStep.step_order")
+    workflow_jobs = relationship("WorkflowJob", back_populates="workflow", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("idx_workflows_project", "project_id"),
+    )
+
+
+class WorkflowStep(Base):
+    """Workflow step - references a prompt within the workflow's project.
+
+    NEW ARCHITECTURE: Steps now reference prompts (not projects).
+    Each step can map inputs from previous step outputs using
+    the {{step_name.field}} syntax in input_mapping.
+    """
+    __tablename__ = "workflow_steps"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    workflow_id = Column(Integer, ForeignKey("workflows.id"), nullable=False)
+    step_order = Column(Integer, nullable=False)
+    step_name = Column(Text, nullable=False)  # e.g., "step1", "summarize"
+    # OLD: kept for backward compatibility during migration
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)
+    # NEW: reference to prompt within the project
+    prompt_id = Column(Integer, ForeignKey("prompts.id"), nullable=True)
+    execution_mode = Column(Text, nullable=False, default="sequential")  # sequential/parallel (future)
+    condition_config = Column(Text)  # JSON for conditional execution (future)
+    input_mapping = Column(Text)  # JSON: {"param_name": "{{step1.field_name}}"}
+    created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+
+    # Relationships - OLD (backward compatibility)
+    workflow = relationship("Workflow", back_populates="steps")
+    project = relationship("Project")
+    # Relationships - NEW
+    prompt = relationship("Prompt", back_populates="workflow_steps", foreign_keys=[prompt_id])
+
+    __table_args__ = (
+        Index("idx_workflow_steps_workflow", "workflow_id"),
+        Index("idx_workflow_steps_prompt", "prompt_id"),
+    )
+
+
+class WorkflowJob(Base):
+    """Workflow job - execution instance of a workflow.
+
+    Tracks overall workflow execution status and merged results.
+    """
+    __tablename__ = "workflow_jobs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    workflow_id = Column(Integer, ForeignKey("workflows.id"), nullable=False)
+    status = Column(Text, nullable=False, default="pending")  # pending/running/done/error
+    input_params = Column(Text)  # JSON: initial input parameters
+    merged_output = Column(Text)  # JSON: merged results from all steps
+    model_name = Column(Text)
+    created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+    started_at = Column(Text)
+    finished_at = Column(Text)
+    turnaround_ms = Column(Integer)
+
+    # Relationships
+    workflow = relationship("Workflow", back_populates="workflow_jobs")
+    step_results = relationship("WorkflowJobStep", back_populates="workflow_job", cascade="all, delete-orphan", order_by="WorkflowJobStep.step_order")
+
+    __table_args__ = (
+        Index("idx_workflow_jobs_workflow", "workflow_id"),
+        Index("idx_workflow_jobs_status", "status"),
+    )
+
+
+class WorkflowJobStep(Base):
+    """Individual step result within a workflow job.
+
+    Tracks execution of each step and stores output for next step.
+    """
+    __tablename__ = "workflow_job_steps"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    workflow_job_id = Column(Integer, ForeignKey("workflow_jobs.id"), nullable=False)
+    workflow_step_id = Column(Integer, ForeignKey("workflow_steps.id"), nullable=False)
+    job_id = Column(Integer, ForeignKey("jobs.id"))  # Links to regular Job for execution
+    step_order = Column(Integer, nullable=False)
+    status = Column(Text, nullable=False, default="pending")  # pending/running/done/error/skipped
+    input_params = Column(Text)  # JSON: input params after substitution
+    output_fields = Column(Text)  # JSON: parsed fields for next step
+    error_message = Column(Text)
+    created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+    started_at = Column(Text)
+    finished_at = Column(Text)
+    turnaround_ms = Column(Integer)
+
+    # Relationships
+    workflow_job = relationship("WorkflowJob", back_populates="step_results")
+    workflow_step = relationship("WorkflowStep")
+    job = relationship("Job")
+
+    __table_args__ = (
+        Index("idx_workflow_job_steps_job", "workflow_job_id"),
+    )

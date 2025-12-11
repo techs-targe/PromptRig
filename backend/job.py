@@ -6,6 +6,7 @@ Based on specification in docs/req.txt section 4.2.3 (実行処理) and 3.2 (通
 import json
 import logging
 import os
+import re
 import base64
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -14,11 +15,27 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
 import io
 
-from .database.models import Job, JobItem, ProjectRevision, Dataset, SystemSetting
+from .database.models import Job, JobItem, ProjectRevision, PromptRevision, Dataset, SystemSetting
 from .prompt import PromptTemplateParser
 from .llm import get_llm_client, LLMClient
 from .parser import ResponseParser
 from sqlalchemy import text
+
+
+def extract_csv_template_field_order(csv_template: str) -> List[str]:
+    """Extract field names from csv_template in their defined order.
+
+    Args:
+        csv_template: Template string like "$field1$,$field2$,$field3$"
+
+    Returns:
+        List of field names in template order, e.g., ["field1", "field2", "field3"]
+    """
+    if not csv_template:
+        return []
+    # Match $fieldname$ patterns and extract field names in order
+    pattern = r'\$([^$]+)\$'
+    return re.findall(pattern, csv_template)
 
 logger = logging.getLogger(__name__)
 
@@ -65,15 +82,17 @@ class JobManager:
 
     def create_single_job(
         self,
-        project_revision_id: int,
-        input_params: Dict[str, str],
+        project_revision_id: int = None,
+        prompt_revision_id: int = None,
+        input_params: Dict[str, str] = None,
         repeat: int = 1,
         model_name: str = None
     ) -> Job:
         """Create a single execution job.
 
         Args:
-            project_revision_id: ID of project revision to use
+            project_revision_id: ID of project revision to use (OLD architecture, for backward compatibility)
+            prompt_revision_id: ID of prompt revision to use (NEW architecture v3.0)
             input_params: Dictionary of parameter name -> value
             repeat: Number of times to repeat execution (default 1, max 10)
 
@@ -82,13 +101,17 @@ class JobManager:
 
         Specification: docs/req.txt section 4.2.3
         Phase 1: repeat は最大10程度に制限
+        NEW ARCHITECTURE: If prompt_revision_id is provided, uses PromptRevision.
         """
+        input_params = input_params or {}
+
         # Validate and normalize repeat count
         repeat = max(1, min(repeat, 10))
 
         # Create job
         job = Job(
             project_revision_id=project_revision_id,
+            prompt_revision_id=prompt_revision_id,
             job_type="single",
             status="pending",
             model_name=model_name
@@ -96,13 +119,22 @@ class JobManager:
         self.db.add(job)
         self.db.flush()  # Get job.id
 
-        # Get project revision to access prompt template
-        revision = self.db.query(ProjectRevision).filter(
-            ProjectRevision.id == project_revision_id
-        ).first()
-
-        if not revision:
-            raise ValueError(f"Project revision {project_revision_id} not found")
+        # Get revision to access prompt template
+        # NEW ARCHITECTURE: Use PromptRevision if prompt_revision_id is provided
+        if prompt_revision_id:
+            revision = self.db.query(PromptRevision).filter(
+                PromptRevision.id == prompt_revision_id
+            ).first()
+            if not revision:
+                raise ValueError(f"Prompt revision {prompt_revision_id} not found")
+        elif project_revision_id:
+            revision = self.db.query(ProjectRevision).filter(
+                ProjectRevision.id == project_revision_id
+            ).first()
+            if not revision:
+                raise ValueError(f"Project revision {project_revision_id} not found")
+        else:
+            raise ValueError("Either project_revision_id or prompt_revision_id must be provided")
 
         # Create job items (one per repeat)
         allowed_dirs = self._get_allowed_image_directories()  # Also used for TEXTFILEPATH
@@ -154,6 +186,29 @@ class JobManager:
         # Record start time for accurate turnaround calculation
         start_time = datetime.utcnow()
 
+        # Check if job was already cancelled before starting execution
+        # IMPORTANT: Must use a NEW session to see changes from other sessions (cancel request)
+        from backend.database import SessionLocal
+        pre_check_db = SessionLocal()
+        try:
+            pre_status_result = pre_check_db.execute(
+                text("SELECT status FROM jobs WHERE id = :job_id"),
+                {"job_id": job.id}
+            ).fetchone()
+            pre_status = pre_status_result[0] if pre_status_result else None
+        finally:
+            pre_check_db.close()
+
+        if pre_status == "cancelled":
+            # Job was cancelled before execution started - preserve cancelled status
+            logger.info(f"[JOB-SKIP] Job {job.id} already cancelled, skipping execution")
+            job.status = "cancelled"  # Ensure status is set (in-memory object may have stale status)
+            job.finished_at = start_time.isoformat()
+            job.turnaround_ms = 0
+            self.db.commit()
+            self.db.refresh(job)
+            return job
+
         # Update job status
         job.status = "running"
         job.started_at = start_time.isoformat()
@@ -184,9 +239,15 @@ class JobManager:
         error_count = 0
 
         # Get revision for parser (fetch once, use for all items)
-        revision = self.db.query(ProjectRevision).filter(
-            ProjectRevision.id == job.project_revision_id
-        ).first()
+        # NEW ARCHITECTURE: Use PromptRevision if prompt_revision_id is set
+        if job.prompt_revision_id:
+            revision = self.db.query(PromptRevision).filter(
+                PromptRevision.id == job.prompt_revision_id
+            ).first()
+        else:
+            revision = self.db.query(ProjectRevision).filter(
+                ProjectRevision.id == job.project_revision_id
+            ).first()
 
         if parallelism == 1:
             # Serial execution (original behavior)
@@ -195,8 +256,15 @@ class JobManager:
             # Parallel execution
             error_count = self._execute_items_parallel(job_items, llm_client, revision, temperature, parallelism, model_params)
 
-        # Merge CSV outputs for batch jobs and repeated single executions (Phase 2)
-        if job.job_type == "batch" or (job.job_type == "single" and len(job_items) > 1):
+        # Merge CSV outputs for batch jobs and single executions
+        # Phase 2: batch and repeated single executions
+        # Phase 3: Also for single item when include_csv_header is True (to show header)
+        should_merge_csv = (
+            job.job_type == "batch" or
+            (job.job_type == "single" and len(job_items) > 1) or
+            (job.job_type == "single" and include_csv_header)  # Include header even for 1 item
+        )
+        if should_merge_csv:
             # Expire session cache to ensure we get fresh data from database
             self.db.expire_all()
             # Re-fetch job items to get updated status and parsed_response after execution
@@ -208,10 +276,33 @@ class JobManager:
         end_time = datetime.utcnow()
         actual_turnaround_ms = int((end_time - start_time).total_seconds() * 1000)
 
-        # Update job status
+        # Check if job was cancelled during execution
+        # (cancel_pending_items may have set status to "cancelled" in another session/thread)
+        # IMPORTANT: Must use a NEW session to see changes from other sessions
+        # SQLite transaction isolation prevents seeing uncommitted changes from other sessions
+        from backend.database import SessionLocal
+        check_db = SessionLocal()
+        try:
+            current_status_result = check_db.execute(
+                text("SELECT status FROM jobs WHERE id = :job_id"),
+                {"job_id": job.id}
+            ).fetchone()
+            current_status = current_status_result[0] if current_status_result else None
+        finally:
+            check_db.close()
+        logger.info(f"[JOB-STATUS] Job {job.id} current DB status: {current_status}")
+
+        # Update job completion info
         job.finished_at = end_time.isoformat()
         job.turnaround_ms = actual_turnaround_ms  # Real elapsed time, not sum of individual times
-        job.status = "error" if error_count > 0 else "done"
+
+        # Preserve "cancelled" status if job was cancelled during execution
+        if current_status != "cancelled":
+            job.status = "error" if error_count > 0 else "done"
+            logger.info(f"[JOB-STATUS] Job {job.id} setting status to: {job.status}")
+        else:
+            logger.info(f"[JOB-STATUS] Job {job.id} preserving cancelled status")
+
         self.db.commit()
         self.db.refresh(job)
 
@@ -830,12 +921,47 @@ class JobManager:
         """
         csv_lines = []
         header_added = False
+        csv_template_field_order = None
 
         # Sort job_items by ID to ensure consistent order, especially for parallel execution
         # This guarantees that CSV rows appear in the same order as they were created
         sorted_items = sorted(job_items, key=lambda x: x.id)
 
         logger.info(f"CSV merge: Processing {len(sorted_items)} items, include_header={include_csv_header}")
+
+        # Try to get csv_template field order from the job's revision
+        if sorted_items:
+            first_item = sorted_items[0]
+            job = self.db.query(Job).filter(Job.id == first_item.job_id).first()
+            if job:
+                parser_config_str = None
+                # Try prompt revision first (new architecture)
+                if job.prompt_revision_id:
+                    prompt_rev = self.db.query(PromptRevision).filter(
+                        PromptRevision.id == job.prompt_revision_id
+                    ).first()
+                    if prompt_rev:
+                        parser_config_str = prompt_rev.parser_config
+                # Fall back to project revision (old architecture)
+                elif job.project_revision_id:
+                    project_rev = self.db.query(ProjectRevision).filter(
+                        ProjectRevision.id == job.project_revision_id
+                    ).first()
+                    if project_rev:
+                        parser_config_str = project_rev.parser_config
+
+                if parser_config_str:
+                    try:
+                        parser_config = json.loads(parser_config_str)
+                        # Handle double-encoded JSON
+                        if isinstance(parser_config, str):
+                            parser_config = json.loads(parser_config)
+                        csv_template = parser_config.get("csv_template", "")
+                        if csv_template:
+                            csv_template_field_order = extract_csv_template_field_order(csv_template)
+                            logger.info(f"CSV merge: Extracted field order from csv_template: {csv_template_field_order}")
+                    except (json.JSONDecodeError, TypeError) as e:
+                        logger.warning(f"CSV merge: Could not parse parser_config: {e}")
 
         for item in sorted_items:
             # Skip items that are not successfully completed
@@ -871,8 +997,14 @@ class JobManager:
                 if not header_added and include_csv_header:
                     fields = parsed.get("fields", {})
                     if fields:
-                        # Generate header from field names in order
-                        header_line = ",".join(fields.keys())
+                        # Use csv_template field order if available, otherwise fall back to fields.keys()
+                        if csv_template_field_order:
+                            # Filter to only include fields that actually exist
+                            ordered_fields = [f for f in csv_template_field_order if f in fields]
+                            header_line = ",".join(ordered_fields)
+                        else:
+                            # Fallback: use fields.keys() order (may not match csv_template)
+                            header_line = ",".join(fields.keys())
                         csv_lines.append(header_line)
                         header_added = True
                         logger.info(f"CSV merge: Added header: {header_line}")
@@ -931,14 +1063,16 @@ class JobManager:
 
     def create_batch_job(
         self,
-        project_revision_id: int,
-        dataset_id: int,
+        project_revision_id: int = None,
+        prompt_revision_id: int = None,
+        dataset_id: int = None,
         model_name: str = None
     ) -> Job:
         """Create a batch execution job from dataset.
 
         Args:
-            project_revision_id: ID of project revision to use
+            project_revision_id: ID of project revision to use (old architecture)
+            prompt_revision_id: ID of prompt revision to use (new architecture)
             dataset_id: ID of dataset to process
             model_name: Name of LLM model to use (optional)
 
@@ -946,23 +1080,38 @@ class JobManager:
             Created Job object (not yet executed)
 
         Specification: docs/req.txt section 4.3.2 (バッチ実行フロー)
-        Phase 2
+        Phase 2, NEW ARCHITECTURE v3.0
         """
         # Get dataset
         dataset = self.db.query(Dataset).filter(Dataset.id == dataset_id).first()
         if not dataset:
             raise ValueError(f"Dataset {dataset_id} not found")
 
-        # Get project revision
-        revision = self.db.query(ProjectRevision).filter(
-            ProjectRevision.id == project_revision_id
-        ).first()
-        if not revision:
-            raise ValueError(f"Project revision {project_revision_id} not found")
+        # Get revision (new architecture first, then fallback)
+        prompt_template = None
+        if prompt_revision_id:
+            # NEW ARCHITECTURE: Use PromptRevision
+            revision = self.db.query(PromptRevision).filter(
+                PromptRevision.id == prompt_revision_id
+            ).first()
+            if not revision:
+                raise ValueError(f"Prompt revision {prompt_revision_id} not found")
+            prompt_template = revision.prompt_template
+        elif project_revision_id:
+            # Fallback: Use ProjectRevision (backward compatibility)
+            revision = self.db.query(ProjectRevision).filter(
+                ProjectRevision.id == project_revision_id
+            ).first()
+            if not revision:
+                raise ValueError(f"Project revision {project_revision_id} not found")
+            prompt_template = revision.prompt_template
+        else:
+            raise ValueError("Either project_revision_id or prompt_revision_id must be provided")
 
         # Create job
         job = Job(
             project_revision_id=project_revision_id,
+            prompt_revision_id=prompt_revision_id,
             job_type="batch",
             status="pending",
             dataset_id=dataset_id,
@@ -1000,7 +1149,7 @@ class JobManager:
 
             # Substitute parameters into template
             raw_prompt = self.parser.substitute_parameters(
-                revision.prompt_template,
+                prompt_template,
                 input_params,
                 allowed_dirs,
                 text_extensions
@@ -1092,7 +1241,7 @@ class JobManager:
 
         self.db.commit()
 
-        # Update job status if needed
+        # Update job status
         remaining_pending = self.db.query(JobItem).filter(
             JobItem.job_id == job_id,
             JobItem.status == "pending"
@@ -1103,13 +1252,20 @@ class JobManager:
             JobItem.status == "running"
         ).count()
 
-        # If no more pending or running items, mark job as done
-        if remaining_pending == 0 and remaining_running == 0 and job.status == "running":
+        # Always mark job as cancelled when cancel is requested
+        # Running items will complete, but job status remains cancelled
+        job.status = "cancelled"
+        logger.info(f"[JOB-CANCEL] Job {job_id} status set to 'cancelled' (running={remaining_running}, pending={remaining_pending})")
+
+        # Only set finished_at if no items are still running
+        if remaining_pending == 0 and remaining_running == 0:
             job.finished_at = datetime.utcnow().isoformat()
-            self.db.commit()
+
+        self.db.commit()
 
         return {
             "job_id": job_id,
             "cancelled_count": cancelled_count,
+            "job_status": job.status,
             "message": f"Cancelled {cancelled_count} pending item(s)"
         }
