@@ -21,20 +21,24 @@ router = APIRouter()
 class WorkflowStepCreate(BaseModel):
     """Request model for creating a workflow step."""
     step_name: str
-    project_id: int
+    step_type: str = "prompt"  # prompt/set/if/elif/else/endif/loop/endloop/foreach/endforeach/break/continue
+    project_id: Optional[int] = None  # Optional for non-prompt steps
     prompt_id: Optional[int] = None
     step_order: Optional[int] = None
     input_mapping: Optional[Dict[str, str]] = None
+    condition_config: Optional[Dict[str, Any]] = None  # Control flow configuration
     execution_mode: str = "sequential"
 
 
 class WorkflowStepUpdate(BaseModel):
     """Request model for updating a workflow step."""
     step_name: Optional[str] = None
+    step_type: Optional[str] = None  # prompt/set/if/elif/else/endif/loop/endloop/foreach/endforeach/break/continue
     project_id: Optional[int] = None
     prompt_id: Optional[int] = None
     step_order: Optional[int] = None
     input_mapping: Optional[Dict[str, str]] = None
+    condition_config: Optional[Dict[str, Any]] = None  # Control flow configuration
 
 
 class WorkflowCreate(BaseModel):
@@ -42,6 +46,7 @@ class WorkflowCreate(BaseModel):
     name: str
     description: str = ""
     project_id: Optional[int] = None
+    auto_context: bool = False  # Auto-generate CONTEXT from previous steps
     steps: List[WorkflowStepCreate] = []
 
 
@@ -49,6 +54,7 @@ class WorkflowUpdate(BaseModel):
     """Request model for updating a workflow."""
     name: Optional[str] = None
     description: Optional[str] = None
+    auto_context: Optional[bool] = None  # Auto-generate CONTEXT from previous steps
 
 
 class WorkflowStepResponse(BaseModel):
@@ -56,12 +62,14 @@ class WorkflowStepResponse(BaseModel):
     id: int
     step_order: int
     step_name: str
-    project_id: int
-    project_name: str
+    step_type: str = "prompt"  # prompt/set/if/elif/else/endif/loop/endloop/foreach/endforeach/break/continue
+    project_id: Optional[int] = None
+    project_name: Optional[str] = None
     prompt_id: Optional[int] = None
     prompt_name: Optional[str] = None
     execution_mode: str
     input_mapping: Optional[Dict[str, str]] = None
+    condition_config: Optional[Dict[str, Any]] = None  # Control flow configuration
 
 
 class WorkflowResponse(BaseModel):
@@ -70,6 +78,7 @@ class WorkflowResponse(BaseModel):
     name: str
     description: str
     project_id: Optional[int] = None
+    auto_context: bool = False  # Auto-generate CONTEXT from previous steps
     created_at: str
     updated_at: str
     steps: List[WorkflowStepResponse] = []
@@ -95,6 +104,7 @@ class WorkflowJobResponse(BaseModel):
     status: str
     input_params: Optional[Dict[str, Any]] = None
     merged_output: Optional[Dict[str, Any]] = None
+    merged_csv_output: Optional[str] = None  # CSV output merged from all steps
     model_name: Optional[str] = None
     created_at: str
     started_at: Optional[str] = None
@@ -119,6 +129,7 @@ def _workflow_to_response(workflow: Workflow, db: Session) -> WorkflowResponse:
         name=workflow.name,
         description=workflow.description or "",
         project_id=workflow.project_id,
+        auto_context=bool(workflow.auto_context),
         created_at=workflow.created_at,
         updated_at=workflow.updated_at,
         steps=[_step_to_response(s, db) for s in workflow.steps]
@@ -127,7 +138,7 @@ def _workflow_to_response(workflow: Workflow, db: Session) -> WorkflowResponse:
 
 def _step_to_response(step: WorkflowStep, db: Session) -> WorkflowStepResponse:
     """Convert WorkflowStep model to response."""
-    project = db.query(Project).filter(Project.id == step.project_id).first()
+    project = db.query(Project).filter(Project.id == step.project_id).first() if step.project_id else None
     prompt = db.query(Prompt).filter(Prompt.id == step.prompt_id).first() if step.prompt_id else None
     input_mapping = None
     if step.input_mapping:
@@ -135,16 +146,24 @@ def _step_to_response(step: WorkflowStep, db: Session) -> WorkflowStepResponse:
             input_mapping = json.loads(step.input_mapping)
         except:
             pass
+    condition_config = None
+    if step.condition_config:
+        try:
+            condition_config = json.loads(step.condition_config)
+        except:
+            pass
     return WorkflowStepResponse(
         id=step.id,
         step_order=step.step_order,
         step_name=step.step_name,
+        step_type=step.step_type or "prompt",
         project_id=step.project_id,
-        project_name=project.name if project else "Unknown",
+        project_name=project.name if project else None,
         prompt_id=step.prompt_id,
         prompt_name=prompt.name if prompt else None,
         execution_mode=step.execution_mode,
-        input_mapping=input_mapping
+        input_mapping=input_mapping,
+        condition_config=condition_config
     )
 
 
@@ -173,6 +192,7 @@ def _job_to_response(job: WorkflowJob, db: Session) -> WorkflowJobResponse:
         status=job.status,
         input_params=json.loads(job.input_params) if job.input_params else None,
         merged_output=json.loads(job.merged_output) if job.merged_output else None,
+        merged_csv_output=job.merged_csv_output,
         model_name=job.model_name,
         created_at=job.created_at,
         started_at=job.started_at,
@@ -233,7 +253,12 @@ def create_workflow(request: WorkflowCreate, db: Session = Depends(get_db)):
     """Create a new workflow with steps."""
     try:
         manager = WorkflowManager(db)
-        workflow = manager.create_workflow(request.name, request.description, request.project_id)
+        workflow = manager.create_workflow(
+            request.name,
+            request.description,
+            request.project_id,
+            auto_context=request.auto_context
+        )
 
         for step_data in request.steps:
             manager.add_step(
@@ -276,7 +301,8 @@ def update_workflow(
         workflow = manager.update_workflow(
             workflow_id,
             name=request.name,
-            description=request.description
+            description=request.description,
+            auto_context=request.auto_context
         )
         return _workflow_to_response(workflow, db)
 
@@ -300,6 +326,63 @@ def delete_workflow(workflow_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to delete workflow: {str(e)}")
 
 
+class WorkflowCloneRequest(BaseModel):
+    """Request model for cloning a workflow."""
+    new_name: str
+
+
+@router.post("/api/workflows/{workflow_id}/clone", response_model=WorkflowResponse)
+def clone_workflow(
+    workflow_id: int,
+    request: WorkflowCloneRequest,
+    db: Session = Depends(get_db)
+):
+    """Clone a workflow with a new name (Save As).
+
+    Creates a copy of the workflow including all steps.
+    """
+    # Get source workflow
+    source_workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+    if not source_workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    try:
+        manager = WorkflowManager(db)
+
+        # Create new workflow with same settings
+        new_workflow = manager.create_workflow(
+            name=request.new_name,
+            description=source_workflow.description,
+            project_id=source_workflow.project_id,
+            auto_context=source_workflow.auto_context
+        )
+
+        # Copy all steps
+        for step in source_workflow.steps:
+            input_mapping = None
+            if step.input_mapping:
+                try:
+                    input_mapping = json.loads(step.input_mapping)
+                except:
+                    pass
+
+            manager.add_step(
+                workflow_id=new_workflow.id,
+                step_name=step.step_name,
+                project_id=step.project_id,
+                prompt_id=step.prompt_id,
+                step_order=step.step_order,
+                input_mapping=input_mapping,
+                execution_mode=step.execution_mode
+            )
+
+        db.refresh(new_workflow)
+        return _workflow_to_response(new_workflow, db)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clone workflow: {str(e)}")
+
+
 # ========== Workflow Step Endpoints ==========
 
 @router.post("/api/workflows/{workflow_id}/steps", response_model=WorkflowStepResponse)
@@ -318,7 +401,9 @@ def add_workflow_step(
             prompt_id=request.prompt_id,
             step_order=request.step_order,
             input_mapping=request.input_mapping,
-            execution_mode=request.execution_mode
+            execution_mode=request.execution_mode,
+            step_type=request.step_type,
+            condition_config=request.condition_config
         )
         return _step_to_response(step, db)
 
@@ -352,7 +437,9 @@ def update_workflow_step(
             project_id=request.project_id,
             prompt_id=request.prompt_id,
             step_order=request.step_order,
-            input_mapping=request.input_mapping
+            input_mapping=request.input_mapping,
+            step_type=request.step_type,
+            condition_config=request.condition_config
         )
         return _step_to_response(updated_step, db)
 
@@ -462,6 +549,31 @@ def list_workflow_jobs(
     ).order_by(WorkflowJob.created_at.desc()).limit(limit).all()
 
     return [_job_to_response(j, db) for j in jobs]
+
+
+@router.post("/api/workflow-jobs/{job_id}/cancel")
+def cancel_workflow_job(job_id: int, db: Session = Depends(get_db)):
+    """Cancel a workflow job that is stuck in running/pending state.
+
+    This marks the job as 'cancelled' and is useful for cleaning up
+    jobs that were orphaned due to server restart.
+    """
+    job = db.query(WorkflowJob).filter(WorkflowJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Workflow job not found")
+
+    if job.status not in ["pending", "running"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot cancel job with status '{job.status}'. Only pending/running jobs can be cancelled."
+        )
+
+    job.status = "cancelled"
+    job.finished_at = datetime.utcnow().isoformat()
+    job.merged_output = json.dumps({"_error": "Job cancelled by user"}, ensure_ascii=False)
+    db.commit()
+
+    return {"success": True, "message": f"Workflow job {job_id} cancelled"}
 
 
 # ========== Variable Picker API ==========
@@ -664,3 +776,190 @@ def get_workflow_variables(db: Session = Depends(get_db)):
                 ))
 
     return WorkflowVariablesResponse(categories=categories)
+
+
+# ========== String Functions Endpoint ==========
+
+class FunctionInfo(BaseModel):
+    """Information about a string function."""
+    name: str
+    args: str  # Number or range of arguments (e.g., "1", "2", "2-3", "2+")
+    description: str
+    example: str
+
+
+@router.get("/functions")
+async def get_string_functions():
+    """Get available string manipulation functions for workflow formulas.
+
+    Returns a list of all available functions that can be used in
+    variable assignments and value fields.
+    """
+    functions = []
+
+    for func_name, info in WorkflowManager.STRING_FUNCTIONS.items():
+        functions.append(FunctionInfo(
+            name=func_name,
+            args=str(info['args']),
+            description=info['desc'],
+            example=info['example']
+        ))
+
+    # Sort by function name
+    functions.sort(key=lambda f: f.name)
+
+    return {"functions": functions}
+
+
+# ========== JSON Export/Import Endpoints ==========
+
+class WorkflowExportStep(BaseModel):
+    """Exported workflow step structure."""
+    step_order: int
+    step_name: str
+    step_type: str = "prompt"
+    prompt_name: Optional[str] = None  # Reference by name instead of ID
+    project_name: Optional[str] = None  # For backward compatibility
+    execution_mode: str = "sequential"
+    input_mapping: Optional[Dict[str, str]] = None
+    condition_config: Optional[Dict[str, Any]] = None
+
+
+class WorkflowExport(BaseModel):
+    """Exported workflow structure."""
+    version: str = "1.0"
+    name: str
+    description: str = ""
+    auto_context: bool = False
+    steps: List[WorkflowExportStep] = []
+
+
+class WorkflowImportRequest(BaseModel):
+    """Request model for importing a workflow from JSON."""
+    workflow_json: WorkflowExport
+    new_name: Optional[str] = None  # Override name if provided
+
+
+@router.get("/api/workflows/{workflow_id}/export", response_model=WorkflowExport)
+def export_workflow(workflow_id: int, db: Session = Depends(get_db)):
+    """Export a workflow as JSON.
+
+    Exports the workflow structure with prompt references by name,
+    making it portable for import into other instances.
+    """
+    workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    exported_steps = []
+    for step in workflow.steps:
+        # Get prompt name if exists
+        prompt_name = None
+        if step.prompt_id:
+            prompt = db.query(Prompt).filter(Prompt.id == step.prompt_id).first()
+            if prompt:
+                prompt_name = prompt.name
+
+        # Get project name if exists (backward compatibility)
+        project_name = None
+        if step.project_id:
+            project = db.query(Project).filter(Project.id == step.project_id).first()
+            if project:
+                project_name = project.name
+
+        # Parse JSON fields
+        input_mapping = None
+        if step.input_mapping:
+            try:
+                input_mapping = json.loads(step.input_mapping)
+            except:
+                pass
+
+        condition_config = None
+        if step.condition_config:
+            try:
+                condition_config = json.loads(step.condition_config)
+            except:
+                pass
+
+        exported_steps.append(WorkflowExportStep(
+            step_order=step.step_order,
+            step_name=step.step_name,
+            step_type=step.step_type or "prompt",
+            prompt_name=prompt_name,
+            project_name=project_name,
+            execution_mode=step.execution_mode,
+            input_mapping=input_mapping,
+            condition_config=condition_config
+        ))
+
+    return WorkflowExport(
+        version="1.0",
+        name=workflow.name,
+        description=workflow.description or "",
+        auto_context=bool(workflow.auto_context),
+        steps=exported_steps
+    )
+
+
+@router.post("/api/workflows/import", response_model=WorkflowResponse)
+def import_workflow(request: WorkflowImportRequest, db: Session = Depends(get_db)):
+    """Import a workflow from JSON.
+
+    Creates a new workflow from the exported JSON structure.
+    Resolves prompt references by name.
+    """
+    try:
+        wf_data = request.workflow_json
+
+        # Use override name or original name
+        workflow_name = request.new_name or wf_data.name
+
+        # Create workflow
+        workflow = Workflow(
+            name=workflow_name,
+            description=wf_data.description,
+            auto_context=1 if wf_data.auto_context else 0,
+            created_at=datetime.utcnow().isoformat(),
+            updated_at=datetime.utcnow().isoformat()
+        )
+        db.add(workflow)
+        db.flush()  # Get workflow ID
+
+        # Create steps
+        for step_data in wf_data.steps:
+            # Resolve prompt by name
+            prompt_id = None
+            if step_data.prompt_name:
+                prompt = db.query(Prompt).filter(Prompt.name == step_data.prompt_name).first()
+                if prompt:
+                    prompt_id = prompt.id
+
+            # Resolve project by name (backward compatibility)
+            project_id = None
+            if step_data.project_name:
+                project = db.query(Project).filter(Project.name == step_data.project_name).first()
+                if project:
+                    project_id = project.id
+
+            step = WorkflowStep(
+                workflow_id=workflow.id,
+                step_order=step_data.step_order,
+                step_name=step_data.step_name,
+                step_type=step_data.step_type,
+                prompt_id=prompt_id,
+                project_id=project_id,
+                execution_mode=step_data.execution_mode,
+                input_mapping=json.dumps(step_data.input_mapping) if step_data.input_mapping else None,
+                condition_config=json.dumps(step_data.condition_config) if step_data.condition_config else None
+            )
+            db.add(step)
+
+        db.commit()
+        db.refresh(workflow)
+
+        return _workflow_to_response(workflow, db)
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Import failed: {str(e)}")

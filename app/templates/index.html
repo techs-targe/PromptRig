@@ -237,30 +237,39 @@
 
     <!-- Workflows Tab -->
     <div id="tab-workflows" class="tab-content">
-        <div class="section">
-            <h2>ワークフロー / Workflows</h2>
-            <p class="section-description">複数のプロンプトを連結して実行できます / Chain multiple prompts together</p>
-
-            <!-- Project Selector for Workflows -->
-            <div class="form-group" style="margin-bottom: 1rem;">
-                <label style="font-weight: bold;">プロジェクト選択 / Select Project:</label>
-                <select id="workflow-project-select" onchange="onWorkflowProjectChange()" style="width: 300px;">
-                    <option value="">-- プロジェクトを選択 / Select Project --</option>
-                    <!-- Project options will be populated by JavaScript -->
-                </select>
+        <!-- Workflow Header Section -->
+        <div class="workflow-header-section">
+            <div class="workflow-header-top">
+                <div class="workflow-header-title">
+                    <h2>ワークフロー / Workflows</h2>
+                    <p class="workflow-header-desc">複数のプロンプトを連結して実行</p>
+                </div>
+                <div class="workflow-header-actions">
+                    <button id="btn-create-workflow" class="btn btn-primary btn-create-workflow" onclick="showCreateWorkflowForm()" disabled>
+                        <span class="btn-icon">+</span> 新規作成
+                    </button>
+                    <button id="btn-import-workflow" class="btn btn-secondary" onclick="showImportWorkflowDialog()">
+                        <span class="btn-icon">📥</span> JSONインポート
+                    </button>
+                </div>
             </div>
-
-            <button id="btn-create-workflow" class="btn btn-primary" onclick="showCreateWorkflowForm()" disabled>
-                新規ワークフロー作成 / Create Workflow
-            </button>
-            <span id="workflow-project-hint" class="help-text" style="margin-left: 1rem;">
-                ※ プロジェクトを選択してください
-            </span>
+            <div class="workflow-project-selector">
+                <label class="workflow-project-label">
+                    <span class="label-icon">📁</span>
+                    プロジェクト
+                </label>
+                <select id="workflow-project-select" class="workflow-project-dropdown" onchange="onWorkflowProjectChange()">
+                    <option value="">-- 選択してください --</option>
+                </select>
+                <span id="workflow-project-hint" class="workflow-project-hint">
+                    ※ プロジェクトを選択すると作成可能になります
+                </span>
+            </div>
         </div>
 
         <div class="main-content">
             <div class="left-pane">
-                <h3>ワークフロー一覧 / Workflow List</h3>
+                <h3 class="workflow-list-title">一覧</h3>
                 <div id="workflow-list" class="history-list">
                     <!-- Workflow list will be rendered here -->
                 </div>
@@ -268,34 +277,51 @@
 
             <div class="right-pane">
                 <!-- Workflow Editor (hidden by default) -->
-                <div id="workflow-editor" class="section" style="display: none;">
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <h3 id="workflow-editor-title">ワークフロー作成 / Create Workflow</h3>
-                        <button class="btn btn-secondary" onclick="hideWorkflowEditor()">✕ 閉じる</button>
+                <div id="workflow-editor" class="workflow-editor-panel" style="display: none;">
+                    <div class="workflow-editor-header">
+                        <h3 id="workflow-editor-title">ワークフロー作成</h3>
+                        <span id="workflow-editor-id-info" style="color: #aaa; font-size: 0.75rem; margin-left: 0.5rem;"></span>
+                        <button class="btn-close-editor" onclick="hideWorkflowEditor()" title="閉じる">×</button>
                     </div>
-                    <form id="workflow-form" onsubmit="event.preventDefault(); saveWorkflow();">
-                        <div class="form-group">
-                            <label>名前 / Name:</label>
-                            <input type="text" id="workflow-name" required placeholder="ワークフロー名">
-                        </div>
-                        <div class="form-group">
-                            <label>説明 / Description:</label>
-                            <textarea id="workflow-description" rows="2" placeholder="ワークフローの説明（任意）"></textarea>
+                    <form id="workflow-form" class="workflow-editor-form" onsubmit="event.preventDefault(); saveWorkflow();">
+                        <div class="workflow-basic-info">
+                            <div class="form-group">
+                                <label>名前</label>
+                                <input type="text" id="workflow-name" required placeholder="ワークフロー名を入力">
+                            </div>
+                            <div class="form-group">
+                                <label>説明 <span class="optional-label">(任意)</span></label>
+                                <textarea id="workflow-description" rows="2" placeholder="このワークフローの説明"></textarea>
+                            </div>
+                            <div class="form-group" style="margin-top: 0.75rem;">
+                                <label class="checkbox-label" style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                                    <input type="checkbox" id="workflow-auto-context" style="width: 18px; height: 18px;">
+                                    <span>自動CONTEXT / Auto-Context</span>
+                                    <span class="optional-label" style="font-weight: normal;">(前ステップのUSER/ASSISTANTをCONTEXTに自動追加)</span>
+                                </label>
+                            </div>
                         </div>
 
-                        <h4>ステップ / Steps</h4>
-                        <p class="help-text">前のステップの出力を使用: <code>{% raw %}{{step1.field_name}}{% endraw %}</code></p>
-                        <div id="workflow-steps-container">
-                            <!-- Dynamic step forms will be added here -->
+                        <div class="workflow-steps-section">
+                            <div class="steps-section-header">
+                                <h4>ステップ構成</h4>
+                                <span class="steps-hint">前のステップの出力: <code>{% raw %}{{step1.field}}{% endraw %}</code></span>
+                            </div>
+                            <div id="workflow-steps-container">
+                                <!-- Dynamic step forms will be added here -->
+                            </div>
+                            <button type="button" class="btn-add-step" onclick="addWorkflowStep()">
+                                <span class="btn-icon">+</span> ステップ追加
+                            </button>
                         </div>
-                        <button type="button" class="btn btn-secondary" onclick="addWorkflowStep()">
-                            + ステップ追加 / Add Step
-                        </button>
 
-                        <div class="form-actions" style="margin-top: 1rem;">
+                        <div class="workflow-form-actions">
                             <input type="hidden" id="workflow-id" value="">
-                            <button type="submit" class="btn btn-primary">保存 / Save</button>
-                            <button type="button" class="btn btn-secondary" onclick="hideWorkflowEditor()">キャンセル / Cancel</button>
+                            <button type="submit" class="btn btn-primary">保存</button>
+                            <button type="button" class="btn btn-secondary" onclick="saveWorkflowAs()" id="btn-workflow-save-as" style="display: none;">別名で保存</button>
+                            <button type="button" class="btn btn-secondary" onclick="exportWorkflow()" id="btn-workflow-export" style="display: none;">JSONエクスポート</button>
+                            <button type="button" class="btn btn-secondary" onclick="hideWorkflowEditor()">キャンセル</button>
+                            <button type="button" class="btn btn-danger" onclick="deleteWorkflow()" id="btn-workflow-delete" style="display: none;">削除</button>
                         </div>
                     </form>
                 </div>
@@ -565,6 +591,47 @@
                     </div>
                 </div>
 
+                <!-- Tag Management Card -->
+                <div class="settings-card settings-card-wide">
+                    <div class="settings-card-header">
+                        <span class="settings-card-icon">🏷️</span>
+                        <h3>タグ管理 / Tag Management</h3>
+                    </div>
+                    <div class="settings-card-body">
+                        <p class="settings-hint" style="margin-bottom: 1rem;">
+                            プロンプトにタグを付けてアクセス制御を行います。モデルごとに許可タグを設定できます。
+                        </p>
+
+                        <!-- Tag List -->
+                        <div class="tag-management-section">
+                            <div class="tag-section-header">
+                                <h4>登録タグ一覧</h4>
+                                <button class="btn btn-primary btn-sm" onclick="showCreateTagModal()">
+                                    + 新規タグ作成
+                                </button>
+                            </div>
+                            <div id="tags-list" class="tags-list">
+                                <p class="loading">Loading...</p>
+                            </div>
+                        </div>
+
+                        <div class="settings-divider"></div>
+
+                        <!-- Model Tag Configuration -->
+                        <div class="tag-management-section">
+                            <div class="tag-section-header">
+                                <h4>モデル別許可タグ設定</h4>
+                            </div>
+                            <p class="settings-hint" style="margin-bottom: 0.75rem;">
+                                各モデルで実行可能なプロンプトのタグを設定します。設定されていないモデルはALLタグのみ許可されます。
+                            </p>
+                            <div id="model-tags-config" class="model-tags-config">
+                                <p class="loading">Loading...</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Database Card -->
                 <div class="settings-card settings-card-compact">
                     <div class="settings-card-header">
@@ -619,27 +686,85 @@
 
 <!-- Variable Picker Modal -->
 <div id="variable-picker-overlay" class="modal-overlay" style="z-index: 1100;">
-    <div id="variable-picker-modal" class="modal-content" style="max-width: 600px; max-height: 80vh; display: flex; flex-direction: column;">
+    <div id="variable-picker-modal" class="modal-content" style="max-width: 650px; max-height: 85vh; display: flex; flex-direction: column;">
         <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 1rem; border-bottom: 1px solid #ddd;">
-            <h3 style="margin: 0;">🔧 変数を挿入 / Insert Variable</h3>
+            <h3 style="margin: 0;">🔧 変数・数式を挿入 / Insert Variable or Formula</h3>
             <button class="btn btn-secondary" onclick="closeVariablePicker()">✕</button>
         </div>
 
-        <div style="padding: 1rem 0;">
-            <input type="text" id="variable-search" placeholder="🔍 変数を検索... / Search variables..."
-                   style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 1rem;"
-                   oninput="filterVariables(this.value)">
+        <!-- Composition Area (shared across tabs) -->
+        <div class="vp-composition-area">
+            <label class="vp-composition-label">📝 作成エリア / Composition Area:</label>
+            <textarea id="vp-composition-input" class="vp-composition-input" rows="2"
+                      placeholder="変数をクリックするとここに追加されます / Click variables to add them here"></textarea>
         </div>
 
-        <div id="variable-categories" style="flex: 1; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px;">
-            <!-- Categories will be rendered here -->
-            <p style="padding: 1rem; color: #7f8c8d;">読み込み中... / Loading...</p>
+        <!-- Tabs -->
+        <div class="vp-tabs">
+            <button type="button" class="vp-tab active" data-tab="variables" onclick="switchVariablePickerTab('variables')">
+                📥 変数 / Variables
+            </button>
+            <button type="button" class="vp-tab" data-tab="formula" onclick="switchVariablePickerTab('formula')">
+                🧮 数式ヘルプ / Formula Help
+            </button>
         </div>
 
-        <div style="padding-top: 1rem; border-top: 1px solid #ddd; margin-top: 1rem;">
-            <small style="color: #7f8c8d;">
-                💡 変数をクリックすると、カーソル位置に挿入されます / Click a variable to insert at cursor position
-            </small>
+        <!-- Variables Tab Content -->
+        <div id="vp-tab-variables" class="vp-tab-content active">
+            <div style="padding: 0.5rem 0;">
+                <input type="text" id="variable-search" placeholder="🔍 変数を検索... / Search variables..."
+                       style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.95rem;"
+                       oninput="filterVariables(this.value)">
+            </div>
+
+            <div id="variable-categories" style="flex: 1; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; min-height: 180px; max-height: 280px;">
+                <!-- Categories will be rendered here -->
+                <p style="padding: 1rem; color: #7f8c8d;">読み込み中... / Loading...</p>
+            </div>
+
+            <div style="padding-top: 0.5rem;">
+                <small style="color: #7f8c8d;">
+                    💡 変数をクリック → 作成エリアに追加 → 「挿入」ボタンで確定
+                </small>
+            </div>
+        </div>
+
+        <!-- Formula Help Tab Content -->
+        {% raw %}
+        <div id="vp-tab-formula" class="vp-tab-content" style="display: none;">
+            <div class="formula-help" style="margin-top: 0.5rem;">
+                <h4>📖 利用可能な関数 / Available Functions:</h4>
+                <div class="formula-function-list">
+                    <div class="formula-function">
+                        <code>sum(a, b, ...)</code>
+                        <span>合計 / Sum of values</span>
+                    </div>
+                </div>
+                <h4 style="margin-top: 1rem;">💡 クリックで作成エリアに追加 / Click to add:</h4>
+                <div class="formula-examples">
+                    <code onclick="appendToComposition('sum()')">sum()</code>
+                    <code onclick="appendToComposition('sum({{step1.score}}, {{step2.score}})')">sum({{step1.score}}, {{step2.score}})</code>
+                    <code onclick="appendToComposition('sum({{input.value1}}, {{input.value2}})')">sum({{input.value1}}, {{input.value2}})</code>
+                </div>
+                <h4 style="margin-top: 1rem;">📝 数式の書き方 / How to write formulas:</h4>
+                <p style="font-size: 0.85rem; color: #64748b; margin: 0.5rem 0;">
+                    1. 変数タブから変数を選択<br>
+                    2. 作成エリアで編集（カンマ追加など）<br>
+                    3. sum()で囲むなど関数を適用<br>
+                    4. 「挿入」ボタンで確定
+                </p>
+            </div>
+        </div>
+        {% endraw %}
+
+        <!-- Action Buttons (shared) -->
+        <div class="vp-actions">
+            <button type="button" class="btn btn-primary" onclick="insertCompositionValue()">
+                ➕ 挿入 / Insert
+            </button>
+            <button type="button" class="btn btn-secondary" onclick="clearComposition()">
+                🗑️ クリア / Clear
+            </button>
         </div>
     </div>
 </div>
@@ -649,6 +774,7 @@
     <div class="draggable-header" id="prompt-editor-header">
         <span class="draggable-title">📝 プロンプト編集 / Prompt Editor</span>
         <div class="draggable-controls">
+            <button type="button" class="btn-header-help" onclick="showPromptTemplateHelp()" title="ヘルプを表示 / Show Help">❓</button>
             <button type="button" class="btn-minimize" onclick="minimizePromptEditor()" title="最小化">−</button>
             <button type="button" class="btn-close" onclick="closePromptEditor()" title="閉じる">×</button>
         </div>
@@ -657,18 +783,67 @@
         <input type="hidden" id="prompt-editor-prompt-id">
         <input type="hidden" id="prompt-editor-step-number">
         <input type="hidden" id="prompt-editor-current-revision">
-        <div class="prompt-editor-info">
-            <span id="prompt-editor-prompt-name" style="font-weight: bold;"></span>
-            <span id="prompt-editor-revision-info" style="margin-left: 1rem; color: #7f8c8d; font-size: 0.85rem;"></span>
+        <input type="hidden" id="prompt-editor-project-id">
+
+        <!-- Prompt Selector and New Prompt Button -->
+        <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.8rem; padding-bottom: 0.8rem; border-bottom: 1px solid #e0e0e0;">
+            <label style="font-size: 0.85rem; font-weight: bold; white-space: nowrap;">プロンプト:</label>
+            <select id="prompt-editor-prompt-selector" onchange="onPromptEditorPromptChange(this.value)" style="flex: 1; padding: 0.4rem; border: 1px solid #ccc; border-radius: 4px;">
+                <option value="">-- 読み込み中 --</option>
+            </select>
+            <button type="button" class="btn btn-success btn-sm" onclick="showCreatePromptInEditor()" style="white-space: nowrap; padding: 0.4rem 0.8rem;">
+                ＋ 新規作成
+            </button>
+            <button type="button" class="btn btn-danger btn-sm" id="prompt-editor-delete-btn" onclick="deletePromptFromEditor()" style="white-space: nowrap; padding: 0.4rem 0.6rem;" title="削除 / Delete">
+                🗑
+            </button>
+        </div>
+
+        <!-- Prompt Metadata Editing Section -->
+        <div class="prompt-editor-metadata" style="margin-bottom: 1rem; padding: 0.8rem; background: #f8f9fa; border-radius: 6px; border: 1px solid #e0e0e0;">
+            <div style="display: flex; gap: 1rem; align-items: flex-start; flex-wrap: wrap;">
+                <div style="flex: 1; min-width: 200px;">
+                    <label for="prompt-editor-name" style="font-size: 0.85rem; font-weight: bold; display: block; margin-bottom: 0.3rem;">
+                        プロンプト名 / Name:
+                    </label>
+                    <input type="text" id="prompt-editor-name"
+                           style="width: 100%; padding: 0.4rem 0.6rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem;"
+                           placeholder="プロンプト名を入力">
+                </div>
+                <div style="flex: 2; min-width: 300px;">
+                    <label for="prompt-editor-description" style="font-size: 0.85rem; font-weight: bold; display: block; margin-bottom: 0.3rem;">
+                        説明 / Description:
+                    </label>
+                    <input type="text" id="prompt-editor-description"
+                           style="width: 100%; padding: 0.4rem 0.6rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem;"
+                           placeholder="プロンプトの説明（任意）">
+                </div>
+                <div style="display: flex; align-items: flex-end; gap: 0.8rem;">
+                    <span id="prompt-editor-id-info" style="color: #aaa; font-size: 0.75rem; padding-bottom: 0.5rem;"></span>
+                    <span id="prompt-editor-revision-info" style="color: #7f8c8d; font-size: 0.85rem; padding-bottom: 0.5rem;"></span>
+                </div>
+            </div>
+            <!-- Tag Selector Section -->
+            <div style="margin-top: 0.8rem; padding-top: 0.8rem; border-top: 1px solid #e0e0e0;">
+                <label style="font-size: 0.85rem; font-weight: bold; display: block; margin-bottom: 0.4rem;">
+                    タグ / Tags:
+                </label>
+                <div id="prompt-editor-tags" class="prompt-editor-tags-container">
+                    <div id="prompt-editor-current-tags" class="prompt-current-tags">
+                        <!-- Dynamic tag chips will be inserted here -->
+                    </div>
+                    <button type="button" class="btn-add-prompt-tag" onclick="showPromptEditorTagDropdown(this)">+ タグ追加</button>
+                </div>
+            </div>
         </div>
 
         <!-- Prompt/Parser Tab Navigation -->
         <div class="prompt-editor-tabs">
             <button type="button" class="prompt-tab-btn active" data-tab="prompt" onclick="switchPromptEditorTab('prompt')">
-                📝 プロンプト
+                プロンプト
             </button>
             <button type="button" class="prompt-tab-btn" data-tab="parser" onclick="switchPromptEditorTab('parser')">
-                ⚙️ パーサー
+                パーサー
             </button>
         </div>
 
@@ -676,7 +851,24 @@
             <!-- Prompt Tab -->
             <div id="prompt-editor-tab-prompt" class="prompt-editor-tab-content active">
                 <div class="prompt-editor-main">
-                    <label>プロンプトテンプレート / Prompt Template:</label>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                        <label style="margin: 0;">プロンプトテンプレート / Prompt Template:</label>
+                        <div class="role-marker-buttons" style="display: flex; gap: 0.3rem; align-items: center;">
+                            <span style="font-size: 0.75rem; color: #7f8c8d; margin-right: 0.3rem;">ロールマーカー:</span>
+                            <button type="button" class="btn-marker btn-marker-system" onclick="insertRoleMarker('SYSTEM')" title="[SYSTEM] システム指示を挿入">
+                                [SYSTEM]
+                            </button>
+                            <button type="button" class="btn-marker btn-marker-user" onclick="insertRoleMarker('USER')" title="[USER] ユーザー入力を挿入">
+                                [USER]
+                            </button>
+                            <button type="button" class="btn-marker btn-marker-assistant" onclick="insertRoleMarker('ASSISTANT')" title="[ASSISTANT] アシスタント応答を挿入">
+                                [ASSISTANT]
+                            </button>
+                            <button type="button" class="btn-marker-help" onclick="showRoleMarkerHelp()" title="ロールマーカーのヘルプ">
+                                ❓
+                            </button>
+                        </div>
+                    </div>
                     <textarea id="prompt-editor-template"></textarea>
                 </div>
             </div>
@@ -687,6 +879,7 @@
                     <label>パーサータイプ / Parser Type:</label>
                     <select id="prompt-editor-parser-type" onchange="onPromptEditorParserTypeChange()">
                         <option value="none">なし / None</option>
+                        <option value="json">JSON (フィールド抽出)</option>
                         <option value="json_path">JSON Path</option>
                         <option value="regex">正規表現 / Regex</option>
                         <option value="csv_template">CSV Template</option>
@@ -694,7 +887,37 @@
 
                     <label style="margin-top: 1rem; display: block;">パーサー設定 (JSON):</label>
                     <textarea id="prompt-editor-parser-config" style="width: 100%; height: 200px; font-family: monospace; font-size: 0.85rem;" placeholder='{"type": "none"}'></textarea>
-                    <small style="color: #7f8c8d;">例: {"type": "json_path", "paths": {"field1": "$.data.value"}}</small>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0.3rem;">
+                        <small style="color: #7f8c8d;">例: {"type": "json_path", "paths": {"field1": "$.data.value"}}</small>
+                        <button type="button" id="json-csv-toggle-btn-workflow" onclick="toggleJsonCsvConverter('-workflow')" style="font-size: 0.75rem; padding: 2px 8px; background: transparent; border: 1px solid #9b59b6; color: #9b59b6; border-radius: 3px; cursor: pointer;">JSON→CSV</button>
+                    </div>
+                    <!-- Inline JSON to CSV Converter (Workflow Editor) -->
+                    <div id="json-csv-converter-section-workflow" style="margin-top: 10px; border: 1px solid #9b59b6; border-radius: 5px; display: none;">
+                        <div style="background: #9b59b6; color: white; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center;">
+                            <span style="font-weight: bold;">📊 JSON → CSV 変換</span>
+                            <button onclick="toggleJsonCsvConverter('-workflow')" style="background: transparent; border: 1px solid white; color: white; padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 0.8rem;">閉じる</button>
+                        </div>
+                        <div style="padding: 10px;">
+                            <div style="display: flex; gap: 10px;">
+                                <div style="flex: 1;">
+                                    <label style="font-size: 0.85rem; font-weight: bold; display: block; margin-bottom: 3px;">サンプルJSON入力:</label>
+                                    <textarea id="json-sample-input-workflow" rows="6" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem;" placeholder='{"field1": "value", "field2": {"nested": "data"}}'></textarea>
+                                </div>
+                                <div style="display: flex; flex-direction: column; justify-content: center; gap: 5px;">
+                                    <button onclick="convertJsonToCsvTemplateInline('-workflow')" style="background: #9b59b6; color: white; border: none; padding: 8px 12px; border-radius: 3px; cursor: pointer; font-size: 0.85rem;">🔄 変換</button>
+                                    <button onclick="applyGeneratedParserConfigInline('-workflow')" style="background: #27ae60; color: white; border: none; padding: 8px 12px; border-radius: 3px; cursor: pointer; font-size: 0.85rem;">✅ 適用</button>
+                                </div>
+                                <div style="flex: 1;">
+                                    <label style="font-size: 0.85rem; font-weight: bold; display: block; margin-bottom: 3px;">生成された設定:</label>
+                                    <textarea id="generated-parser-config-inline-workflow" rows="6" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem; background: #f8f9fa;" readonly placeholder="変換結果がここに表示されます"></textarea>
+                                </div>
+                            </div>
+                            <div style="margin-top: 5px;">
+                                <label style="font-size: 0.85rem; font-weight: bold;">CSVヘッダープレビュー:</label>
+                                <input type="text" id="csv-header-preview-inline-workflow" readonly style="width: 100%; font-family: 'Courier New', monospace; font-size: 0.85rem; background: #f8f9fa; padding: 4px;" placeholder="ヘッダーがここに表示されます">
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -719,5 +942,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/app.js?v=20251212_130000"></script>
+<script src="/static/js/app.js?v=20251215_050000"></script>
 {% endblock %}
