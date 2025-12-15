@@ -16,7 +16,8 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+import json
 
 from backend.database import get_db, ProjectRevision, PromptRevision, JobItem, SessionLocal
 from backend.database.models import Prompt, Job
@@ -614,3 +615,218 @@ def run_batch_all(request: RunBatchAllRequest, background_tasks: BackgroundTasks
     except Exception as e:
         logger.error(f"[BATCH-ALL] Failed to create jobs: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create batch jobs: {str(e)}")
+
+
+# ========== Job List and Preview Endpoints ==========
+
+class JobListResponse(BaseModel):
+    """Job list item response."""
+    id: int
+    job_type: str
+    status: str
+    created_at: str
+    item_count: int = 0
+    prompt_name: Optional[str] = None
+    model_name: Optional[str] = None
+    is_workflow_job: bool = False  # NEW: distinguish workflow jobs
+
+
+@router.get("/api/jobs", response_model=List[JobListResponse])
+def list_jobs(
+    project_id: Optional[int] = None,
+    prompt_id: Optional[int] = None,
+    workflow_id: Optional[int] = None,  # NEW: filter by workflow
+    job_type: Optional[str] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db)
+):
+    """List jobs with optional filters. Supports both regular jobs and workflow jobs."""
+    from backend.database.models import WorkflowJob, WorkflowJobStep, Workflow
+
+    result = []
+
+    # If workflow_id is specified, query workflow_jobs table
+    if workflow_id:
+        wf_query = db.query(WorkflowJob).filter(WorkflowJob.workflow_id == workflow_id)
+
+        # Get workflow name
+        workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+        workflow_name = f"[WF] {workflow.name}" if workflow else None
+
+        wf_jobs = wf_query.order_by(WorkflowJob.created_at.desc()).limit(limit).all()
+
+        for wf_job in wf_jobs:
+            # Count steps as item_count
+            step_count = db.query(WorkflowJobStep).filter(
+                WorkflowJobStep.workflow_job_id == wf_job.id
+            ).count()
+
+            result.append(JobListResponse(
+                id=wf_job.id,
+                job_type="workflow",
+                status=wf_job.status,
+                created_at=wf_job.created_at,
+                item_count=step_count,
+                prompt_name=workflow_name,
+                model_name=wf_job.model_name,
+                is_workflow_job=True
+            ))
+
+        return result
+
+    # Regular jobs query
+    query = db.query(Job)
+
+    # Filter by project_id through prompt revision
+    if project_id:
+        from backend.database.models import PromptRevision as PRev
+        prompt_revision_ids = db.query(PRev.id).join(Prompt).filter(
+            Prompt.project_id == project_id
+        ).subquery()
+        query = query.filter(Job.prompt_revision_id.in_(prompt_revision_ids))
+
+    # Filter by prompt_id
+    if prompt_id:
+        from backend.database.models import PromptRevision as PRev
+        prompt_revision_ids = db.query(PRev.id).filter(
+            PRev.prompt_id == prompt_id
+        ).subquery()
+        query = query.filter(Job.prompt_revision_id.in_(prompt_revision_ids))
+
+    # Filter by job type
+    if job_type:
+        query = query.filter(Job.job_type == job_type)
+
+    jobs = query.order_by(Job.created_at.desc()).limit(limit).all()
+
+    for job in jobs:
+        # Get item count
+        item_count = db.query(JobItem).filter(JobItem.job_id == job.id).count()
+
+        # Get prompt name
+        prompt_name = None
+        if job.prompt_revision_id:
+            from backend.database.models import PromptRevision as PRev
+            prev = db.query(PRev).filter(PRev.id == job.prompt_revision_id).first()
+            if prev and prev.prompt:
+                prompt_name = prev.prompt.name
+
+        result.append(JobListResponse(
+            id=job.id,
+            job_type=job.job_type,
+            status=job.status,
+            created_at=job.created_at,
+            item_count=item_count,
+            prompt_name=prompt_name,
+            model_name=job.model_name,
+            is_workflow_job=False
+        ))
+
+    return result
+
+
+@router.get("/api/jobs/{job_id}/csv-preview")
+def get_job_csv_preview(
+    job_id: int,
+    db: Session = Depends(get_db)
+):
+    """Get CSV preview of job results.
+
+    IMPORTANT: Header and data order consistency
+    - If csv_header exists: use csv_header + csv_output (same source, safe)
+    - If csv_header missing but csv_output exists: regenerate BOTH from fields
+      (csv_output order may differ from fields order)
+    - If only fields exists: generate both from fields
+    """
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # First, try to use job.merged_csv_output if available (most reliable)
+    if job.merged_csv_output:
+        lines = [line for line in job.merged_csv_output.strip().split("\n") if line.strip()]
+        return {
+            "job_id": job_id,
+            "csv_data": job.merged_csv_output.strip() if lines else None,
+            "row_count": len(lines) - 1 if len(lines) > 1 else 0  # -1 for header
+        }
+
+    # Fall back to building from job_items
+    job_items = db.query(JobItem).filter(
+        JobItem.job_id == job_id,
+        JobItem.status == "done"
+    ).all()
+
+    csv_lines = []
+    header = None
+
+    for item in job_items:
+        if not item.parsed_response:
+            continue
+
+        try:
+            parsed = json.loads(item.parsed_response)
+        except:
+            continue
+
+        csv_output = parsed.get("csv_output", "")
+        csv_header = parsed.get("csv_header", "")
+        fields = parsed.get("fields", {})
+
+        # SAFETY: Ensure header and data come from the same source
+        if csv_header:
+            # csv_header exists: use csv_header + csv_output (same source, order matches)
+            if header is None:
+                header = csv_header
+                csv_lines.insert(0, header)
+            if csv_output:
+                for line in csv_output.strip().split("\n"):
+                    if line.strip():
+                        csv_lines.append(line)
+        elif fields:
+            # csv_header missing: generate BOTH header and data from fields
+            # This ensures order consistency (ignore csv_output which may have different order)
+            if header is None:
+                header = ",".join(fields.keys())
+                csv_lines.insert(0, header)
+            # Always regenerate data from fields to match header order
+            csv_lines.append(",".join([str(v) for v in fields.values()]))
+
+    return {
+        "job_id": job_id,
+        "csv_data": "\n".join(csv_lines) if csv_lines else None,
+        "row_count": len(csv_lines) - 1 if header and csv_lines else len(csv_lines)
+    }
+
+
+@router.get("/api/workflow-jobs/{job_id}/csv-preview")
+def get_workflow_job_csv_preview(
+    job_id: int,
+    db: Session = Depends(get_db)
+):
+    """Get CSV preview of workflow job results.
+
+    Workflow jobs store merged CSV output directly in the workflow_jobs table.
+    """
+    from backend.database.models import WorkflowJob
+
+    wf_job = db.query(WorkflowJob).filter(WorkflowJob.id == job_id).first()
+    if not wf_job:
+        raise HTTPException(status_code=404, detail="Workflow job not found")
+
+    # Workflow jobs store merged CSV output directly
+    if wf_job.merged_csv_output:
+        lines = [line for line in wf_job.merged_csv_output.strip().split("\n") if line.strip()]
+        return {
+            "job_id": job_id,
+            "csv_data": wf_job.merged_csv_output.strip() if lines else None,
+            "row_count": len(lines) - 1 if len(lines) > 1 else 0,  # -1 for header
+            "is_workflow_job": True
+        }
+
+    return {
+        "job_id": job_id,
+        "csv_data": None,
+        "row_count": 0,
+        "is_workflow_job": True
+    }

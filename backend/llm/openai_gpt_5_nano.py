@@ -5,11 +5,11 @@ Based on OpenAI API specification for GPT-5 models.
 
 import os
 import time
-from typing import Optional
+from typing import Optional, List
 from openai import OpenAI
 from dotenv import load_dotenv
 
-from .base import LLMClient, LLMResponse
+from .base import LLMClient, LLMResponse, Message
 
 # Load environment variables
 load_dotenv()
@@ -39,11 +39,18 @@ class OpenAIGPT5NanoClient(LLMClient):
         # Initialize client
         self.client = OpenAI(api_key=self.api_key)
 
-    def call(self, prompt: str, images: list = None, **kwargs) -> LLMResponse:
+    def call(
+        self,
+        prompt: str = None,
+        messages: List[Message] = None,
+        images: list = None,
+        **kwargs
+    ) -> LLMResponse:
         """Execute OpenAI GPT-5-nano call.
 
         Args:
-            prompt: The prompt text to send
+            prompt: The prompt text to send (simple mode, treated as 'user' role)
+            messages: List of message dicts with 'role' and 'content' keys
             images: Optional list of base64-encoded image strings for Vision API
             **kwargs: Optional parameters
                 - verbosity (str): Default "medium" - Controls output expansiveness ("low", "medium", "high")
@@ -66,38 +73,47 @@ class OpenAIGPT5NanoClient(LLMClient):
             verbosity = kwargs.get("verbosity", "medium")
             reasoning_effort = kwargs.get("reasoning_effort", "minimal")
 
-            # Build user content (text + optional images for Vision API)
-            if images:
-                # Multimodal content with images
-                user_content = [{"type": "text", "text": prompt}]
-                for img_data_uri in images:
-                    user_content.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": img_data_uri,  # Use data URI directly
-                            "detail": "high"  # Required for proper image recognition
-                        }
-                    })
-            else:
-                # Text-only content
-                user_content = prompt
+            # Normalize input to messages list
+            normalized_messages = self._normalize_messages(prompt, messages, images)
 
-            # Build messages with system prompt
-            messages = [
-                {"role": "system", "content": "You are a helpful AI assistant."}
-            ]
+            # Build API messages format
+            api_messages = []
 
-            # Add user message (with or without images)
-            messages.append({"role": "user", "content": user_content})
+            # Check if system message exists, if not add default
+            has_system = any(msg.get("role") == "system" for msg in normalized_messages)
+            if not has_system:
+                api_messages.append({"role": "system", "content": "You are a helpful AI assistant."})
+
+            for msg in normalized_messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                msg_images = msg.get("_images")
+
+                # Handle multimodal content (images)
+                if msg_images and role == "user":
+                    if isinstance(content, str):
+                        api_content = [{"type": "text", "text": content}]
+                    else:
+                        api_content = content.copy() if isinstance(content, list) else [content]
+
+                    for img_data_uri in msg_images:
+                        api_content.append({
+                            "type": "image_url",
+                            "image_url": {"url": img_data_uri, "detail": "high"}
+                        })
+                    api_messages.append({"role": role, "content": api_content})
+                else:
+                    # Text-only content
+                    if isinstance(content, list):
+                        text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
+                        api_messages.append({"role": role, "content": "".join(text_parts)})
+                    else:
+                        api_messages.append({"role": role, "content": content})
 
             # Call OpenAI GPT-5 API
-            # Note: Using standard chat.completions.create() for now
-            # May need to adjust based on actual OpenAI GPT-5 API requirements
             response = self.client.chat.completions.create(
                 model=self.MODEL_NAME,
-                messages=messages
-                # Note: May need to add verbosity and reasoning_effort parameters
-                # depending on OpenAI API support
+                messages=api_messages
             )
 
             # Calculate turnaround time

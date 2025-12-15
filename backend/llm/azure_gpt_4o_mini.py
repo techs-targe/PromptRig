@@ -5,11 +5,11 @@ GPT-4o-mini (2024-07-18) with Vision API support.
 
 import os
 import time
-from typing import Optional
+from typing import Optional, List
 from openai import AzureOpenAI
 from dotenv import load_dotenv
 
-from .base import LLMClient, LLMResponse
+from .base import LLMClient, LLMResponse, Message
 
 # Load environment variables
 load_dotenv()
@@ -52,11 +52,18 @@ class AzureGPT4oMiniClient(LLMClient):
             api_version=self.api_version
         )
 
-    def call(self, prompt: str, images: list = None, **kwargs) -> LLMResponse:
+    def call(
+        self,
+        prompt: str = None,
+        messages: List[Message] = None,
+        images: list = None,
+        **kwargs
+    ) -> LLMResponse:
         """Execute Azure OpenAI GPT-4o-mini call.
 
         Args:
-            prompt: The prompt text to send
+            prompt: The prompt text to send (simple mode, treated as 'user' role)
+            messages: List of message dicts with 'role' and 'content' keys
             images: Optional list of base64-encoded image strings for Vision API
             **kwargs: Optional parameters
                 - temperature (float): Default 0.7 (range: 0.0-2.0)
@@ -78,27 +85,41 @@ class AzureGPT4oMiniClient(LLMClient):
             max_tokens = kwargs.get("max_tokens", 4096)
             top_p = kwargs.get("top_p", 1.0)
 
-            # Build user content (text + optional images for Vision API)
-            if images:
-                # Multimodal content with images
-                user_content = [{"type": "text", "text": prompt}]
-                for img_data_uri in images:
-                    user_content.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": img_data_uri  # Use data URI directly
-                        }
-                    })
-            else:
-                # Text-only content
-                user_content = prompt
+            # Normalize input to messages list
+            normalized_messages = self._normalize_messages(prompt, messages, images)
+
+            # Build API messages format
+            api_messages = []
+            for msg in normalized_messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                msg_images = msg.get("_images")
+
+                # Handle multimodal content (images)
+                if msg_images and role == "user":
+                    if isinstance(content, str):
+                        api_content = [{"type": "text", "text": content}]
+                    else:
+                        api_content = content.copy() if isinstance(content, list) else [content]
+
+                    for img_data_uri in msg_images:
+                        api_content.append({
+                            "type": "image_url",
+                            "image_url": {"url": img_data_uri}
+                        })
+                    api_messages.append({"role": role, "content": api_content})
+                else:
+                    # Text-only content
+                    if isinstance(content, list):
+                        text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
+                        api_messages.append({"role": role, "content": "".join(text_parts)})
+                    else:
+                        api_messages.append({"role": role, "content": content})
 
             # Call Azure OpenAI API
             response = self.client.chat.completions.create(
                 model=self.deployment_name,
-                messages=[
-                    {"role": "user", "content": user_content}
-                ],
+                messages=api_messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 top_p=top_p

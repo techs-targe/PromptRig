@@ -12,7 +12,8 @@ from enum import Enum
 
 class ParserType(str, Enum):
     """Parser types supported."""
-    JSON_PATH = "json_path"
+    JSON = "json"  # Simple JSON with fields list
+    JSON_PATH = "json_path"  # JSON with path expressions
     REGEX = "regex"
     NONE = "none"
 
@@ -105,7 +106,9 @@ class ResponseParser:
         if not raw_response:
             return {"raw": raw_response, "parsed": False}
 
-        if self.parser_type == ParserType.JSON_PATH:
+        if self.parser_type == ParserType.JSON:
+            result = self._parse_json(raw_response)
+        elif self.parser_type == ParserType.JSON_PATH:
             result = self._parse_json_path(raw_response)
         elif self.parser_type == ParserType.REGEX:
             result = self._parse_regex(raw_response)
@@ -115,10 +118,75 @@ class ResponseParser:
 
         # Apply CSV template if configured
         if result.get("parsed") and "csv_template" in self.config:
-            csv_line = self._apply_csv_template(result.get("fields", {}))
-            result["csv_output"] = csv_line
+            csv_result = self._apply_csv_template(result.get("fields", {}))
+            result["csv_output"] = csv_result.get("data", "")
+            result["csv_header"] = csv_result.get("header", "")
 
         return result
+
+    def _extract_json_from_response(self, raw_response: str) -> Optional[str]:
+        """Extract JSON from response, handling Markdown code blocks.
+
+        Handles:
+        - Pure JSON response
+        - JSON inside ```json ... ``` code blocks
+        - JSON inside ``` ... ``` code blocks
+        """
+        # First, try to extract from Markdown code block
+        code_block_pattern = r'```(?:json)?\s*\n?([\s\S]*?)\n?```'
+        match = re.search(code_block_pattern, raw_response)
+        if match:
+            return match.group(1).strip()
+
+        # Try direct JSON parse
+        return raw_response.strip()
+
+    def _parse_json(self, raw_response: str) -> Dict[str, Any]:
+        """Parse JSON response with fields extraction.
+
+        Configuration:
+            {
+                "type": "json",
+                "fields": ["field1", "field2", ...]  # Optional: specific fields to extract
+            }
+
+        If fields is specified, only those fields are extracted.
+        If fields is empty or not specified, all JSON fields are extracted.
+        """
+        result = {"raw": raw_response, "parsed": True, "fields": {}}
+
+        try:
+            # Extract JSON from response (handles Markdown code blocks)
+            json_str = self._extract_json_from_response(raw_response)
+            json_data = json.loads(json_str)
+
+            if not isinstance(json_data, dict):
+                return {
+                    "raw": raw_response,
+                    "parsed": False,
+                    "error": "Response is not a JSON object"
+                }
+
+            # Get fields to extract
+            fields_to_extract = self.config.get("fields", [])
+
+            if fields_to_extract:
+                # Extract only specified fields
+                for field_name in fields_to_extract:
+                    if field_name in json_data:
+                        result["fields"][field_name] = json_data[field_name]
+            else:
+                # Extract all fields
+                result["fields"] = json_data.copy()
+
+            return result
+
+        except json.JSONDecodeError:
+            return {
+                "raw": raw_response,
+                "parsed": False,
+                "error": "Response is not valid JSON"
+            }
 
     def _parse_json_path(self, raw_response: str) -> Dict[str, Any]:
         """Parse using JSON path expressions.
@@ -129,8 +197,9 @@ class ResponseParser:
         result = {"raw": raw_response, "parsed": True, "fields": {}}
 
         try:
-            # Try to parse as JSON
-            json_data = json.loads(raw_response)
+            # Extract JSON from response (handles Markdown code blocks)
+            json_str = self._extract_json_from_response(raw_response)
+            json_data = json.loads(json_str)
 
             # Extract fields according to paths
             paths = self.config.get("paths", {})
@@ -195,33 +264,98 @@ class ResponseParser:
 
         return result
 
-    def _apply_csv_template(self, fields: Dict[str, Any]) -> str:
-        """Apply CSV template to extracted fields.
+    def _csv_escape_value(self, value: str, force_quote: bool = False) -> str:
+        """Escape a value for CSV output according to RFC 4180.
+
+        Args:
+            value: The string value to escape
+            force_quote: If True, always wrap in double quotes
+
+        Returns:
+            Properly escaped CSV value
+
+        Rules (RFC 4180):
+        - If value contains comma, newline, or double quote, wrap in double quotes
+        - Double quotes within value are escaped by doubling them ("")
+        - If force_quote is True, always wrap in double quotes
+        """
+        if value is None:
+            return '""' if force_quote else ""
+
+        str_value = str(value)
+
+        # Check if quoting is needed
+        needs_quoting = force_quote or any(c in str_value for c in [',', '\n', '\r', '"'])
+
+        if needs_quoting:
+            # Escape double quotes by doubling them
+            escaped = str_value.replace('"', '""')
+            return f'"{escaped}"'
+
+        return str_value
+
+    def _apply_csv_template(self, fields: Dict[str, Any]) -> Dict[str, str]:
+        """Apply CSV template to extracted fields with proper CSV escaping.
 
         Args:
             fields: Dictionary of extracted fields
 
         Returns:
-            CSV-formatted string with field values substituted
+            Dictionary with 'header' and 'data' keys for CSV output
 
         Example:
             Template: "$field1$,$field2$,$field3$"
-            Fields: {"field1": "A", "field2": "B", "field3": "C"}
-            Result: "A,B,C"
+            Fields: {"field1": "A", "field2": "B, with comma", "field3": "C"}
+            Result: {"header": "field1,field2,field3", "data": "A,\"B, with comma\",C"}
+
+            Template with quotes: "\"$field1$\",\"$field2$\""
+            Fields: {"field1": "A", "field2": "B, with \"quote\""}
+            Result: {"header": "field1,field2", "data": "\"A\",\"B, with \"\"quote\"\"\""}
+
+        Config options:
+            csv_template: Template string with $field$ placeholders
+            csv_header: Custom header string (optional)
+            csv_quote_all: If true, quote all values regardless of content (optional)
         """
+        import re
+
         template = self.config.get("csv_template", "")
         if not template:
-            return ""
+            return {"header": "", "data": ""}
 
-        # Replace $field_name$ with field values
-        result = template
+        # Check if we should quote all values
+        quote_all = self.config.get("csv_quote_all", False)
+
+        # Extract field names from template (in order of appearance)
+        placeholders = re.findall(r'\$([^$]+)\$', template)
+
+        # Use custom csv_header if specified, otherwise generate from placeholder names
+        custom_header = self.config.get("csv_header")
+        if custom_header:
+            header = custom_header
+        else:
+            header = ",".join(placeholders)
+
+        # Replace $field_name$ with properly escaped field values for data row
+        data = template
         for field_name, value in fields.items():
             placeholder = f"${field_name}$"
-            # Convert value to string, handle None
-            str_value = str(value) if value is not None else ""
-            result = result.replace(placeholder, str_value)
+            quoted_placeholder = f'"{placeholder}"'
 
-        return result
+            # Check if placeholder is already wrapped in double quotes in template
+            if quoted_placeholder in data:
+                # Template has quotes around placeholder: "$field$"
+                # Only escape internal double quotes (by doubling them), don't add outer quotes
+                str_value = str(value) if value is not None else ""
+                escaped_value = str_value.replace('"', '""')
+                data = data.replace(quoted_placeholder, f'"{escaped_value}"')
+            else:
+                # Bare placeholder: $field$
+                # Apply full CSV escaping (add quotes if needed)
+                escaped_value = self._csv_escape_value(value, force_quote=quote_all)
+                data = data.replace(placeholder, escaped_value)
+
+        return {"header": header, "data": data}
 
 
 def create_default_parser_config() -> str:

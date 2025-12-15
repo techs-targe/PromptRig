@@ -5,11 +5,11 @@ Based on Azure OpenAI API specification.
 
 import os
 import time
-from typing import Optional
+from typing import Optional, List
 from openai import AzureOpenAI, Timeout
 from dotenv import load_dotenv
 
-from .base import LLMClient, LLMResponse
+from .base import LLMClient, LLMResponse, Message
 
 # Load environment variables
 load_dotenv()
@@ -64,11 +64,18 @@ class AzureGPT5MiniClient(LLMClient):
             max_retries=2
         )
 
-    def call(self, prompt: str, images: list = None, **kwargs) -> LLMResponse:
+    def call(
+        self,
+        prompt: str = None,
+        messages: List[Message] = None,
+        images: list = None,
+        **kwargs
+    ) -> LLMResponse:
         """Execute Azure OpenAI GPT-5-mini call with retry logic.
 
         Args:
-            prompt: The prompt text to send
+            prompt: The prompt text to send (simple mode, treated as 'user' role)
+            messages: List of message dicts with 'role' and 'content' keys
             images: Optional list of base64-encoded image strings for Vision API
             **kwargs: Optional parameters
                 - max_output_tokens (int): Maximum completion tokens (default: 8192)
@@ -101,32 +108,48 @@ class AzureGPT5MiniClient(LLMClient):
                 # Support both max_output_tokens (GPT-5 style) and max_tokens (legacy)
                 max_tokens = kwargs.get("max_output_tokens", kwargs.get("max_tokens", 8192))
 
-                # Build user content (text + optional images for Vision API)
-                if images:
-                    # Multimodal content with images
-                    user_content = [{"type": "text", "text": prompt}]
-                    for img_data_uri in images:
-                        user_content.append({
-                            "type": "image_url",
-                            "image_url": {
-                                "url": img_data_uri  # Use data URI directly
-                            }
-                        })
-                else:
-                    # Text-only content
-                    user_content = prompt
+                # Normalize input to messages list
+                normalized_messages = self._normalize_messages(prompt, messages, images)
 
-                # Prepare messages with system and user roles
-                messages = [
-                    {"role": "system", "content": "You are a helpful AI assistant."},
-                    {"role": "user", "content": user_content}
-                ]
+                # Build API messages format
+                api_messages = []
+
+                # Check if system message exists, if not add default
+                has_system = any(msg.get("role") == "system" for msg in normalized_messages)
+                if not has_system:
+                    api_messages.append({"role": "system", "content": "You are a helpful AI assistant."})
+
+                for msg in normalized_messages:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    msg_images = msg.get("_images")
+
+                    # Handle multimodal content (images)
+                    if msg_images and role == "user":
+                        if isinstance(content, str):
+                            api_content = [{"type": "text", "text": content}]
+                        else:
+                            api_content = content.copy() if isinstance(content, list) else [content]
+
+                        for img_data_uri in msg_images:
+                            api_content.append({
+                                "type": "image_url",
+                                "image_url": {"url": img_data_uri}
+                            })
+                        api_messages.append({"role": role, "content": api_content})
+                    else:
+                        # Text-only content
+                        if isinstance(content, list):
+                            text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
+                            api_messages.append({"role": role, "content": "".join(text_parts)})
+                        else:
+                            api_messages.append({"role": role, "content": content})
 
                 # Call Azure OpenAI GPT-5 API using chat.completions.create()
                 # Reference: Azure OpenAI GPT-5 SDK documentation
                 completion = self.client.chat.completions.create(
                     model=self.deployment_name,
-                    messages=messages,
+                    messages=api_messages,
                     max_completion_tokens=max_tokens,
                     stop=None,
                     stream=False

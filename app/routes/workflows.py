@@ -54,6 +54,7 @@ class WorkflowUpdate(BaseModel):
     """Request model for updating a workflow."""
     name: Optional[str] = None
     description: Optional[str] = None
+    project_id: Optional[int] = None
     auto_context: Optional[bool] = None  # Auto-generate CONTEXT from previous steps
 
 
@@ -302,6 +303,7 @@ def update_workflow(
             workflow_id,
             name=request.name,
             description=request.description,
+            project_id=request.project_id,
             auto_context=request.auto_context
         )
         return _workflow_to_response(workflow, db)
@@ -963,3 +965,68 @@ def import_workflow(request: WorkflowImportRequest, db: Session = Depends(get_db
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Import failed: {str(e)}")
+
+
+@router.put("/api/workflows/{workflow_id}/json", response_model=WorkflowResponse)
+def update_workflow_json(workflow_id: int, request: WorkflowImportRequest, db: Session = Depends(get_db)):
+    """Update an existing workflow from JSON.
+
+    Updates the workflow's basic info and replaces all steps with the provided JSON structure.
+    Resolves prompt references by name.
+    """
+    try:
+        # Check workflow exists
+        workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+        if not workflow:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+
+        wf_data = request.workflow_json
+
+        # Update basic info
+        workflow.name = wf_data.name
+        workflow.description = wf_data.description
+        workflow.auto_context = 1 if wf_data.auto_context else 0
+        workflow.updated_at = datetime.utcnow().isoformat()
+
+        # Delete existing steps
+        db.query(WorkflowStep).filter(WorkflowStep.workflow_id == workflow_id).delete()
+
+        # Create new steps from JSON
+        for step_data in wf_data.steps:
+            # Resolve prompt by name
+            prompt_id = None
+            if step_data.prompt_name:
+                prompt = db.query(Prompt).filter(Prompt.name == step_data.prompt_name).first()
+                if prompt:
+                    prompt_id = prompt.id
+
+            # Resolve project by name (backward compatibility)
+            project_id = None
+            if step_data.project_name:
+                project = db.query(Project).filter(Project.name == step_data.project_name).first()
+                if project:
+                    project_id = project.id
+
+            step = WorkflowStep(
+                workflow_id=workflow.id,
+                step_order=step_data.step_order,
+                step_name=step_data.step_name,
+                step_type=step_data.step_type,
+                prompt_id=prompt_id,
+                project_id=project_id,
+                execution_mode=step_data.execution_mode,
+                input_mapping=json.dumps(step_data.input_mapping) if step_data.input_mapping else None,
+                condition_config=json.dumps(step_data.condition_config) if step_data.condition_config else None
+            )
+            db.add(step)
+
+        db.commit()
+        db.refresh(workflow)
+
+        return _workflow_to_response(workflow, db)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"JSON update failed: {str(e)}")

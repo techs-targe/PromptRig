@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel
 
-from backend.database import get_db, Project, Prompt, PromptRevision, Workflow
+from backend.database import get_db, Project, Prompt, PromptRevision, Workflow, WorkflowStep
 from backend.parser import create_default_parser_config
 from backend.prompt import PromptTemplateParser
 from app.schemas.responses import ParameterDefinitionResponse
@@ -64,12 +64,15 @@ class PromptResponse(BaseModel):
     project_id: int
     name: str
     description: str
+    is_deleted: bool = False
+    deleted_at: Optional[str] = None
     created_at: str
-    updated_at: str
+    updated_at: Optional[str] = None
     revision_count: int = 0
     prompt_template: str = ""
     parser_config: str = ""
     parameters: List[ParameterDefinitionResponse] = []
+    is_new: bool = False  # True if prompt has no revisions yet
 
 
 class ProjectPromptsWorkflowsResponse(BaseModel):
@@ -138,32 +141,50 @@ def _prompt_to_response(prompt: Prompt, db: Session, include_parameters: bool = 
             for p in param_defs
         ]
 
+    # Prompt is "new" if it has no revisions yet
+    is_new = revision_count == 0
+
     return PromptResponse(
         id=prompt.id,
         project_id=prompt.project_id,
         name=prompt.name,
         description=prompt.description or "",
+        is_deleted=bool(prompt.is_deleted),
+        deleted_at=prompt.deleted_at,
         created_at=prompt.created_at,
         updated_at=prompt.updated_at,
         revision_count=revision_count,
         prompt_template=latest_revision.prompt_template if latest_revision else "",
         parser_config=latest_revision.parser_config if latest_revision else "",
-        parameters=parameters
+        parameters=parameters,
+        is_new=is_new  # True if no revisions exist yet
     )
 
 
 # ========== Prompt CRUD Endpoints ==========
 
 @router.get("/api/projects/{project_id}/prompts", response_model=List[PromptResponse])
-def list_prompts(project_id: int, db: Session = Depends(get_db)):
-    """List all prompts for a project."""
+def list_prompts(
+    project_id: int,
+    include_deleted: bool = False,
+    db: Session = Depends(get_db)
+):
+    """List all prompts for a project.
+
+    Args:
+        project_id: The project ID
+        include_deleted: If True, include soft-deleted prompts (for workflow editing)
+    """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    prompts = db.query(Prompt).filter(
-        Prompt.project_id == project_id
-    ).order_by(Prompt.created_at.asc()).all()
+    query = db.query(Prompt).filter(Prompt.project_id == project_id)
+
+    if not include_deleted:
+        query = query.filter(Prompt.is_deleted == 0)
+
+    prompts = query.order_by(Prompt.created_at.asc()).all()
 
     return [_prompt_to_response(p, db, include_parameters=False) for p in prompts]
 
@@ -174,7 +195,11 @@ def create_prompt(
     request: PromptCreate,
     db: Session = Depends(get_db)
 ):
-    """Create new prompt within a project."""
+    """Create new prompt within a project.
+
+    NEW: Prompt is created without an initial revision.
+    First save will create revision 1.
+    """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -191,22 +216,69 @@ def create_prompt(
     db.commit()
     db.refresh(prompt)
 
-    # Create initial revision
+    # Store initial template/parser in a temporary way for the response
+    # but do NOT create a revision - first explicit save will create revision 1
     initial_template = request.prompt_template or "プロンプトを入力してください / Enter your prompt here"
     parser_config = request.parser_config or create_default_parser_config()
 
-    initial_revision = PromptRevision(
-        prompt_id=prompt.id,
-        revision=1,
-        prompt_template=initial_template,
+    # Return response with the initial template (even though no revision exists yet)
+    # The UI will show revision_count=0 and "新規 / New"
+    return PromptResponse(
+        id=prompt.id,
+        project_id=prompt.project_id,
+        name=prompt.name,
+        description=prompt.description or "",
+        created_at=prompt.created_at,
+        revision_count=0,  # No revisions yet
+        prompt_template=initial_template,  # For UI display
         parser_config=normalize_json_for_comparison(parser_config) or parser_config,
-        created_at=now
+        parameters=[],  # No parameters yet since no revision
+        is_new=True  # Flag to indicate this is a brand new prompt
     )
-    db.add(initial_revision)
-    db.commit()
-    db.refresh(initial_revision)
 
-    return _prompt_to_response(prompt, db, include_parameters=True)
+
+class PromptWorkflowListItem(BaseModel):
+    """Simple list item for prompts/workflows."""
+    id: int
+    name: str
+    type: str  # "prompt" or "workflow"
+
+
+@router.get("/api/prompts", response_model=List[PromptWorkflowListItem])
+def list_prompts_and_workflows(
+    project_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    """List prompts and workflows, optionally filtered by project_id."""
+    result = []
+
+    # Get prompts
+    prompt_query = db.query(Prompt).filter(Prompt.is_deleted == False)
+    if project_id:
+        prompt_query = prompt_query.filter(Prompt.project_id == project_id)
+    prompts = prompt_query.order_by(Prompt.name).all()
+
+    for p in prompts:
+        result.append(PromptWorkflowListItem(
+            id=p.id,
+            name=p.name,
+            type="prompt"
+        ))
+
+    # Get workflows (Workflow model doesn't have is_deleted)
+    workflow_query = db.query(Workflow)
+    if project_id:
+        workflow_query = workflow_query.filter(Workflow.project_id == project_id)
+    workflows = workflow_query.order_by(Workflow.name).all()
+
+    for w in workflows:
+        result.append(PromptWorkflowListItem(
+            id=w.id,
+            name=f"[WF] {w.name}",
+            type="workflow"
+        ))
+
+    return result
 
 
 @router.get("/api/prompts/{prompt_id}", response_model=PromptResponse)
@@ -242,22 +314,79 @@ def update_prompt(
     return _prompt_to_response(prompt, db, include_parameters=False)
 
 
-@router.delete("/api/prompts/{prompt_id}")
-def delete_prompt(prompt_id: int, db: Session = Depends(get_db)):
-    """Delete a prompt."""
+class PromptUsageResponse(BaseModel):
+    """Response for prompt usage check."""
+    prompt_id: int
+    prompt_name: str
+    is_used: bool
+    workflow_count: int
+    workflows: List[dict] = []
+
+
+@router.get("/api/prompts/{prompt_id}/usage", response_model=PromptUsageResponse)
+def check_prompt_usage(prompt_id: int, db: Session = Depends(get_db)):
+    """Check if a prompt is used in any workflows."""
     prompt = db.query(Prompt).filter(Prompt.id == prompt_id).first()
     if not prompt:
         raise HTTPException(status_code=404, detail="Prompt not found")
 
-    # Check if this is the last prompt in the project
-    prompt_count = db.query(Prompt).filter(Prompt.project_id == prompt.project_id).count()
-    if prompt_count <= 1:
+    # Find all workflow steps that use this prompt
+    steps = db.query(WorkflowStep).filter(
+        WorkflowStep.prompt_id == prompt_id
+    ).all()
+
+    # Get unique workflows
+    workflow_ids = set(step.workflow_id for step in steps)
+    workflows = db.query(Workflow).filter(Workflow.id.in_(workflow_ids)).all() if workflow_ids else []
+
+    workflow_list = []
+    for wf in workflows:
+        # Find which steps in this workflow use the prompt
+        step_names = [step.step_name for step in steps if step.workflow_id == wf.id]
+        workflow_list.append({
+            "id": wf.id,
+            "name": wf.name,
+            "step_names": step_names
+        })
+
+    return PromptUsageResponse(
+        prompt_id=prompt_id,
+        prompt_name=prompt.name,
+        is_used=len(workflows) > 0,
+        workflow_count=len(workflows),
+        workflows=workflow_list
+    )
+
+
+@router.delete("/api/prompts/{prompt_id}")
+def delete_prompt(prompt_id: int, db: Session = Depends(get_db)):
+    """Soft delete a prompt.
+
+    The prompt is marked as deleted but remains in the database.
+    Workflows using this prompt will continue to work.
+    """
+    prompt = db.query(Prompt).filter(Prompt.id == prompt_id).first()
+    if not prompt:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+
+    # Already deleted?
+    if prompt.is_deleted:
+        raise HTTPException(status_code=400, detail="Prompt is already deleted")
+
+    # Check if this is the last active prompt in the project
+    active_prompt_count = db.query(Prompt).filter(
+        Prompt.project_id == prompt.project_id,
+        Prompt.is_deleted == 0
+    ).count()
+    if active_prompt_count <= 1:
         raise HTTPException(
             status_code=400,
             detail="Cannot delete the last prompt in a project"
         )
 
-    db.delete(prompt)
+    # Soft delete: mark as deleted instead of physical delete
+    prompt.is_deleted = 1
+    prompt.deleted_at = datetime.utcnow().isoformat()
     db.commit()
 
     return {"success": True, "message": f"Prompt {prompt_id} deleted"}
@@ -343,6 +472,7 @@ def update_latest_prompt_revision(
 ):
     """Smart save for prompt revision.
 
+    - If no revision exists (new prompt), create revision 1
     - If content is different from latest revision, create NEW revision
     - If content is identical, return existing revision without changes
     """
@@ -354,10 +484,40 @@ def update_latest_prompt_revision(
         PromptRevision.prompt_id == prompt_id
     ).order_by(PromptRevision.revision.desc()).first()
 
-    if not latest:
-        raise HTTPException(status_code=404, detail="No revision found for this prompt")
+    now = datetime.utcnow().isoformat()
 
-    # Determine new values
+    # Case 1: No revision exists - this is the first save, create revision 1
+    if not latest:
+        new_prompt_template = request.prompt_template or "プロンプトを入力してください / Enter your prompt here"
+        new_parser = request.parser_config or create_default_parser_config()
+        normalized_parser = normalize_json_for_comparison(new_parser or "")
+
+        new_revision = PromptRevision(
+            prompt_id=prompt_id,
+            revision=1,  # First revision
+            prompt_template=new_prompt_template,
+            parser_config=normalized_parser if normalized_parser else new_parser,
+            created_at=now
+        )
+        db.add(new_revision)
+
+        # Update prompt's updated_at
+        prompt.updated_at = now
+
+        db.commit()
+        db.refresh(new_revision)
+
+        return PromptRevisionResponse(
+            id=new_revision.id,
+            prompt_id=new_revision.prompt_id,
+            revision=new_revision.revision,
+            prompt_template=new_revision.prompt_template,
+            parser_config=new_revision.parser_config or "",
+            created_at=new_revision.created_at,
+            is_new=True
+        )
+
+    # Case 2: Revision exists - compare and decide whether to create new revision
     new_prompt_template = request.prompt_template if request.prompt_template else latest.prompt_template
     new_parser = request.parser_config if request.parser_config else latest.parser_config
 
@@ -387,12 +547,12 @@ def update_latest_prompt_revision(
         revision=latest.revision + 1,
         prompt_template=new_prompt_template,
         parser_config=parser_to_store,
-        created_at=datetime.utcnow().isoformat()
+        created_at=now
     )
     db.add(new_revision)
 
     # Update prompt's updated_at
-    prompt.updated_at = datetime.utcnow().isoformat()
+    prompt.updated_at = now
 
     db.commit()
     db.refresh(new_revision)
@@ -466,20 +626,29 @@ def restore_prompt_revision(
 # ========== Combined Endpoints for UI ==========
 
 @router.get("/api/projects/{project_id}/execution-targets", response_model=ProjectPromptsWorkflowsResponse)
-def get_project_execution_targets(project_id: int, db: Session = Depends(get_db)):
+def get_project_execution_targets(
+    project_id: int,
+    include_deleted: bool = False,
+    db: Session = Depends(get_db)
+):
     """Get prompts and workflows for a project (used for execution target selection).
 
     Returns all prompts and workflows belonging to a project,
     used by the UI for the two-step selection (Project -> Prompt/Workflow).
+
+    Args:
+        project_id: The project ID
+        include_deleted: If True, include soft-deleted prompts (for workflow editing)
     """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Get prompts
-    prompts = db.query(Prompt).filter(
-        Prompt.project_id == project_id
-    ).order_by(Prompt.created_at.asc()).all()
+    # Get prompts (exclude deleted unless requested)
+    query = db.query(Prompt).filter(Prompt.project_id == project_id)
+    if not include_deleted:
+        query = query.filter(Prompt.is_deleted == 0)
+    prompts = query.order_by(Prompt.created_at.asc()).all()
 
     prompt_responses = [_prompt_to_response(p, db, include_parameters=True) for p in prompts]
 

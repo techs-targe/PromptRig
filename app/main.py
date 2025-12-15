@@ -24,7 +24,7 @@ if str(project_root) not in sys.path:
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.routes import main, config, run, projects, datasets, settings, workflows, prompts
+from app.routes import main, config, run, projects, datasets, settings, workflows, prompts, tags
 
 # Create FastAPI app
 app = FastAPI(
@@ -52,6 +52,9 @@ app.include_router(workflows.router, tags=["workflows"])
 # Prompts router (v3.0 - new architecture)
 app.include_router(prompts.router, tags=["prompts"])
 
+# Tags router (v3.1 - access control)
+app.include_router(tags.router, tags=["tags"])
+
 
 @app.on_event("startup")
 def startup_event():
@@ -64,8 +67,9 @@ def startup_event():
       are marked as "error" to prevent them from staying stuck forever.
     - This ensures users can see that those jobs were interrupted.
     """
+    import json
     from backend.database import init_db, SessionLocal
-    from backend.database.models import Job, JobItem
+    from backend.database.models import Job, JobItem, WorkflowJob
     from datetime import datetime
 
     init_db()
@@ -101,6 +105,28 @@ def startup_event():
             print(f"✓ Job recovery completed: {len(stale_jobs)} job(s) recovered")
         else:
             print("✓ No stale jobs to recover")
+
+        # Workflow Job Recovery: Mark stale "running"/"pending" workflow jobs as error
+        stale_workflow_jobs = db.query(WorkflowJob).filter(
+            WorkflowJob.status.in_(["running", "pending"])
+        ).all()
+
+        if stale_workflow_jobs:
+            print(f"⚠ Found {len(stale_workflow_jobs)} stale workflow job(s)")
+
+            for wf_job in stale_workflow_jobs:
+                wf_job.status = "error"
+                wf_job.finished_at = datetime.utcnow().isoformat()
+                wf_job.merged_output = json.dumps(
+                    {"_error": "Server restarted - workflow job interrupted"},
+                    ensure_ascii=False
+                )
+                print(f"  ✓ WorkflowJob {wf_job.id}: marked as error")
+
+            db.commit()
+            print(f"✓ Workflow job recovery completed: {len(stale_workflow_jobs)} job(s) recovered")
+        else:
+            print("✓ No stale workflow jobs to recover")
 
     except Exception as e:
         print(f"⚠ Job recovery failed: {e}")

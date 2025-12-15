@@ -12,7 +12,8 @@ Syntax:
     {{PARAM_NAME:FILEPATH}}           - Server-accessible image file path
     {{PARAM_NAME:TEXTFILEPATH}}       - Text file path (content embedded in prompt)
     {{PARAM_NAME:TYPE|}}              - Optional parameter (no default value)
-    {{PARAM_NAME:TYPE|default=値}}    - Optional parameter with default value
+    {{PARAM_NAME:TYPE|default=値}}    - Optional parameter with default value (explicit)
+    {{PARAM_NAME:TYPE|値}}            - Optional parameter with default value (shorthand)
 
 Rules:
 - Duplicate parameter names use the same value across all occurrences
@@ -46,9 +47,9 @@ class ParameterDefinition:
 class PromptTemplateParser:
     """Parser for prompt templates with {{}} syntax."""
 
-    # Pattern to match {{PARAM_NAME[:TYPE][|[default=VALUE]]}}
-    # Groups: (1)name, (2)type, (3)pipe, (4)default_value
-    PARAM_PATTERN = re.compile(r'\{\{([a-zA-Z0-9_]+)(?::([a-zA-Z0-9]+))?(\|)?(?:default=([^}]*))?\}\}')
+    # Pattern to match {{PARAM_NAME[:TYPE][|[VALUE or default=VALUE]]}}
+    # Groups: (1)name, (2)type, (3)pipe_char, (4)value_after_pipe
+    PARAM_PATTERN = re.compile(r'\{\{([a-zA-Z0-9_]+)(?::([a-zA-Z0-9]+))?(\|)?([^}|]*)?\}\}')
 
     # Supported types
     TYPE_TEXT = "TEXT"  # TEXT5, TEXT10, etc.
@@ -80,14 +81,23 @@ class PromptTemplateParser:
         seen = set()
         params = []
 
-        for name, type_spec, pipe, default_value in matches:
+        for name, type_spec, pipe_char, value_after_pipe in matches:
             if name in seen:
                 continue
             seen.add(name)
 
-            # Determine if parameter is optional (has | pipe)
-            is_optional = (pipe == '|')
-            default = default_value if default_value else None
+            # Determine if parameter is optional (has | pipe character)
+            is_optional = (pipe_char == '|')
+
+            # Parse default value from value after pipe
+            default = None
+            if is_optional and value_after_pipe:
+                # Check for explicit "default=" prefix
+                if value_after_pipe.startswith('default='):
+                    default = value_after_pipe[8:]  # Remove "default=" prefix
+                else:
+                    # Shorthand: just the value after |
+                    default = value_after_pipe
 
             # Parse type specification
             param_def = self._parse_type(name, type_spec, is_optional, default)
@@ -427,9 +437,173 @@ class PromptTemplateParser:
         seen = set()
         names = []
 
-        for name, _, _, _ in matches:  # name, type, pipe, default
+        for name, _, _, _ in matches:  # name, type, pipe, value_after_pipe
             if name not in seen:
                 seen.add(name)
                 names.append(name)
 
         return names
+
+
+# ========== Message Role Parser ==========
+
+
+@dataclass
+class ParsedMessage:
+    """A single message with role and content."""
+    role: str  # 'system', 'user', or 'assistant'
+    content: str
+
+
+class MessageRoleParser:
+    """Parser for prompt templates with [SYSTEM]/[USER]/[ASSISTANT] role markers.
+
+    Supports parsing prompt text with role markers to create structured messages
+    for LLM APIs that support system/user/assistant roles.
+
+    Syntax:
+        [SYSTEM]
+        System message content here...
+
+        [USER]
+        User message content here...
+
+        [ASSISTANT]
+        Previous assistant response (for multi-turn conversations)...
+
+        [USER]
+        Follow-up user message...
+
+    Rules:
+    - Markers are case-insensitive: [SYSTEM], [System], [system] all work
+    - Content before first marker is treated as 'user' by default
+    - Multiple markers of same type create separate messages
+    - Empty sections are ignored
+    - Whitespace is trimmed from each section
+    """
+
+    # Pattern to match role markers [SYSTEM], [USER], [ASSISTANT]
+    ROLE_MARKER_PATTERN = re.compile(
+        r'\[(SYSTEM|USER|ASSISTANT)\]',
+        re.IGNORECASE
+    )
+
+    # Valid roles
+    VALID_ROLES = {'system', 'user', 'assistant'}
+
+    def parse_messages(self, prompt_text: str) -> List[ParsedMessage]:
+        """Parse prompt text into a list of messages with roles.
+
+        Args:
+            prompt_text: Prompt text potentially containing role markers
+
+        Returns:
+            List of ParsedMessage objects with role and content.
+            If no markers found, returns single 'user' message with full text.
+
+        Example:
+            Input:
+                "[SYSTEM]
+                You are a helpful assistant.
+
+                [USER]
+                Hello, how are you?"
+
+            Output:
+                [
+                    ParsedMessage(role='system', content='You are a helpful assistant.'),
+                    ParsedMessage(role='user', content='Hello, how are you?')
+                ]
+        """
+        if not prompt_text:
+            return []
+
+        # Find all role markers and their positions
+        markers = list(self.ROLE_MARKER_PATTERN.finditer(prompt_text))
+
+        # If no markers found, return entire text as user message
+        if not markers:
+            content = prompt_text.strip()
+            if content:
+                return [ParsedMessage(role='user', content=content)]
+            return []
+
+        messages = []
+
+        # Handle content before first marker (if any)
+        first_marker_start = markers[0].start()
+        if first_marker_start > 0:
+            pre_content = prompt_text[:first_marker_start].strip()
+            if pre_content:
+                messages.append(ParsedMessage(role='user', content=pre_content))
+
+        # Process each marker and its following content
+        for i, marker in enumerate(markers):
+            role = marker.group(1).lower()
+
+            # Content starts after marker
+            content_start = marker.end()
+
+            # Content ends at next marker or end of text
+            if i + 1 < len(markers):
+                content_end = markers[i + 1].start()
+            else:
+                content_end = len(prompt_text)
+
+            content = prompt_text[content_start:content_end].strip()
+
+            # Skip empty sections
+            if content:
+                messages.append(ParsedMessage(role=role, content=content))
+
+        return messages
+
+    def to_messages_list(self, prompt_text: str) -> List[Dict[str, str]]:
+        """Parse prompt text and return as list of message dicts.
+
+        This is a convenience method that returns the format expected by
+        LLM client APIs.
+
+        Args:
+            prompt_text: Prompt text potentially containing role markers
+
+        Returns:
+            List of dicts with 'role' and 'content' keys.
+            Example: [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}]
+        """
+        parsed = self.parse_messages(prompt_text)
+        return [{"role": msg.role, "content": msg.content} for msg in parsed]
+
+    def has_role_markers(self, prompt_text: str) -> bool:
+        """Check if prompt text contains any role markers.
+
+        Args:
+            prompt_text: Prompt text to check
+
+        Returns:
+            True if any [SYSTEM], [USER], or [ASSISTANT] markers found
+        """
+        if not prompt_text:
+            return False
+        return bool(self.ROLE_MARKER_PATTERN.search(prompt_text))
+
+
+# Singleton instances for convenience
+_template_parser = None
+_message_parser = None
+
+
+def get_template_parser() -> PromptTemplateParser:
+    """Get singleton PromptTemplateParser instance."""
+    global _template_parser
+    if _template_parser is None:
+        _template_parser = PromptTemplateParser()
+    return _template_parser
+
+
+def get_message_parser() -> MessageRoleParser:
+    """Get singleton MessageRoleParser instance."""
+    global _message_parser
+    if _message_parser is None:
+        _message_parser = MessageRoleParser()
+    return _message_parser

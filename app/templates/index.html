@@ -251,6 +251,9 @@
                     <button id="btn-import-workflow" class="btn btn-secondary" onclick="showImportWorkflowDialog()">
                         <span class="btn-icon">📥</span> JSONインポート
                     </button>
+                    <button id="btn-workflow-reference" class="btn btn-secondary" onclick="showWorkflowReference()">
+                        <span class="btn-icon">📖</span> リファレンス
+                    </button>
                 </div>
             </div>
             <div class="workflow-project-selector">
@@ -319,6 +322,7 @@
                             <input type="hidden" id="workflow-id" value="">
                             <button type="submit" class="btn btn-primary">保存</button>
                             <button type="button" class="btn btn-secondary" onclick="saveWorkflowAs()" id="btn-workflow-save-as" style="display: none;">別名で保存</button>
+                            <button type="button" class="btn btn-secondary" onclick="openWorkflowJsonEditor()" id="btn-workflow-json-edit" style="display: none;">JSON編集</button>
                             <button type="button" class="btn btn-secondary" onclick="exportWorkflow()" id="btn-workflow-export" style="display: none;">JSONエクスポート</button>
                             <button type="button" class="btn btn-secondary" onclick="hideWorkflowEditor()">キャンセル</button>
                             <button type="button" class="btn btn-danger" onclick="deleteWorkflow()" id="btn-workflow-delete" style="display: none;">削除</button>
@@ -712,7 +716,7 @@
         <!-- Variables Tab Content -->
         <div id="vp-tab-variables" class="vp-tab-content active">
             <div style="padding: 0.5rem 0;">
-                <input type="text" id="variable-search" placeholder="🔍 変数を検索... / Search variables..."
+                <input type="text" id="variable-search" placeholder="🔍 変数・関数を検索... / Search variables or functions..."
                        style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.95rem;"
                        oninput="filterVariables(this.value)">
             </div>
@@ -765,6 +769,293 @@
             <button type="button" class="btn btn-secondary" onclick="clearComposition()">
                 🗑️ クリア / Clear
             </button>
+        </div>
+    </div>
+</div>
+
+<!-- Workflow Reference Modal -->
+<div id="workflow-reference-overlay" class="modal-overlay" style="z-index: 1200;">
+    <div id="workflow-reference-modal" class="modal-content" style="max-width: 900px; max-height: 90vh; display: flex; flex-direction: column;">
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 1rem; border-bottom: 1px solid #ddd;">
+            <h3 style="margin: 0;">📖 ワークフロー リファレンス / Workflow Reference</h3>
+            <div style="display: flex; gap: 0.5rem;">
+                <button class="btn btn-secondary" onclick="copyWorkflowReference()" title="コピー">📋 コピー</button>
+                <button class="btn btn-secondary" onclick="closeWorkflowReference()">✕</button>
+            </div>
+        </div>
+
+        <div style="flex: 1; overflow-y: auto; padding: 1rem 0;">
+            {% raw %}
+            <div id="workflow-reference-content" style="font-family: monospace; font-size: 0.85rem; line-height: 1.6; white-space: pre-wrap; background: #f8f9fa; padding: 1rem; border-radius: 4px;">
+# ワークフロー JSON リファレンス / Workflow JSON Reference
+
+このドキュメントをLLMに読み込ませることで、ワークフローJSONの作成を支援できます。
+Feed this document to an LLM to help create workflow JSON.
+
+## 1. JSON基本構造 / Basic JSON Structure
+
+```json
+{
+  "version": "1.0",
+  "name": "ワークフロー名",
+  "description": "説明文",
+  "auto_context": false,
+  "steps": [
+    {
+      "step_order": 1,
+      "step_name": "step1",
+      "step_type": "prompt",
+      "prompt_name": "プロンプト名",
+      "execution_mode": "sequential",
+      "input_mapping": {"param": "{{input.value}}"},
+      "condition_config": null
+    }
+  ]
+}
+```
+
+## 2. ステップタイプ / Step Types
+
+### prompt (LLM実行)
+```json
+{
+  "step_type": "prompt",
+  "prompt_name": "分析プロンプト",
+  "input_mapping": {
+    "text": "{{input.text}}",
+    "context": "{{step1.result}}"
+  }
+}
+```
+
+### set (変数設定)
+```json
+{
+  "step_type": "set",
+  "condition_config": {
+    "variable": "count",
+    "value": "0"
+  }
+}
+```
+- 変数は {{vars.変数名}} で参照
+- 関数も使用可: "value": "sum({{vars.a}}, {{vars.b}})"
+
+### if / elif / else / endif (条件分岐)
+```json
+{"step_type": "if", "condition_config": {"condition": "{{vars.score}} > 80"}},
+{"step_type": "prompt", "prompt_name": "高評価処理"},
+{"step_type": "elif", "condition_config": {"condition": "{{vars.score}} > 50"}},
+{"step_type": "prompt", "prompt_name": "中評価処理"},
+{"step_type": "else"},
+{"step_type": "prompt", "prompt_name": "低評価処理"},
+{"step_type": "endif"}
+```
+
+### loop / endloop (条件ループ)
+```json
+{"step_type": "set", "condition_config": {"variable": "i", "value": "0"}},
+{"step_type": "loop", "condition_config": {"condition": "{{vars.i}} < 3", "max_iterations": 10}},
+{"step_type": "prompt", "prompt_name": "繰り返し処理"},
+{"step_type": "set", "condition_config": {"variable": "i", "value": "sum({{vars.i}}, 1)"}},
+{"step_type": "endloop"}
+```
+
+### foreach / endforeach (リストループ)
+```json
+{"step_type": "foreach", "condition_config": {"list": "{{step1.items}}", "item_var": "item", "index_var": "idx"}},
+{"step_type": "prompt", "prompt_name": "各アイテム処理", "input_mapping": {"item": "{{vars.item}}"}},
+{"step_type": "endforeach"}
+```
+
+### break / continue (ループ制御)
+```json
+{"step_type": "if", "condition_config": {"condition": "{{vars.score}} < 0"}},
+{"step_type": "break"},
+{"step_type": "endif"}
+```
+
+## 3. 変数参照 / Variable References
+
+| 構文 | 説明 | 例 |
+|------|------|-----|
+| {{input.パラメータ名}} | 初期入力値 | {{input.text}} |
+| {{ステップ名.フィールド}} | ステップ出力 | {{step1.result}} |
+| {{vars.変数名}} | SET変数 | {{vars.count}} |
+| {{vars.item}} | FOREACHアイテム | {{vars.item}} |
+| {{vars.idx}} | FOREACHインデックス | {{vars.idx}} |
+
+## 4. 文字列関数 / String Functions
+
+### 変換系
+| 関数 | 説明 | 例 |
+|------|------|-----|
+| upper(s) | 大文字変換 | upper({{step1.text}}) → "HELLO" |
+| lower(s) | 小文字変換 | lower({{step1.text}}) → "hello" |
+| capitalize(s) | 先頭大文字 | capitalize(hello) → "Hello" |
+| title(s) | 各単語先頭大文字 | title(hello world) → "Hello World" |
+| reverse(s) | 文字列反転 | reverse(abc) → "cba" |
+
+### 空白処理
+| 関数 | 説明 | 例 |
+|------|------|-----|
+| trim(s) | 前後空白削除 | trim("  text  ") → "text" |
+| lstrip(s) | 先頭空白削除 | lstrip("  text") → "text" |
+| rstrip(s) | 末尾空白削除 | rstrip("text  ") → "text" |
+
+### 部分文字列
+| 関数 | 説明 | 例 |
+|------|------|-----|
+| slice(s, start, end) | 部分抽出 | slice(Hello, 0, 2) → "He" |
+| left(s, n) | 先頭N文字 | left(Hello, 3) → "Hel" |
+| right(s, n) | 末尾N文字 | right(Hello, 2) → "lo" |
+
+### 変更系
+| 関数 | 説明 | 例 |
+|------|------|-----|
+| replace(s, old, new) | 置換 | replace(hello, l, L) → "heLLo" |
+| repeat(s, n) | 繰り返し | repeat(ab, 3) → "ababab" |
+
+### 配列操作
+| 関数 | 説明 | 例 |
+|------|------|-----|
+| split(s, delim) | 分割→JSON配列 | split(a;b;c, ;) → ["a","b","c"] |
+| join(arr, delim) | 配列→文字列結合 | join(["a","b"], -) → "a-b" |
+| concat(s1, s2, ...) | 連結 | concat(a, b, c) → "abc" |
+
+### 条件/チェック
+| 関数 | 説明 | 例 |
+|------|------|-----|
+| default(s, def) | 空ならデフォルト値 | default({{x}}, N/A) → "N/A" |
+| contains(s, sub) | 含むか | contains(Hello, ell) → "true" |
+| startswith(s, pre) | 先頭一致 | startswith(Hello, He) → "true" |
+| endswith(s, suf) | 末尾一致 | endswith(Hello, lo) → "true" |
+| count(s, sub) | 出現回数 | count(Hello, l) → 2 |
+
+### 数値/長さ
+| 関数 | 説明 | 例 |
+|------|------|-----|
+| length(s) | 文字数 | length(Hello) → 5 |
+| sum(a, b, ...) | 合計 | sum(1, 2, 3) → 6 |
+
+### 特殊
+| 関数 | 説明 | 例 |
+|------|------|-----|
+| shuffle(s, delim) | シャッフル | shuffle(a;b;c, ;) → "c;a;b" (ランダム) |
+| debug(s1, s2, ...) | デバッグ出力 | debug({{x}}, {{y}}) → "val1 \| val2" |
+
+## 5. 条件式の演算子 / Condition Operators
+
+| 演算子 | 説明 | 例 |
+|--------|------|-----|
+| == | 等しい | {{vars.x}} == 10 |
+| != | 等しくない | {{vars.x}} != 0 |
+| > | より大きい | {{vars.score}} > 80 |
+| >= | 以上 | {{vars.score}} >= 60 |
+| < | より小さい | {{vars.count}} < 5 |
+| <= | 以下 | {{vars.count}} <= 10 |
+| && | AND | {{vars.a}} > 0 && {{vars.b}} > 0 |
+| \|\| | OR | {{vars.x}} == 1 \|\| {{vars.y}} == 1 |
+
+## 6. 完全なワークフロー例 / Complete Workflow Example
+
+```json
+{
+  "version": "1.0",
+  "name": "品質チェック付き文章生成",
+  "description": "文章を生成し、品質スコアが80以上になるまで再生成",
+  "auto_context": false,
+  "steps": [
+    {
+      "step_order": 1,
+      "step_name": "init",
+      "step_type": "set",
+      "condition_config": {"variable": "attempt", "value": "0"}
+    },
+    {
+      "step_order": 2,
+      "step_name": "init_score",
+      "step_type": "set",
+      "condition_config": {"variable": "score", "value": "0"}
+    },
+    {
+      "step_order": 3,
+      "step_name": "loop_start",
+      "step_type": "loop",
+      "condition_config": {"condition": "{{vars.score}} < 80 && {{vars.attempt}} < 3", "max_iterations": 5}
+    },
+    {
+      "step_order": 4,
+      "step_name": "generate",
+      "step_type": "prompt",
+      "prompt_name": "文章生成",
+      "input_mapping": {"topic": "{{input.topic}}", "attempt": "{{vars.attempt}}"}
+    },
+    {
+      "step_order": 5,
+      "step_name": "evaluate",
+      "step_type": "prompt",
+      "prompt_name": "品質評価",
+      "input_mapping": {"text": "{{generate.text}}"}
+    },
+    {
+      "step_order": 6,
+      "step_name": "update_score",
+      "step_type": "set",
+      "condition_config": {"variable": "score", "value": "{{evaluate.score}}"}
+    },
+    {
+      "step_order": 7,
+      "step_name": "increment",
+      "step_type": "set",
+      "condition_config": {"variable": "attempt", "value": "sum({{vars.attempt}}, 1)"}
+    },
+    {
+      "step_order": 8,
+      "step_name": "loop_end",
+      "step_type": "endloop"
+    },
+    {
+      "step_order": 9,
+      "step_name": "check_success",
+      "step_type": "if",
+      "condition_config": {"condition": "{{vars.score}} >= 80"}
+    },
+    {
+      "step_order": 10,
+      "step_name": "success_msg",
+      "step_type": "set",
+      "condition_config": {"variable": "status", "value": "成功"}
+    },
+    {
+      "step_order": 11,
+      "step_name": "else_branch",
+      "step_type": "else"
+    },
+    {
+      "step_order": 12,
+      "step_name": "fail_msg",
+      "step_type": "set",
+      "condition_config": {"variable": "status", "value": "再試行上限到達"}
+    },
+    {
+      "step_order": 13,
+      "step_name": "endif_branch",
+      "step_type": "endif"
+    }
+  ]
+}
+```
+
+## 7. 注意事項 / Notes
+
+- prompt_name はシステム内のプロンプト名と完全一致が必要
+- step_order は1から連番で指定
+- step_name は英数字とアンダースコアを推奨
+- 関数の引数区切りはカンマ（split/joinのデリミタにはカンマ以外を推奨）
+- 条件式内の文字列比較は引用符不要
+            </div>
+            {% endraw %}
         </div>
     </div>
 </div>
@@ -935,6 +1226,31 @@
             <button type="button" class="btn btn-primary" onclick="savePromptFromEditor()">💾 保存 / Save</button>
             <button type="button" class="btn btn-secondary" onclick="closePromptEditor()">閉じる / Close</button>
             <span id="prompt-editor-status" style="margin-left: 1rem; color: #7f8c8d;"></span>
+        </div>
+    </div>
+</div>
+
+<!-- Workflow JSON Editor Modal -->
+<div id="workflow-json-editor-overlay" class="modal-overlay" style="z-index: 1300;">
+    <div id="workflow-json-editor-modal" class="modal-content" style="max-width: 1000px; max-height: 90vh; display: flex; flex-direction: column;">
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 1rem; border-bottom: 1px solid #ddd;">
+            <h3 style="margin: 0;">JSON Editor - <span id="workflow-json-editor-title"></span></h3>
+            <div style="display: flex; gap: 0.5rem;">
+                <button class="btn btn-secondary" onclick="formatWorkflowJson()" title="整形">Format</button>
+                <button class="btn btn-secondary" onclick="closeWorkflowJsonEditor()">×</button>
+            </div>
+        </div>
+
+        <div style="flex: 1; overflow-y: auto; padding: 1rem 0;">
+            <textarea id="workflow-json-editor-content"
+                      style="width: 100%; height: 500px; font-family: 'Courier New', monospace; font-size: 0.85rem; line-height: 1.5; padding: 1rem; border: 1px solid #ccc; border-radius: 4px; resize: vertical;"
+                      spellcheck="false"></textarea>
+            <div id="workflow-json-editor-error" style="color: #e74c3c; margin-top: 0.5rem; font-size: 0.85rem; display: none;"></div>
+        </div>
+
+        <div style="display: flex; justify-content: flex-end; gap: 0.5rem; padding-top: 1rem; border-top: 1px solid #ddd;">
+            <button class="btn btn-primary" onclick="saveWorkflowJson()">保存 / Save</button>
+            <button class="btn btn-secondary" onclick="closeWorkflowJsonEditor()">キャンセル / Cancel</button>
         </div>
     </div>
 </div>

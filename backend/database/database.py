@@ -9,7 +9,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from dotenv import load_dotenv
 
-from .models import Base, Project, ProjectRevision
+from .models import (
+    Base, Project, ProjectRevision, Prompt, PromptRevision,
+    Job, JobItem, Dataset, SystemSetting,
+    Tag, PromptTag,
+    Workflow, WorkflowStep, WorkflowJob, WorkflowJobStep
+)
 
 # Load environment variables
 load_dotenv()
@@ -77,6 +82,17 @@ def migrate_db():
                 db.commit()
                 print("✓ Migration: model_name column added")
 
+        # Check if workflow_jobs table exists
+        if 'workflow_jobs' in inspector.get_table_names():
+            wf_columns = [col['name'] for col in inspector.get_columns('workflow_jobs')]
+
+            # Migration: Add merged_csv_output column to workflow_jobs
+            if 'merged_csv_output' not in wf_columns:
+                print("⚙ Adding merged_csv_output column to workflow_jobs table...")
+                db.execute(text('ALTER TABLE workflow_jobs ADD COLUMN merged_csv_output TEXT'))
+                db.commit()
+                print("✓ Migration: workflow_jobs.merged_csv_output column added")
+
     except Exception as e:
         db.rollback()
         print(f"⚠ Migration warning: {str(e)}")
@@ -91,6 +107,7 @@ def init_db():
     - All tables
     - Default project (ID=1, fixed for Phase 1)
     - Initial project revision
+    - Default "ALL" tag for access control
 
     Based on specification: docs/req.txt section 8 (Phase 1 要件)
     """
@@ -136,8 +153,36 @@ def init_db():
         else:
             print(f"✓ Default project already exists (ID={default_project.id})")
 
+        # Initialize default "ALL" tag for access control
+        init_default_tags(db)
+
     except Exception as e:
         db.rollback()
         raise e
     finally:
         db.close()
+
+
+def init_default_tags(db: Session):
+    """Initialize default tags for access control system.
+
+    Creates:
+    - "ALL" tag: Default tag for all prompts (system tag, cannot be deleted)
+
+    All LLM models have "ALL" in their allowed tags by default.
+    """
+    # Check if "ALL" tag exists
+    all_tag = db.query(Tag).filter(Tag.name == "ALL").first()
+
+    if not all_tag:
+        all_tag = Tag(
+            name="ALL",
+            color="#22c55e",  # Green color
+            description="デフォルトタグ - すべてのモデルで実行可能 / Default tag - executable on all models",
+            is_system=1  # System tag, cannot be deleted
+        )
+        db.add(all_tag)
+        db.commit()
+        print("✓ Created default 'ALL' tag")
+    else:
+        print("✓ Default 'ALL' tag already exists")

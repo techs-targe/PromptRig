@@ -65,6 +65,7 @@ class Prompt(Base):
 
     NEW ARCHITECTURE: A project can have multiple prompts.
     Each prompt has its own revisions (versions).
+    Each prompt can have multiple tags for access control.
     """
     __tablename__ = "prompts"
 
@@ -72,6 +73,8 @@ class Prompt(Base):
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
     name = Column(Text, nullable=False)
     description = Column(Text)
+    is_deleted = Column(Integer, nullable=False, default=0)  # 0=active, 1=deleted (soft delete)
+    deleted_at = Column(Text, nullable=True)  # Timestamp when deleted
     created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
     updated_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
 
@@ -79,9 +82,11 @@ class Prompt(Base):
     project = relationship("Project", back_populates="prompts")
     revisions = relationship("PromptRevision", back_populates="prompt", cascade="all, delete-orphan")
     workflow_steps = relationship("WorkflowStep", back_populates="prompt", foreign_keys="WorkflowStep.prompt_id")
+    tags = relationship("PromptTag", back_populates="prompt", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("idx_prompts_project", "project_id"),
+        Index("idx_prompts_deleted", "is_deleted"),
     )
 
 
@@ -106,6 +111,8 @@ class PromptRevision(Base):
 
     __table_args__ = (
         Index("idx_prompt_revision", "prompt_id", "revision"),
+        # Unique constraint to prevent duplicate revisions
+        # (prompt_id, revision) must be unique
     )
 
 
@@ -204,6 +211,55 @@ class SystemSetting(Base):
     value = Column(Text)
 
 
+# ========== TAG SYSTEM TABLES (v3.1) ==========
+
+class Tag(Base):
+    """Tag table - defines tags for prompt access control.
+
+    Tags are used to control which prompts can be sent to which LLM models.
+    - Each prompt can have multiple tags
+    - Each LLM model has a list of allowed tags
+    - Request is blocked if prompt tags don't match model's allowed tags
+    - "ALL" tag is the default tag for all prompts (backward compatibility)
+    """
+    __tablename__ = "tags"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(Text, nullable=False, unique=True)
+    color = Column(Text, nullable=False, default="#6b7280")  # Hex color code
+    description = Column(Text)
+    is_system = Column(Integer, nullable=False, default=0)  # 1 = system tag (cannot delete)
+    created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+
+    # Relationships
+    prompt_tags = relationship("PromptTag", back_populates="tag", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("idx_tags_name", "name"),
+    )
+
+
+class PromptTag(Base):
+    """Junction table for prompt-tag many-to-many relationship."""
+    __tablename__ = "prompt_tags"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    prompt_id = Column(Integer, ForeignKey("prompts.id"), nullable=False)
+    tag_id = Column(Integer, ForeignKey("tags.id"), nullable=False)
+    created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+
+    # Relationships
+    prompt = relationship("Prompt", back_populates="tags")
+    tag = relationship("Tag", back_populates="prompt_tags")
+
+    __table_args__ = (
+        Index("idx_prompt_tags_prompt", "prompt_id"),
+        Index("idx_prompt_tags_tag", "tag_id"),
+        # Unique constraint to prevent duplicate tag assignments
+        Index("idx_prompt_tags_unique", "prompt_id", "tag_id", unique=True),
+    )
+
+
 # ========== WORKFLOW TABLES (v2.0) ==========
 
 class Workflow(Base):
@@ -218,6 +274,8 @@ class Workflow(Base):
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)
     name = Column(Text, nullable=False)
     description = Column(Text)
+    # Auto-context: automatically include previous steps' USER/ASSISTANT in CONTEXT field
+    auto_context = Column(Integer, nullable=False, default=0)  # 0=disabled, 1=enabled
     created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
     updated_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
 
@@ -237,6 +295,14 @@ class WorkflowStep(Base):
     NEW ARCHITECTURE: Steps now reference prompts (not projects).
     Each step can map inputs from previous step outputs using
     the {{step_name.field}} syntax in input_mapping.
+
+    CONTROL FLOW: step_type determines the step behavior:
+    - prompt: Execute LLM prompt (default)
+    - set: Set/modify variables
+    - if/elif/else/endif: Conditional branching
+    - loop/endloop: Loop with condition
+    - foreach/endforeach: Iterate over list
+    - break/continue: Loop control
     """
     __tablename__ = "workflow_steps"
 
@@ -244,12 +310,14 @@ class WorkflowStep(Base):
     workflow_id = Column(Integer, ForeignKey("workflows.id"), nullable=False)
     step_order = Column(Integer, nullable=False)
     step_name = Column(Text, nullable=False)  # e.g., "step1", "summarize"
+    # Step type for control flow
+    step_type = Column(Text, nullable=False, default="prompt")  # prompt/set/if/elif/else/endif/loop/endloop/foreach/endforeach/break/continue
     # OLD: kept for backward compatibility during migration
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)
     # NEW: reference to prompt within the project
     prompt_id = Column(Integer, ForeignKey("prompts.id"), nullable=True)
     execution_mode = Column(Text, nullable=False, default="sequential")  # sequential/parallel (future)
-    condition_config = Column(Text)  # JSON for conditional execution (future)
+    condition_config = Column(Text)  # JSON for control flow settings (conditions, assignments, etc.)
     input_mapping = Column(Text)  # JSON: {"param_name": "{{step1.field_name}}"}
     created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
 
@@ -277,6 +345,7 @@ class WorkflowJob(Base):
     status = Column(Text, nullable=False, default="pending")  # pending/running/done/error
     input_params = Column(Text)  # JSON: initial input parameters
     merged_output = Column(Text)  # JSON: merged results from all steps
+    merged_csv_output = Column(Text)  # Merged CSV output from all steps with csv_template parser
     model_name = Column(Text)
     created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
     started_at = Column(Text)

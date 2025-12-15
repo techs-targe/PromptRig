@@ -169,6 +169,10 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
 
     Specification: docs/req.txt section 4.4
     Phase 2
+
+    NOTE: Prefers PromptRevision (new architecture) over ProjectRevision (old)
+    when a project has associated prompts. This ensures optional parameter
+    markers (|) are correctly recognized.
     """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -178,29 +182,68 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
         ProjectRevision.project_id == project.id
     ).count()
 
-    # Get latest revision
-    latest_revision = db.query(ProjectRevision).filter(
-        ProjectRevision.project_id == project.id
-    ).order_by(ProjectRevision.revision.desc()).first()
+    # NEW: Check for prompts (new architecture) first
+    # This ensures the latest template with optional markers is used
+    default_prompt = db.query(Prompt).filter(
+        Prompt.project_id == project_id,
+        Prompt.is_deleted == 0
+    ).order_by(Prompt.created_at.asc()).first()
 
-    # Parse prompt template to get parameters
+    prompt_template = ""
+    parser_config = ""
     parameters = []
-    if latest_revision:
-        parser = PromptTemplateParser()
-        param_defs = parser.parse_template(latest_revision.prompt_template)
-        parameters = [
-            ParameterDefinitionResponse(
-                name=p.name,
-                type=p.type,
-                html_type=p.html_type,
-                rows=p.rows,
-                accept=p.accept,
-                placeholder=p.placeholder,
-                required=p.required,
-                default=p.default
-            )
-            for p in param_defs
-        ]
+
+    if default_prompt:
+        # Use PromptRevision (new architecture)
+        latest_prompt_revision = db.query(PromptRevision).filter(
+            PromptRevision.prompt_id == default_prompt.id
+        ).order_by(PromptRevision.revision.desc()).first()
+
+        if latest_prompt_revision:
+            prompt_template = latest_prompt_revision.prompt_template
+            parser_config = latest_prompt_revision.parser_config or ""
+
+            parser = PromptTemplateParser()
+            param_defs = parser.parse_template(prompt_template)
+            parameters = [
+                ParameterDefinitionResponse(
+                    name=p.name,
+                    type=p.type,
+                    html_type=p.html_type,
+                    rows=p.rows,
+                    accept=p.accept,
+                    placeholder=p.placeholder,
+                    required=p.required,
+                    default=p.default
+                )
+                for p in param_defs
+            ]
+
+    # Fallback to ProjectRevision (old architecture) if no prompts
+    if not parameters:
+        latest_revision = db.query(ProjectRevision).filter(
+            ProjectRevision.project_id == project.id
+        ).order_by(ProjectRevision.revision.desc()).first()
+
+        if latest_revision:
+            prompt_template = latest_revision.prompt_template
+            parser_config = latest_revision.parser_config or ""
+
+            parser = PromptTemplateParser()
+            param_defs = parser.parse_template(prompt_template)
+            parameters = [
+                ParameterDefinitionResponse(
+                    name=p.name,
+                    type=p.type,
+                    html_type=p.html_type,
+                    rows=p.rows,
+                    accept=p.accept,
+                    placeholder=p.placeholder,
+                    required=p.required,
+                    default=p.default
+                )
+                for p in param_defs
+            ]
 
     return ProjectResponse(
         id=project.id,
@@ -208,8 +251,8 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
         description=project.description or "",
         created_at=project.created_at,
         revision_count=revision_count,
-        prompt_template=latest_revision.prompt_template if latest_revision else "",
-        parser_config=latest_revision.parser_config if latest_revision else "",
+        prompt_template=prompt_template,
+        parser_config=parser_config,
         parameters=parameters
     )
 

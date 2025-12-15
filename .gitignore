@@ -4,6 +4,10 @@
 .env.*.local
 config/config.yaml
 
+# Private/Closed LLM models (not tracked by git)
+backend/llm/private/
+!backend/llm/private/.gitkeep
+
 # Database files (only exclude root-level database/, not backend/database/)
 /database/
 *.db

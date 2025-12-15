@@ -15,11 +15,21 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
 import io
 
-from .database.models import Job, JobItem, ProjectRevision, PromptRevision, Dataset, SystemSetting
-from .prompt import PromptTemplateParser
+from .database.models import Job, JobItem, ProjectRevision, PromptRevision, Dataset, SystemSetting, Prompt
+from .prompt import PromptTemplateParser, get_message_parser
 from .llm import get_llm_client, LLMClient
 from .parser import ResponseParser
 from sqlalchemy import text
+
+# Import tag validation (lazy import to avoid circular dependencies)
+def validate_prompt_tags(prompt_id: int, model_name: str, db: Session) -> tuple:
+    """Validate prompt tags against model's allowed tags.
+
+    Returns:
+        tuple: (is_valid, error_message)
+    """
+    from app.routes.tags import validate_prompt_tags_for_model
+    return validate_prompt_tags_for_model(prompt_id, model_name, db)
 
 
 def extract_csv_template_field_order(csv_template: str) -> List[str]:
@@ -86,7 +96,8 @@ class JobManager:
         prompt_revision_id: int = None,
         input_params: Dict[str, str] = None,
         repeat: int = 1,
-        model_name: str = None
+        model_name: str = None,
+        template_override: str = None
     ) -> Job:
         """Create a single execution job.
 
@@ -95,6 +106,8 @@ class JobManager:
             prompt_revision_id: ID of prompt revision to use (NEW architecture v3.0)
             input_params: Dictionary of parameter name -> value
             repeat: Number of times to repeat execution (default 1, max 10)
+            model_name: LLM model name to use
+            template_override: Override template (used for workflow step ref substitution)
 
         Returns:
             Created Job object (not yet executed)
@@ -139,10 +152,14 @@ class JobManager:
         # Create job items (one per repeat)
         allowed_dirs = self._get_allowed_image_directories()  # Also used for TEXTFILEPATH
         text_extensions = self._get_text_file_extensions()  # For FILEPATH text expansion
+
+        # Use template_override if provided (for workflow step ref substitution)
+        prompt_template = template_override if template_override else revision.prompt_template
+
         for i in range(repeat):
             # Substitute parameters into template
             raw_prompt = self.parser.substitute_parameters(
-                revision.prompt_template,
+                prompt_template,
                 input_params,
                 allowed_dirs,
                 text_extensions
@@ -208,6 +225,51 @@ class JobManager:
             self.db.commit()
             self.db.refresh(job)
             return job
+
+        # Tag validation: Check if prompt tags match model's allowed tags
+        actual_model_name = model_name or os.getenv("ACTIVE_LLM_MODEL", "azure-gpt-4.1")
+        prompt_id = None
+
+        # Get prompt_id from job's prompt_revision
+        if job.prompt_revision_id:
+            prompt_revision = self.db.query(PromptRevision).filter(
+                PromptRevision.id == job.prompt_revision_id
+            ).first()
+            if prompt_revision:
+                prompt_id = prompt_revision.prompt_id
+        elif job.project_revision_id:
+            # Old architecture: Get default prompt for project
+            project_revision = self.db.query(ProjectRevision).filter(
+                ProjectRevision.id == job.project_revision_id
+            ).first()
+            if project_revision:
+                default_prompt = self.db.query(Prompt).filter(
+                    Prompt.project_id == project_revision.project_id,
+                    Prompt.is_deleted == 0
+                ).order_by(Prompt.created_at.asc()).first()
+                if default_prompt:
+                    prompt_id = default_prompt.id
+
+        if prompt_id:
+            is_valid, error_msg = validate_prompt_tags(prompt_id, actual_model_name, self.db)
+            if not is_valid:
+                logger.warning(f"[TAG-BLOCKED] Job {job.id}: {error_msg}")
+                job.status = "error"
+                job.finished_at = datetime.utcnow().isoformat()
+                job.turnaround_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+                self.db.commit()
+
+                # Set error message on all pending items
+                pending_items = self.db.query(JobItem).filter(
+                    JobItem.job_id == job_id,
+                    JobItem.status == "pending"
+                ).all()
+                for item in pending_items:
+                    item.status = "error"
+                    item.error_message = error_msg
+                self.db.commit()
+                self.db.refresh(job)
+                return job
 
         # Update job status
         job.status = "running"
@@ -675,6 +737,17 @@ class JobManager:
                         # Continue without images if processing fails
 
                 # Call LLM with prompt, optional images, and model parameters
+                # Parse prompt for [SYSTEM]/[USER]/[ASSISTANT] role markers
+                message_parser = get_message_parser()
+                if message_parser.has_role_markers(item.raw_prompt):
+                    # Use messages mode for structured prompts
+                    messages = message_parser.to_messages_list(item.raw_prompt)
+                    prompt_arg = None
+                else:
+                    # Use simple prompt mode (backward compatible)
+                    messages = None
+                    prompt_arg = item.raw_prompt
+
                 # GPT-5 models don't use temperature parameter
                 model_name = llm_client.get_model_name()
                 is_gpt5 = "gpt-5" in model_name or "gpt5" in model_name
@@ -682,14 +755,16 @@ class JobManager:
                 if is_gpt5:
                     # GPT-5: Don't pass temperature
                     response = llm_client.call(
-                        item.raw_prompt,
+                        prompt=prompt_arg,
+                        messages=messages,
                         images=images if images else None,
                         **model_params
                     )
                 else:
                     # GPT-4 and other models: Pass temperature
                     response = llm_client.call(
-                        item.raw_prompt,
+                        prompt=prompt_arg,
+                        messages=messages,
                         images=images if images else None,
                         temperature=temperature,
                         **model_params
@@ -829,6 +904,17 @@ class JobManager:
                             logger.error(f"Error processing images for item {item_id}: {e}")
 
                     # Call LLM with prompt, optional images, and model parameters
+                    # Parse prompt for [SYSTEM]/[USER]/[ASSISTANT] role markers
+                    message_parser = get_message_parser()
+                    if message_parser.has_role_markers(raw_prompt):
+                        # Use messages mode for structured prompts
+                        messages = message_parser.to_messages_list(raw_prompt)
+                        prompt_arg = None
+                    else:
+                        # Use simple prompt mode (backward compatible)
+                        messages = None
+                        prompt_arg = raw_prompt
+
                     # GPT-5 models don't use temperature parameter
                     model_name = llm_client.get_model_name()
                     is_gpt5 = "gpt-5" in model_name or "gpt5" in model_name
@@ -836,14 +922,16 @@ class JobManager:
                     if is_gpt5:
                         # GPT-5: Don't pass temperature
                         response = llm_client.call(
-                            raw_prompt,
+                            prompt=prompt_arg,
+                            messages=messages,
                             images=images if images else None,
                             **model_params
                         )
                     else:
                         # GPT-4 and other models: Pass temperature
                         response = llm_client.call(
-                            raw_prompt,
+                            prompt=prompt_arg,
+                            messages=messages,
                             images=images if images else None,
                             temperature=temperature,
                             **model_params

@@ -57,7 +57,7 @@ class WorkflowManager:
         r'^(sum|upper|lower|trim|length|len|slice|substr|substring|replace|'
         r'split|join|concat|default|ifempty|contains|startswith|endswith|'
         r'count|left|right|repeat|reverse|capitalize|title|lstrip|rstrip|'
-        r'shuffle|debug)\((.+)\)$',
+        r'shuffle|debug|calc)\((.+)\)$',
         re.IGNORECASE
     )
 
@@ -86,7 +86,8 @@ class WorkflowManager:
         'endswith': {'args': 2, 'desc': '末尾一致 / Check if ends with', 'example': 'endswith({{step.text}}, suffix)'},
         'count': {'args': 2, 'desc': '出現回数 / Count occurrences', 'example': 'count({{step.text}}, a)'},
         'sum': {'args': '2+', 'desc': '合計 / Sum of numbers', 'example': 'sum({{step1.score}}, {{step2.score}})'},
-        'shuffle': {'args': 2, 'desc': 'シャッフル / Shuffle delimited items', 'example': 'shuffle({{step.items}}, ;)'},
+        'shuffle': {'args': '1-2', 'desc': 'シャッフル / Shuffle (1引数:文字, 2引数:デリミタ分割)', 'example': 'shuffle({{step.items}}, ;)'},
+        'calc': {'args': 1, 'desc': '計算式評価 / Evaluate arithmetic expression', 'example': 'calc({{vars.x}} + 1)'},
         'debug': {'args': '1+', 'desc': 'デバッグ出力 / Debug output to log', 'example': 'debug({{step.result}})'},
     }
 
@@ -127,13 +128,14 @@ class WorkflowManager:
         logger.info(f"Created workflow: {workflow.id} - {name} (project_id={project_id}, auto_context={auto_context})")
         return workflow
 
-    def update_workflow(self, workflow_id: int, name: str = None, description: str = None, auto_context: bool = None) -> Workflow:
+    def update_workflow(self, workflow_id: int, name: str = None, description: str = None, project_id: int = None, auto_context: bool = None) -> Workflow:
         """Update workflow metadata.
 
         Args:
             workflow_id: Workflow ID
             name: New name (optional)
             description: New description (optional)
+            project_id: Project ID to associate (optional)
             auto_context: Auto-context setting (optional)
 
         Returns:
@@ -147,6 +149,8 @@ class WorkflowManager:
             workflow.name = name
         if description is not None:
             workflow.description = description
+        if project_id is not None:
+            workflow.project_id = project_id
         if auto_context is not None:
             workflow.auto_context = 1 if auto_context else 0
         workflow.updated_at = datetime.utcnow().isoformat()
@@ -1472,15 +1476,40 @@ class WorkflowManager:
                 return 0
 
             if func_name == "shuffle":
-                if len(args) >= 2:
+                if args:
                     text = str(args[0])
-                    delimiter = str(args[1])
-                    if not delimiter:
-                        return text
-                    parts = text.split(delimiter)
-                    random.shuffle(parts)
-                    return delimiter.join(parts)
-                return str(args[0]) if args else ""
+                    if len(args) >= 2:
+                        # Shuffle with delimiter
+                        delimiter = str(args[1])
+                        if not delimiter:
+                            return text
+                        parts = text.split(delimiter)
+                        random.shuffle(parts)
+                        return delimiter.join(parts)
+                    else:
+                        # Shuffle characters
+                        chars = list(text)
+                        random.shuffle(chars)
+                        return "".join(chars)
+                return ""
+
+            if func_name == "calc":
+                # Evaluate simple arithmetic expressions
+                if args:
+                    expr = str(args[0])
+                    # Only allow safe characters for arithmetic
+                    safe_expr = ''.join(c for c in expr if c in '0123456789+-*/.() ')
+                    try:
+                        # Use eval with restricted globals for safety
+                        result = eval(safe_expr, {"__builtins__": {}}, {})
+                        # Return integer if result is whole number
+                        if isinstance(result, float) and result.is_integer():
+                            return int(result)
+                        return result
+                    except Exception as e:
+                        logger.warning(f"calc() evaluation error: {e}, expr: {safe_expr}")
+                        return 0
+                return 0
 
             if func_name == "debug":
                 # Debug output - logs all arguments and returns them concatenated
@@ -1645,26 +1674,26 @@ class WorkflowManager:
         template: str,
         step_context: Dict[str, Dict[str, Any]]
     ) -> str:
-        """Substitute a single {{step.field}} reference.
+        """Substitute all {{step.field}} references in template.
 
         Args:
-            template: Template string that may contain a single reference
+            template: Template string that may contain references
             step_context: Context with step outputs
 
         Returns:
-            Resolved value
+            String with all references resolved
         """
-        match = self.STEP_REF_PATTERN.search(template)
-        if match:
+        def replacer(match):
             step_name = match.group(1)
             field_name = match.group(2)
 
             if step_name in step_context:
                 value = step_context[step_name].get(field_name, "")
                 return str(value) if value is not None else ""
+            return match.group(0)  # Keep original if not found
 
-        # If no reference found, return as-is (might be a literal number)
-        return template
+        # Replace all {{step.field}} references in the template
+        return self.STEP_REF_PATTERN.sub(replacer, template)
 
     def _execute_step(
         self,

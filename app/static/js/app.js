@@ -7239,6 +7239,26 @@ function escapeHtmlGlobal(unsafe) {
         .replace(/'/g, "&#039;");
 }
 
+/**
+ * Escape string for use in JavaScript string within HTML onclick attribute
+ * First escapes for JavaScript (backslash and single quote), then for HTML
+ * @param {string} str - String to escape
+ * @returns {string} - Escaped string safe for onclick="func('...')"
+ */
+function escapeForJsInHtml(str) {
+    if (str === null || str === undefined) return '';
+    // First: escape backslashes and single quotes for JavaScript
+    let jsEscaped = String(str)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'");
+    // Then: escape HTML special chars (except single quote which is already JS-escaped)
+    return jsEscaped
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
 /** Get icon for step type in execution trace */
 function getStepTypeIcon(stepType) {
     const icons = {
@@ -7417,8 +7437,9 @@ function showCreateWorkflowForm() {
 
     document.getElementById('workflow-editor').style.display = 'block';
 
-    // Hide Save As, Export, and Delete buttons for new workflow
+    // Hide Save As, Export, JSON Edit, and Delete buttons for new workflow
     document.getElementById('btn-workflow-save-as').style.display = 'none';
+    document.getElementById('btn-workflow-json-edit').style.display = 'none';
     document.getElementById('btn-workflow-export').style.display = 'none';
     document.getElementById('btn-workflow-delete').style.display = 'none';
 
@@ -7945,10 +7966,10 @@ async function loadInputMappingForStep(stepNumber, promptId, existingMapping = n
                            value="${escapeHtmlGlobal(existingValue)}"
                            placeholder="{{input.${escapeHtmlGlobal(paramName)}}} or {{step1.field}} or sum(...)"
                     >
-                    <button type="button" class="btn-var-picker-small"
+                    <button type="button" class="btn-var-insert"
                             onclick="openVariablePickerForInputMapping(${stepNumber}, '${escapeHtmlGlobal(paramName)}')"
-                            title="変数を挿入 / Insert variable">
-                        📥
+                            title="変数を挿入 / Insert Variable">
+                        {...}
                     </button>
                 </div>
             </div>
@@ -8001,10 +8022,10 @@ function createCustomMappingRowHtml(stepNumber, paramName = '', paramValue = '')
                        value="${escapeHtmlGlobal(paramValue)}"
                        placeholder="{{input.param}} or {{step1.field}} or sum(...)"
                 >
-                <button type="button" class="btn-var-picker-small"
+                <button type="button" class="btn-var-insert"
                         onclick="openVariablePickerForCustomMapping(this, ${stepNumber})"
-                        title="変数を挿入 / Insert variable">
-                    📥
+                        title="変数を挿入 / Insert Variable">
+                    {...}
                 </button>
             </div>
         </div>
@@ -8707,8 +8728,9 @@ async function selectWorkflow(workflowId) {
 
         document.getElementById('workflow-editor').style.display = 'block';
 
-        // Show Save As, Export, and Delete buttons for existing workflow
+        // Show Save As, JSON Edit, Export, and Delete buttons for existing workflow
         document.getElementById('btn-workflow-save-as').style.display = 'inline-block';
+        document.getElementById('btn-workflow-json-edit').style.display = 'inline-block';
         document.getElementById('btn-workflow-export').style.display = 'inline-block';
         document.getElementById('btn-workflow-delete').style.display = 'inline-block';
 
@@ -8823,6 +8845,125 @@ async function exportWorkflow() {
 }
 
 /**
+ * Open workflow JSON editor modal
+ */
+async function openWorkflowJsonEditor() {
+    if (!selectedWorkflow) {
+        alert('ワークフローを選択してください / Please select a workflow');
+        return;
+    }
+
+    try {
+        // Fetch export data for editing
+        const response = await fetch(`/api/workflows/${selectedWorkflow.id}/export`);
+        if (!response.ok) throw new Error('Failed to fetch workflow data');
+
+        const exportData = await response.json();
+
+        // Set title
+        document.getElementById('workflow-json-editor-title').textContent = selectedWorkflow.name;
+
+        // Set content
+        const content = JSON.stringify(exportData, null, 2);
+        document.getElementById('workflow-json-editor-content').value = content;
+
+        // Clear error
+        const errorDiv = document.getElementById('workflow-json-editor-error');
+        errorDiv.style.display = 'none';
+        errorDiv.textContent = '';
+
+        // Show modal
+        document.getElementById('workflow-json-editor-overlay').style.display = 'flex';
+
+    } catch (error) {
+        console.error('Error opening JSON editor:', error);
+        alert('JSONエディタを開けませんでした / Failed to open JSON editor');
+    }
+}
+
+/**
+ * Close workflow JSON editor modal
+ */
+function closeWorkflowJsonEditor() {
+    document.getElementById('workflow-json-editor-overlay').style.display = 'none';
+}
+
+/**
+ * Format JSON in the editor
+ */
+function formatWorkflowJson() {
+    const textarea = document.getElementById('workflow-json-editor-content');
+    const errorDiv = document.getElementById('workflow-json-editor-error');
+
+    try {
+        const json = JSON.parse(textarea.value);
+        textarea.value = JSON.stringify(json, null, 2);
+        errorDiv.style.display = 'none';
+    } catch (e) {
+        errorDiv.textContent = `JSON構文エラー: ${e.message}`;
+        errorDiv.style.display = 'block';
+    }
+}
+
+/**
+ * Save workflow from JSON editor
+ */
+async function saveWorkflowJson() {
+    if (!selectedWorkflow) {
+        alert('ワークフローを選択してください / Please select a workflow');
+        return;
+    }
+
+    const textarea = document.getElementById('workflow-json-editor-content');
+    const errorDiv = document.getElementById('workflow-json-editor-error');
+
+    let jsonData;
+    try {
+        jsonData = JSON.parse(textarea.value);
+    } catch (e) {
+        errorDiv.textContent = `JSON構文エラー: ${e.message}`;
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    // Validate basic structure
+    if (!jsonData.name || !Array.isArray(jsonData.steps)) {
+        errorDiv.textContent = 'Invalid JSON format: name and steps are required';
+        errorDiv.style.display = 'block';
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/workflows/${selectedWorkflow.id}/json`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workflow_json: jsonData })
+        });
+
+        if (!response.ok) {
+            const err = await response.json();
+            throw new Error(err.detail || 'Failed to save workflow');
+        }
+
+        const updatedWorkflow = await response.json();
+
+        // Close modal
+        closeWorkflowJsonEditor();
+
+        // Refresh workflow list and editor
+        await loadWorkflowList();
+        await loadWorkflowForEditing(selectedWorkflow.id);
+
+        alert('ワークフローを保存しました / Workflow saved successfully');
+
+    } catch (error) {
+        console.error('Error saving workflow JSON:', error);
+        errorDiv.textContent = `保存エラー: ${error.message}`;
+        errorDiv.style.display = 'block';
+    }
+}
+
+/**
  * Show import workflow dialog
  */
 function showImportWorkflowDialog() {
@@ -8884,11 +9025,96 @@ function showImportWorkflowDialog() {
     input.click();
 }
 
+// ========== Workflow Reference Modal ==========
+
+/**
+ * Show workflow reference modal
+ */
+function showWorkflowReference() {
+    document.getElementById('workflow-reference-overlay').classList.add('active');
+}
+
+/**
+ * Close workflow reference modal
+ */
+function closeWorkflowReference() {
+    document.getElementById('workflow-reference-overlay').classList.remove('active');
+}
+
+/**
+ * Copy workflow reference content to clipboard
+ */
+async function copyWorkflowReference() {
+    const content = document.getElementById('workflow-reference-content').textContent;
+    try {
+        await navigator.clipboard.writeText(content);
+        alert('リファレンスをクリップボードにコピーしました\nReference copied to clipboard');
+    } catch (error) {
+        console.error('Failed to copy:', error);
+        // Fallback for older browsers
+        const textarea = document.createElement('textarea');
+        textarea.value = content;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+        alert('リファレンスをクリップボードにコピーしました\nReference copied to clipboard');
+    }
+}
+
+// Close reference modal when clicking overlay
+document.addEventListener('DOMContentLoaded', () => {
+    const overlay = document.getElementById('workflow-reference-overlay');
+    if (overlay) {
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) {
+                closeWorkflowReference();
+            }
+        });
+    }
+});
+
 // ========== Variable Picker for Workflow Steps ==========
 
 let variablePickerTarget = null;  // The textarea that will receive the inserted variable
 let cachedWorkflowVariables = null;  // Cached variables data
 let variablePickerCurrentStep = null;  // Current step number for variable filtering
+
+// Global list of available functions for variable picker search
+const WORKFLOW_FUNCTIONS = [
+    // Text transformation
+    { name: 'upper', example: 'upper({{v}})', desc: '大文字変換 / Uppercase' },
+    { name: 'lower', example: 'lower({{v}})', desc: '小文字変換 / Lowercase' },
+    { name: 'trim', example: 'trim({{v}})', desc: '前後空白削除 / Trim whitespace' },
+    { name: 'lstrip', example: 'lstrip({{v}})', desc: '先頭空白削除 / Left strip' },
+    { name: 'rstrip', example: 'rstrip({{v}})', desc: '末尾空白削除 / Right strip' },
+    { name: 'capitalize', example: 'capitalize({{v}})', desc: '先頭大文字 / Capitalize' },
+    { name: 'title', example: 'title({{v}})', desc: '各単語先頭大文字 / Title case' },
+    { name: 'reverse', example: 'reverse({{v}})', desc: '文字列反転 / Reverse' },
+    // String extraction
+    { name: 'length', example: 'length({{v}})', desc: '文字数 / Length' },
+    { name: 'slice', example: 'slice({{v}}, 0, 10)', desc: '部分文字列 / Substring' },
+    { name: 'left', example: 'left({{v}}, 5)', desc: '先頭N文字 / First N chars' },
+    { name: 'right', example: 'right({{v}}, 5)', desc: '末尾N文字 / Last N chars' },
+    // String operations
+    { name: 'replace', example: 'replace({{v}}, old, new)', desc: '置換 / Replace' },
+    { name: 'repeat', example: 'repeat({{v}}, 3)', desc: '繰り返し / Repeat' },
+    { name: 'concat', example: 'concat({{a}}, -, {{b}})', desc: '連結 / Concatenate' },
+    { name: 'split', example: 'split({{v}}, ,)', desc: '分割(配列) / Split' },
+    { name: 'join', example: 'join({{arr}}, ,)', desc: '結合 / Join' },
+    // Search & check
+    { name: 'contains', example: 'contains({{v}}, word)', desc: '含むか / Contains' },
+    { name: 'startswith', example: 'startswith({{v}}, pre)', desc: '先頭一致 / Starts with' },
+    { name: 'endswith', example: 'endswith({{v}}, suf)', desc: '末尾一致 / Ends with' },
+    { name: 'count', example: 'count({{v}}, a)', desc: '出現回数 / Count occurrences' },
+    // Utility
+    { name: 'default', example: 'default({{v}}, N/A)', desc: '空時デフォルト / Default value' },
+    { name: 'shuffle', example: 'shuffle({{v}}, ,)', desc: 'シャッフル / Shuffle' },
+    // Math & debug
+    { name: 'sum', example: 'sum({{a}}, {{b}})', desc: '合計 / Sum' },
+    { name: 'calc', example: 'calc({{x}} + 1)', desc: '計算式 / Calculate' },
+    { name: 'debug', example: 'debug({{v}})', desc: 'デバッグ出力 / Debug output' },
+];
 
 /**
  * Open the variable picker dialog
@@ -8910,10 +9136,13 @@ async function openVariablePicker(targetTextarea, stepNumber = null) {
 }
 
 /**
- * Close the variable picker dialog
+ * Close the variable picker dialog (overlay version)
  */
-function closeVariablePicker() {
-    document.getElementById('variable-picker-overlay').classList.remove('active');
+function closeVariablePickerOverlay() {
+    const overlay = document.getElementById('variable-picker-overlay');
+    if (overlay) {
+        overlay.classList.remove('active');
+    }
     variablePickerTarget = null;
     // Reset to variables tab when closing
     switchVariablePickerTab('variables');
@@ -8922,6 +9151,22 @@ function closeVariablePicker() {
     if (compositionInput) {
         compositionInput.value = '';
     }
+}
+
+/**
+ * Unified close function - closes whichever picker is open
+ */
+function closeVariablePicker() {
+    // Try to close dropdown first
+    const dropdown = document.getElementById('variable-picker-dropdown');
+    if (dropdown && dropdown.style.display !== 'none') {
+        dropdown.style.display = 'none';
+        variablePickerTargetInput = null;
+        document.removeEventListener('click', closeVariablePickerOnClickOutside);
+        return;
+    }
+    // Then try overlay
+    closeVariablePickerOverlay();
 }
 
 /**
@@ -9392,6 +9637,18 @@ function buildFilteredCategories(currentStepNumber, workflowSteps) {
         }
     }
 
+    // Add functions category (searchable)
+    const functionVars = WORKFLOW_FUNCTIONS.map(fn => ({
+        name: fn.name,
+        variable: fn.example,
+        source: fn.desc
+    }));
+    categories.push({
+        category_id: 'functions',
+        category_name: '🧮 関数 / Functions',
+        variables: functionVars
+    });
+
     return categories;
 }
 
@@ -9440,7 +9697,7 @@ function renderVariableCategories(categories, searchQuery) {
 
         for (const varInfo of filteredVars) {
             html += `
-                <li class="variable-item" onclick="insertVariable('${escapeHtmlGlobal(varInfo.variable)}')">
+                <li class="variable-item" onclick="insertVariable('${escapeForJsInHtml(varInfo.variable)}')">
                     <span class="var-name">${escapeHtmlGlobal(varInfo.name)}</span>
                     <span class="var-syntax">${escapeHtmlGlobal(varInfo.variable)}</span>
                     <span class="var-source">${escapeHtmlGlobal(varInfo.source)}</span>
@@ -11260,120 +11517,28 @@ async function removePromptEditorTag(tagId) {
 let variablePickerTargetInput = null;
 
 /**
- * Show variable picker dropdown for an input field
+ * Show variable picker for an input field (unified to use overlay modal)
  * @param {HTMLElement} buttonEl - The button that was clicked
  */
 function showVariablePicker(buttonEl) {
-    const targetInput = buttonEl.previousElementSibling;
+    // Find the target input element
+    let targetInput = buttonEl.previousElementSibling;
     if (!targetInput || (targetInput.tagName !== 'INPUT' && targetInput.tagName !== 'TEXTAREA')) {
         // Try to find input in parent's children
         const parent = buttonEl.parentElement;
-        const input = parent.querySelector('input, textarea');
-        if (!input) return;
-        variablePickerTargetInput = input;
-    } else {
-        variablePickerTargetInput = targetInput;
+        targetInput = parent.querySelector('input, textarea');
+        if (!targetInput) return;
     }
 
     // Get step context (which step this input belongs to)
     const stepDiv = buttonEl.closest('.workflow-step');
     const currentStepIndex = getStepIndex(stepDiv);
 
-    // Build variable list
-    const variables = buildVariableList(currentStepIndex);
+    // Convert 0-based index to 1-based step number for openVariablePicker
+    const stepNumber = currentStepIndex >= 0 ? currentStepIndex + 1 : null;
 
-    // Create or get picker dropdown
-    let picker = document.getElementById('variable-picker-dropdown');
-    if (!picker) {
-        picker = document.createElement('div');
-        picker.id = 'variable-picker-dropdown';
-        picker.className = 'variable-picker-dropdown';
-        document.body.appendChild(picker);
-    }
-
-    // Build dropdown content
-    let html = '<div class="variable-picker-header">変数を挿入 / Insert Variable</div>';
-    html += '<div class="variable-picker-content">';
-
-    // Input parameters section
-    if (variables.input.length > 0) {
-        html += '<div class="variable-picker-section">';
-        html += '<div class="variable-picker-section-title">入力パラメータ / Input Parameters</div>';
-        for (const v of variables.input) {
-            html += `<div class="variable-picker-item" onclick="insertVariable('${escapeHtmlGlobal(v.value)}')">`
-                  + `<span class="variable-picker-item-name">${escapeHtmlGlobal(v.value)}</span>`
-                  + `<span class="variable-picker-item-desc">${escapeHtmlGlobal(v.label)}</span></div>`;
-        }
-        html += '</div>';
-    }
-
-    // Variables section (from SET steps)
-    if (variables.vars.length > 0) {
-        html += '<div class="variable-picker-section">';
-        html += '<div class="variable-picker-section-title">変数 / Variables (SET)</div>';
-        for (const v of variables.vars) {
-            html += `<div class="variable-picker-item" onclick="insertVariable('${escapeHtmlGlobal(v.value)}')">`
-                  + `<span class="variable-picker-item-name">${escapeHtmlGlobal(v.value)}</span>`
-                  + `<span class="variable-picker-item-desc">${escapeHtmlGlobal(v.label)}</span></div>`;
-        }
-        html += '</div>';
-    }
-
-    // Step outputs section
-    if (variables.steps.length > 0) {
-        html += '<div class="variable-picker-section">';
-        html += '<div class="variable-picker-section-title">ステップ出力 / Step Outputs</div>';
-        for (const v of variables.steps) {
-            html += `<div class="variable-picker-item" onclick="insertVariable('${escapeHtmlGlobal(v.value)}')">`
-                  + `<span class="variable-picker-item-name">${escapeHtmlGlobal(v.value)}</span>`
-                  + `<span class="variable-picker-item-desc">${escapeHtmlGlobal(v.label)}</span></div>`;
-        }
-        html += '</div>';
-    }
-
-    // FOREACH item variable
-    if (variables.foreach.length > 0) {
-        html += '<div class="variable-picker-section">';
-        html += '<div class="variable-picker-section-title">FOREACH 変数</div>';
-        for (const v of variables.foreach) {
-            html += `<div class="variable-picker-item" onclick="insertVariable('${escapeHtmlGlobal(v.value)}')">`
-                  + `<span class="variable-picker-item-name">${escapeHtmlGlobal(v.value)}</span>`
-                  + `<span class="variable-picker-item-desc">${escapeHtmlGlobal(v.label)}</span></div>`;
-        }
-        html += '</div>';
-    }
-
-    // Common patterns
-    html += '<div class="variable-picker-section">';
-    html += '<div class="variable-picker-section-title">共通パターン / Common Patterns</div>';
-    html += `<div class="variable-picker-item" onclick="insertVariable('{{input.PARAM}}')">`
-          + `<span class="variable-picker-item-name">{{input.PARAM}}</span>`
-          + `<span class="variable-picker-item-desc">入力パラメータ</span></div>`;
-    html += `<div class="variable-picker-item" onclick="insertVariable('{{vars.name}}')">`
-          + `<span class="variable-picker-item-name">{{vars.name}}</span>`
-          + `<span class="variable-picker-item-desc">SET変数</span></div>`;
-    html += `<div class="variable-picker-item" onclick="insertVariable('{{stepN.result}}')">`
-          + `<span class="variable-picker-item-name">{{stepN.result}}</span>`
-          + `<span class="variable-picker-item-desc">ステップ出力</span></div>`;
-    html += `<div class="variable-picker-item" onclick="insertVariable('sum({{a}}, {{b}})')">`
-          + `<span class="variable-picker-item-name">sum({{a}}, {{b}})</span>`
-          + `<span class="variable-picker-item-desc">合計関数</span></div>`;
-    html += '</div>';
-
-    html += '</div>'; // End variable-picker-content
-
-    picker.innerHTML = html;
-
-    // Position picker near the button
-    const rect = buttonEl.getBoundingClientRect();
-    picker.style.top = (rect.bottom + window.scrollY + 5) + 'px';
-    picker.style.left = (rect.left + window.scrollX) + 'px';
-    picker.style.display = 'block';
-
-    // Close picker when clicking outside
-    setTimeout(() => {
-        document.addEventListener('click', closeVariablePickerOnClickOutside);
-    }, 10);
+    // Use the overlay modal picker
+    openVariablePicker(targetInput, stepNumber);
 }
 
 /**
@@ -11399,7 +11564,8 @@ function buildVariableList(currentStepIndex) {
         input: [],
         vars: [],
         steps: [],
-        foreach: []
+        foreach: [],
+        allVars: []  // All SET variables from entire workflow
     };
 
     const container = document.getElementById('workflow-steps-container');
@@ -11417,7 +11583,31 @@ function buildVariableList(currentStepIndex) {
         });
     }
 
-    // Scan steps before current step
+    // Collect all SET variables from entire workflow (for reference)
+    const seenVarNames = new Set();
+    for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        const stepName = step.querySelector('.step-name')?.value?.trim() || `step${i + 1}`;
+        const stepType = step.querySelector('.step-type')?.value || 'prompt';
+
+        if (stepType === 'set') {
+            const assignmentRows = step.querySelectorAll('.set-assignment-row');
+            assignmentRows.forEach(row => {
+                const varName = row.querySelector('.set-var-name')?.value?.trim();
+                if (varName && !seenVarNames.has(varName)) {
+                    seenVarNames.add(varName);
+                    const isPrevious = i < currentStepIndex;
+                    variables.allVars.push({
+                        value: `{{vars.${varName}}}`,
+                        label: `${stepName}${isPrevious ? '' : ' (後で定義)'}`,
+                        isPrevious: isPrevious
+                    });
+                }
+            });
+        }
+    }
+
+    // Scan steps before current step for available variables
     for (let i = 0; i < currentStepIndex && i < steps.length; i++) {
         const step = steps[i];
         const stepName = step.querySelector('.step-name')?.value?.trim() || `step${i + 1}`;
@@ -11534,17 +11724,7 @@ function insertVariable(variable) {
     input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-/**
- * Close the variable picker dropdown
- */
-function closeVariablePicker() {
-    const picker = document.getElementById('variable-picker-dropdown');
-    if (picker) {
-        picker.style.display = 'none';
-    }
-    variablePickerTargetInput = null;
-    document.removeEventListener('click', closeVariablePickerOnClickOutside);
-}
+// Note: closeVariablePicker is defined earlier in the file (unified version)
 
 /**
  * Close variable picker when clicking outside

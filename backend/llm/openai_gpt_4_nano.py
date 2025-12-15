@@ -6,11 +6,11 @@ Uses OpenAI gpt-4.1-nano (2025 model) as secondary LLM provider.
 
 import os
 import time
-from typing import Optional
+from typing import Optional, List
 from openai import OpenAI
 from dotenv import load_dotenv
 
-from .base import LLMClient, LLMResponse
+from .base import LLMClient, LLMResponse, Message
 
 # Load environment variables
 load_dotenv()
@@ -42,11 +42,18 @@ class OpenAIGPT4NanoClient(LLMClient):
         # Initialize client
         self.client = OpenAI(api_key=self.api_key)
 
-    def call(self, prompt: str, images: list = None, **kwargs) -> LLMResponse:
+    def call(
+        self,
+        prompt: str = None,
+        messages: List[Message] = None,
+        images: list = None,
+        **kwargs
+    ) -> LLMResponse:
         """Execute OpenAI GPT-4.1-nano call.
 
         Args:
-            prompt: The prompt text to send
+            prompt: The prompt text to send (simple mode, treated as 'user' role)
+            messages: List of message dicts with 'role' and 'content' keys
             images: Optional list of base64-encoded image strings for Vision API
             **kwargs: Optional parameters
                 - temperature (float): Default 0.2
@@ -66,37 +73,49 @@ class OpenAIGPT4NanoClient(LLMClient):
             max_tokens = kwargs.get("max_tokens", 4000)
             top_p = kwargs.get("top_p", 1.0)
 
-            # Build user content (text + optional images for Vision API)
-            if images:
-                # Multimodal content with images
-                user_content = [{"type": "text", "text": prompt}]
-                for img_data_uri in images:
-                    # Log image data length for debugging
-                    print(f"📷 Vision API: Adding image (data URI length: {len(img_data_uri)} chars)")
-                    user_content.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": img_data_uri,  # Use data URI directly
-                            "detail": "high"  # Required for proper image recognition
-                        }
-                    })
-                print(f"📤 Vision API: Sending {len(images)} image(s) with prompt")
-            else:
-                # Text-only content
-                user_content = prompt
+            # Normalize input to messages list
+            normalized_messages = self._normalize_messages(prompt, messages, images)
 
-            # Build messages with system prompt
-            messages = [
-                {"role": "system", "content": "You are a helpful AI assistant."}
-            ]
+            # Build API messages format
+            api_messages = []
 
-            # Add user message (with or without images)
-            messages.append({"role": "user", "content": user_content})
+            # Check if system message exists, if not add default
+            has_system = any(msg.get("role") == "system" for msg in normalized_messages)
+            if not has_system:
+                api_messages.append({"role": "system", "content": "You are a helpful AI assistant."})
+
+            for msg in normalized_messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                msg_images = msg.get("_images")
+
+                # Handle multimodal content (images)
+                if msg_images and role == "user":
+                    if isinstance(content, str):
+                        api_content = [{"type": "text", "text": content}]
+                    else:
+                        api_content = content.copy() if isinstance(content, list) else [content]
+
+                    for img_data_uri in msg_images:
+                        print(f"📷 Vision API: Adding image (data URI length: {len(img_data_uri)} chars)")
+                        api_content.append({
+                            "type": "image_url",
+                            "image_url": {"url": img_data_uri, "detail": "high"}
+                        })
+                    print(f"📤 Vision API: Sending {len(msg_images)} image(s) with prompt")
+                    api_messages.append({"role": role, "content": api_content})
+                else:
+                    # Text-only content
+                    if isinstance(content, list):
+                        text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
+                        api_messages.append({"role": role, "content": "".join(text_parts)})
+                    else:
+                        api_messages.append({"role": role, "content": content})
 
             # Call OpenAI API
             response = self.client.chat.completions.create(
                 model=self.MODEL_NAME,
-                messages=messages,
+                messages=api_messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 top_p=top_p
