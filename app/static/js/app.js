@@ -9079,6 +9079,7 @@ document.addEventListener('DOMContentLoaded', () => {
 let variablePickerTarget = null;  // The textarea that will receive the inserted variable
 let cachedWorkflowVariables = null;  // Cached variables data
 let variablePickerCurrentStep = null;  // Current step number for variable filtering
+let compositionCaretPosition = 0;  // Saved caret position for composition input
 
 // Global list of available functions for variable picker search
 const WORKFLOW_FUNCTIONS = [
@@ -9131,8 +9132,34 @@ async function openVariablePicker(targetTextarea, stepNumber = null) {
     // Clear search
     document.getElementById('variable-search').value = '';
 
+    // Initialize composition caret position to 0
+    compositionCaretPosition = 0;
+
+    // Set up event listeners for composition input to track caret position
+    const compositionInput = document.getElementById('vp-composition-input');
+    if (compositionInput) {
+        // Remove old listeners to avoid duplicates
+        compositionInput.removeEventListener('keyup', saveCompositionCaretPosition);
+        compositionInput.removeEventListener('click', saveCompositionCaretPosition);
+        compositionInput.removeEventListener('input', saveCompositionCaretPosition);
+        // Add new listeners
+        compositionInput.addEventListener('keyup', saveCompositionCaretPosition);
+        compositionInput.addEventListener('click', saveCompositionCaretPosition);
+        compositionInput.addEventListener('input', saveCompositionCaretPosition);
+    }
+
     // Load variables with context-aware filtering
     await loadWorkflowVariablesWithContext(stepNumber);
+}
+
+/**
+ * Save the current caret position from composition input
+ */
+function saveCompositionCaretPosition() {
+    const compositionInput = document.getElementById('vp-composition-input');
+    if (compositionInput) {
+        compositionCaretPosition = compositionInput.selectionStart || 0;
+    }
 }
 
 /**
@@ -9146,11 +9173,12 @@ function closeVariablePickerOverlay() {
     variablePickerTarget = null;
     // Reset to variables tab when closing
     switchVariablePickerTab('variables');
-    // Clear composition area when closing
+    // Clear composition area and reset caret position when closing
     const compositionInput = document.getElementById('vp-composition-input');
     if (compositionInput) {
         compositionInput.value = '';
     }
+    compositionCaretPosition = 0;
 }
 
 /**
@@ -9262,7 +9290,7 @@ function setFormulaExample(example) {
 }
 
 /**
- * Append text to the composition area textarea
+ * Append text to the composition area textarea at the saved caret position
  * @param {string} text - The text to append
  */
 function appendToComposition(text) {
@@ -9273,25 +9301,19 @@ function appendToComposition(text) {
     }
 
     const currentValue = compositionInput.value;
-    const start = compositionInput.selectionStart;
-    const end = compositionInput.selectionEnd;
+    // Use saved caret position (default to end if not set)
+    const insertPos = compositionCaretPosition !== null ? compositionCaretPosition : currentValue.length;
 
-    // Insert at cursor position (or append if no selection)
-    if (document.activeElement === compositionInput && start !== end) {
-        // Replace selection
-        compositionInput.value = currentValue.substring(0, start) + text + currentValue.substring(end);
-        compositionInput.selectionStart = compositionInput.selectionEnd = start + text.length;
-    } else if (document.activeElement === compositionInput) {
-        // Insert at cursor
-        compositionInput.value = currentValue.substring(0, start) + text + currentValue.substring(start);
-        compositionInput.selectionStart = compositionInput.selectionEnd = start + text.length;
-    } else {
-        // Append to end
-        compositionInput.value = currentValue + text;
-    }
+    // Insert at saved caret position
+    compositionInput.value = currentValue.substring(0, insertPos) + text + currentValue.substring(insertPos);
 
-    // Focus the composition input
+    // Update caret position to after inserted text
+    const newPos = insertPos + text.length;
+    compositionCaretPosition = newPos;
+
+    // Focus and set cursor position
     compositionInput.focus();
+    compositionInput.setSelectionRange(newPos, newPos);
 
     // Flash effect to show something was added
     compositionInput.style.backgroundColor = '#dbeafe';
@@ -9353,6 +9375,7 @@ function clearComposition() {
     if (compositionInput) {
         compositionInput.value = '';
         compositionInput.focus();
+        compositionCaretPosition = 0;
     }
 }
 
@@ -9777,17 +9800,10 @@ function openVariablePickerForStep(stepNumber) {
     }
 }
 
-// Close variable picker when clicking overlay background
-document.addEventListener('DOMContentLoaded', () => {
-    const overlay = document.getElementById('variable-picker-overlay');
-    if (overlay) {
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay) {
-                closeVariablePicker();
-            }
-        });
-    }
+// Variable picker overlay: Do NOT close when clicking outside (user requested)
+// Users must click the close button (×) to close the picker
 
+document.addEventListener('DOMContentLoaded', () => {
     // Initialize draggable window
     initDraggableWindow('prompt-editor-window', 'prompt-editor-header');
 });
@@ -11696,34 +11712,7 @@ function getWorkflowInputParams() {
     return params;
 }
 
-/**
- * Insert a variable into the target input
- * @param {string} variable - The variable string to insert
- */
-function insertVariable(variable) {
-    if (!variablePickerTargetInput) return;
-
-    const input = variablePickerTargetInput;
-    const start = input.selectionStart || 0;
-    const end = input.selectionEnd || 0;
-    const currentValue = input.value || '';
-
-    // Insert variable at cursor position
-    const newValue = currentValue.substring(0, start) + variable + currentValue.substring(end);
-    input.value = newValue;
-
-    // Set cursor position after inserted variable
-    const newPos = start + variable.length;
-    input.setSelectionRange(newPos, newPos);
-    input.focus();
-
-    // Close picker
-    closeVariablePicker();
-
-    // Trigger input event for any listeners
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-}
-
+// Note: insertVariable is defined earlier in the file (unified version that uses appendToComposition)
 // Note: closeVariablePicker is defined earlier in the file (unified version)
 
 /**

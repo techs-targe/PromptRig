@@ -25,6 +25,8 @@ load_dotenv()
 
 if __name__ == "__main__":
     # Get server configuration
+    # Default to localhost only (127.0.0.1) for security
+    # Set SERVER_HOST=0.0.0.0 in .env to allow LAN access
     host = os.getenv("SERVER_HOST", "127.0.0.1")
     port = int(os.getenv("SERVER_PORT", "9200"))
 
