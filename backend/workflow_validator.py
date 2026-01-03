@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from sqlalchemy.orm import Session
 
 from .database.models import Workflow, WorkflowStep, Prompt, PromptRevision
+from .formula_parser import FormulaParser, validate_formula, TokenizerError, ParseError
 
 logger = logging.getLogger(__name__)
 
@@ -823,7 +824,14 @@ class WorkflowValidator:
         result: ValidationResult,
         context: str
     ):
-        """Validate formula function syntax."""
+        """Validate formula function syntax using the Interpreter pattern parser.
+
+        Uses the new FormulaParser for robust syntax validation including:
+        - Proper tokenization
+        - Nested function support
+        - Operator precedence checking
+        - Detailed error messages with position info
+        """
         formula_str = formula_str.strip()
 
         # Check if it's a formula
@@ -831,23 +839,30 @@ class WorkflowValidator:
         if not match:
             return  # Not a formula, nothing to validate
 
+        # Use the new parser for comprehensive validation
+        is_valid, errors = validate_formula(formula_str)
+
+        if not is_valid:
+            for error in errors:
+                # Extract position info if available
+                error_msg = str(error)
+
+                result.add_issue(ValidationIssue(
+                    severity=ValidationSeverity.ERROR,
+                    step_id=step.id,
+                    step_name=step.step_name,
+                    step_order=step.step_order,
+                    category="formula",
+                    message=f"Formula syntax error in {context}: {error_msg}",
+                    message_ja=f"{context} の数式構文エラー: {error_msg}",
+                    suggestion="Check parentheses, quotes, and function arguments",
+                    suggestion_ja="括弧、引用符、関数の引数を確認してください"
+                ))
+            return
+
+        # Additional semantic validation using old method for arg count
         func_name = match.group(1).lower()
         args_str = match.group(2)
-
-        # Validate function name
-        if func_name not in self.VALID_FUNCTIONS:
-            result.add_issue(ValidationIssue(
-                severity=ValidationSeverity.ERROR,
-                step_id=step.id,
-                step_name=step.step_name,
-                step_order=step.step_order,
-                category="formula",
-                message=f"Unknown function '{func_name}' in {context}",
-                message_ja=f"{context} で不明な関数 '{func_name}' を使用しています",
-                suggestion=f"Valid functions: {', '.join(sorted(self.VALID_FUNCTIONS))}",
-                suggestion_ja=f"有効な関数: {', '.join(sorted(self.VALID_FUNCTIONS))}"
-            ))
-            return
 
         # Count arguments (simple parsing)
         arg_count = self._count_formula_args(args_str)

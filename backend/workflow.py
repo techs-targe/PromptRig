@@ -26,6 +26,9 @@ from .database.models import (
 )
 from .job import JobManager
 from .prompt import PromptTemplateParser, get_message_parser
+from .formula_parser import (
+    FormulaParser, validate_formula, TokenizerError, ParseError, EvaluationError
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2116,12 +2119,199 @@ class WorkflowManager:
 
         return resolved
 
+    def _evaluate_with_new_parser(
+        self,
+        formula: str,
+        step_context: Dict[str, Dict[str, Any]]
+    ) -> Any:
+        """Evaluate a formula using the new Interpreter pattern parser.
+
+        This method bridges the new parser to the existing function implementations,
+        providing proper support for nested functions like calc(length(x) + 10).
+
+        Args:
+            formula: Formula string like "upper(trim({{step.text}}))"
+            step_context: Context with step outputs
+
+        Returns:
+            Evaluated result
+        """
+        # Create function handler that calls existing implementations
+        def function_handler(func_name: str, args: List[Any]) -> Any:
+            """Adapter to use existing _evaluate_formula implementations."""
+            # For simple functions, use built-in implementations
+            if func_name == 'upper':
+                return str(args[0]).upper() if args else ""
+            if func_name == 'lower':
+                return str(args[0]).lower() if args else ""
+            if func_name == 'trim':
+                return str(args[0]).strip() if args else ""
+            if func_name == 'lstrip':
+                return str(args[0]).lstrip() if args else ""
+            if func_name == 'rstrip':
+                return str(args[0]).rstrip() if args else ""
+            if func_name in ('length', 'len'):
+                return len(str(args[0])) if args else 0
+            if func_name == 'capitalize':
+                return str(args[0]).capitalize() if args else ""
+            if func_name == 'title':
+                return str(args[0]).title() if args else ""
+            if func_name == 'reverse':
+                return str(args[0])[::-1] if args else ""
+            if func_name in ('slice', 'substr', 'substring'):
+                if len(args) >= 2:
+                    text = str(args[0])
+                    start = int(args[1])
+                    end = int(args[2]) if len(args) >= 3 else None
+                    return text[start:end]
+                return str(args[0]) if args else ""
+            if func_name == 'left':
+                if len(args) >= 2:
+                    return str(args[0])[:int(args[1])]
+                return str(args[0]) if args else ""
+            if func_name == 'right':
+                if len(args) >= 2:
+                    n = int(args[1])
+                    return str(args[0])[-n:] if n > 0 else ""
+                return str(args[0]) if args else ""
+            if func_name == 'repeat':
+                if len(args) >= 2:
+                    return str(args[0]) * max(0, min(int(args[1]), 1000))
+                return str(args[0]) if args else ""
+            if func_name == 'replace':
+                if len(args) >= 3:
+                    return str(args[0]).replace(str(args[1]), str(args[2]))
+                return str(args[0]) if args else ""
+            if func_name == 'concat':
+                return "".join(str(arg) for arg in args)
+            if func_name == 'split':
+                if len(args) >= 2:
+                    delimiter = str(args[1]) or ","
+                    return json.dumps(str(args[0]).split(delimiter), ensure_ascii=False)
+                return "[]"
+            if func_name == 'join':
+                if len(args) >= 2:
+                    items = args[0]
+                    delimiter = str(args[1])
+                    if isinstance(items, str):
+                        try:
+                            items = json.loads(items)
+                        except json.JSONDecodeError:
+                            items = [items]
+                    if isinstance(items, list):
+                        return delimiter.join(str(item) for item in items)
+                return str(args[0]) if args else ""
+            if func_name in ('default', 'ifempty'):
+                if len(args) >= 2:
+                    value = str(args[0]).strip() if args[0] else ""
+                    return value if value else str(args[1])
+                return str(args[0]) if args else ""
+            if func_name == 'contains':
+                if len(args) >= 2:
+                    return "true" if str(args[1]) in str(args[0]) else "false"
+                return "false"
+            if func_name == 'startswith':
+                if len(args) >= 2:
+                    return "true" if str(args[0]).startswith(str(args[1])) else "false"
+                return "false"
+            if func_name == 'endswith':
+                if len(args) >= 2:
+                    return "true" if str(args[0]).endswith(str(args[1])) else "false"
+                return "false"
+            if func_name == 'count':
+                if len(args) >= 2:
+                    return str(args[0]).count(str(args[1]))
+                return 0
+            if func_name == 'sum':
+                return sum(float(arg) for arg in args)
+            if func_name == 'calc':
+                # calc receives already-evaluated arguments from nested functions
+                # Just return the first argument (which should be a number after evaluation)
+                if args:
+                    val = args[0]
+                    if isinstance(val, (int, float)):
+                        return val
+                    # If it's a string, try to convert
+                    try:
+                        return float(val)
+                    except (ValueError, TypeError):
+                        return 0
+                return 0
+            if func_name == 'shuffle':
+                if args:
+                    text = str(args[0])
+                    if len(args) >= 2:
+                        delimiter = str(args[1])
+                        if delimiter:
+                            parts = text.split(delimiter)
+                            random.shuffle(parts)
+                            return delimiter.join(parts)
+                    chars = list(text)
+                    random.shuffle(chars)
+                    return "".join(chars)
+                return ""
+            if func_name == 'debug':
+                debug_output = " | ".join(str(arg) for arg in args)
+                logger.info(f"[DEBUG] {debug_output}")
+                return debug_output
+            if func_name == 'now':
+                fmt = str(args[0]) if args else "%Y-%m-%d %H:%M:%S"
+                return datetime.now().strftime(fmt)
+            if func_name == 'today':
+                fmt = str(args[0]) if args else "%Y-%m-%d"
+                return datetime.now().strftime(fmt)
+            if func_name == 'time':
+                fmt = str(args[0]) if args else "%H:%M:%S"
+                return datetime.now().strftime(fmt)
+            if func_name == 'json_parse':
+                if args:
+                    try:
+                        return json.loads(str(args[0]))
+                    except json.JSONDecodeError:
+                        return args[0]
+                return ""
+            if func_name == 'format_choices':
+                if args:
+                    choices = args[0]
+                    if isinstance(choices, str):
+                        try:
+                            choices = json.loads(choices)
+                        except json.JSONDecodeError:
+                            return str(choices)
+                    if isinstance(choices, dict):
+                        return "\n".join(f"{k}: {v}" for k, v in choices.items())
+                return ""
+            if func_name == 'array_push':
+                if len(args) >= 2:
+                    arr = args[0]
+                    if isinstance(arr, str):
+                        try:
+                            arr = json.loads(arr)
+                        except json.JSONDecodeError:
+                            arr = [] if not arr else [arr]
+                    if not isinstance(arr, list):
+                        arr = [arr] if arr else []
+                    arr.append(args[1])
+                    return json.dumps(arr, ensure_ascii=False)
+                return "[]"
+
+            # For complex functions, fall back to old implementation
+            # Build args_str and call _evaluate_formula
+            args_str = ", ".join(json.dumps(arg, ensure_ascii=False) if isinstance(arg, (dict, list)) else str(arg) for arg in args)
+            return self._evaluate_formula(func_name, args_str, step_context)
+
+        # Create parser and evaluate
+        parser = FormulaParser(function_handler)
+        return parser.evaluate(formula, step_context)
+
     def _substitute_step_refs(
         self,
         template: str,
         step_context: Dict[str, Dict[str, Any]]
     ) -> str:
         """Substitute {{step_name.field}} references and evaluate formulas.
+
+        Uses the new Interpreter pattern parser for proper nested function support.
 
         Args:
             template: Template string with {{step.field}} references or formulas
@@ -2130,8 +2320,22 @@ class WorkflowManager:
         Returns:
             String with substituted values and evaluated formulas
         """
-        # First check if it's a formula (e.g., sum(...), upper(...), etc.)
-        formula_match = self.FORMULA_PATTERN.match(template.strip())
+        # Try the new parser first for formula expressions
+        stripped = template.strip()
+        if self.FORMULA_PATTERN.match(stripped):
+            try:
+                result = self._evaluate_with_new_parser(stripped, step_context)
+                return str(result)
+            except (TokenizerError, ParseError, EvaluationError) as e:
+                # Log the error and fall back to old parser
+                logger.warning(f"New parser failed, falling back: {e}")
+                # Fall through to old implementation
+            except Exception as e:
+                logger.warning(f"Unexpected parser error: {e}")
+                # Fall through to old implementation
+
+        # Fallback: Old implementation for non-formula templates or parser failures
+        formula_match = self.FORMULA_PATTERN.match(stripped)
         if formula_match:
             func_name = formula_match.group(1).lower()
             args_str = formula_match.group(2)
