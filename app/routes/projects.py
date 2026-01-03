@@ -66,12 +66,14 @@ class RevisionResponse(BaseModel):
 
 @router.get("/api/projects", response_model=List[ProjectResponse])
 def list_projects(db: Session = Depends(get_db)):
-    """List all projects.
+    """List all projects (excluding soft-deleted).
 
     Specification: docs/req.txt section 4.4.1
     Phase 2
     """
-    projects = db.query(Project).order_by(Project.created_at.desc()).all()
+    projects = db.query(Project).filter(
+        Project.is_deleted == 0
+    ).order_by(Project.created_at.desc()).all()
 
     result = []
     for project in projects:
@@ -299,16 +301,23 @@ def update_project(
 
 @router.delete("/api/projects/{project_id}")
 def delete_project(project_id: int, db: Session = Depends(get_db)):
-    """Delete project.
+    """Soft delete project (mark as deleted instead of physical removal).
 
     Specification: docs/req.txt section 4.4.1
     Phase 2
     """
+    from datetime import datetime
+
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    db.delete(project)
+    if project.is_deleted:
+        raise HTTPException(status_code=400, detail="Project is already deleted")
+
+    # Soft delete: mark as deleted instead of physical delete
+    project.is_deleted = 1
+    project.deleted_at = datetime.utcnow().isoformat()
     db.commit()
 
     return {"success": True, "message": f"Project {project_id} deleted"}
@@ -572,7 +581,7 @@ def update_latest_revision(
 
 
 @router.get("/api/projects/{project_id}/jobs", response_model=List[JobResponse])
-def get_project_jobs(project_id: int, limit: int = 50, offset: int = 0, job_type: str = None, db: Session = Depends(get_db)):
+def get_project_jobs(project_id: int, limit: int = 50, offset: int = 0, job_type: str = None, prompt_id: int = None, db: Session = Depends(get_db)):
     """Get job history for a specific project.
 
     Args:
@@ -580,6 +589,7 @@ def get_project_jobs(project_id: int, limit: int = 50, offset: int = 0, job_type
         limit: Maximum number of jobs to return (default 50)
         offset: Number of jobs to skip (default 0, for pagination)
         job_type: Filter by job type ('single' or 'batch'). If None, returns all.
+        prompt_id: Filter by specific prompt ID. If None, returns jobs for all prompts in project.
 
     Returns:
         List of jobs with their items, ordered by creation time (newest first)
@@ -594,40 +604,56 @@ def get_project_jobs(project_id: int, limit: int = 50, offset: int = 0, job_type
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Get all project revision IDs (old architecture)
-    project_revisions = db.query(ProjectRevision).filter(
-        ProjectRevision.project_id == project_id
-    ).all()
-    project_revision_ids = [r.id for r in project_revisions]
-
-    # Get all prompt revision IDs for prompts in this project (new architecture)
-    prompts = db.query(Prompt).filter(Prompt.project_id == project_id).all()
-    prompt_ids = [p.id for p in prompts]
-
-    prompt_revision_ids = []
-    if prompt_ids:
+    # If prompt_id is specified, filter by that prompt only
+    if prompt_id:
         prompt_revisions = db.query(PromptRevision).filter(
-            PromptRevision.prompt_id.in_(prompt_ids)
+            PromptRevision.prompt_id == prompt_id
         ).all()
         prompt_revision_ids = [pr.id for pr in prompt_revisions]
 
-    # Build filter conditions
-    conditions = []
-    if project_revision_ids:
-        conditions.append(Job.project_revision_id.in_(project_revision_ids))
-    if prompt_revision_ids:
-        conditions.append(Job.prompt_revision_id.in_(prompt_revision_ids))
+        if not prompt_revision_ids:
+            return []
 
-    # If no revisions at all, return empty
-    if not conditions:
-        return []
+        main_filter = Job.prompt_revision_id.in_(prompt_revision_ids)
 
-    # Build the main filter
-    main_filter = or_(*conditions)
+        # Add job_type filter if specified
+        if job_type in ('single', 'batch'):
+            main_filter = and_(main_filter, Job.job_type == job_type)
+    else:
+        # Get all project revision IDs (old architecture)
+        project_revisions = db.query(ProjectRevision).filter(
+            ProjectRevision.project_id == project_id
+        ).all()
+        project_revision_ids = [r.id for r in project_revisions]
 
-    # Add job_type filter if specified
-    if job_type in ('single', 'batch'):
-        main_filter = and_(main_filter, Job.job_type == job_type)
+        # Get all prompt revision IDs for prompts in this project (new architecture)
+        prompts = db.query(Prompt).filter(Prompt.project_id == project_id).all()
+        prompt_ids_list = [p.id for p in prompts]
+
+        prompt_revision_ids = []
+        if prompt_ids_list:
+            prompt_revisions = db.query(PromptRevision).filter(
+                PromptRevision.prompt_id.in_(prompt_ids_list)
+            ).all()
+            prompt_revision_ids = [pr.id for pr in prompt_revisions]
+
+        # Build filter conditions
+        conditions = []
+        if project_revision_ids:
+            conditions.append(Job.project_revision_id.in_(project_revision_ids))
+        if prompt_revision_ids:
+            conditions.append(Job.prompt_revision_id.in_(prompt_revision_ids))
+
+        # If no revisions at all, return empty
+        if not conditions:
+            return []
+
+        # Build the main filter
+        main_filter = or_(*conditions)
+
+        # Add job_type filter if specified
+        if job_type in ('single', 'batch'):
+            main_filter = and_(main_filter, Job.job_type == job_type)
 
     # Get recent jobs matching the conditions
     recent_jobs_data = db.query(Job).filter(
@@ -653,16 +679,22 @@ def get_project_jobs(project_id: int, limit: int = 50, offset: int = 0, job_type
             for item in job_items
         ]
 
-        # Get prompt name from prompt_revision relationship
+        # Get prompt name, prompt_id and project name from prompt_revision relationship
         prompt_name = None
+        prompt_id_val = None
+        job_project_name = project.name  # Default to current project
         if job.prompt_revision_id:
             prompt_revision = db.query(PromptRevision).filter(
                 PromptRevision.id == job.prompt_revision_id
             ).first()
             if prompt_revision:
-                prompt = db.query(Prompt).filter(Prompt.id == prompt_revision.prompt_id).first()
-                if prompt:
-                    prompt_name = prompt.name
+                prompt_obj = db.query(Prompt).filter(Prompt.id == prompt_revision.prompt_id).first()
+                if prompt_obj:
+                    prompt_id_val = prompt_obj.id
+                    prompt_name = prompt_obj.name
+                    # Get the project from the prompt
+                    if prompt_obj.project:
+                        job_project_name = prompt_obj.project.name
 
         recent_jobs.append(JobResponse(
             id=job.id,
@@ -674,7 +706,9 @@ def get_project_jobs(project_id: int, limit: int = 50, offset: int = 0, job_type
             turnaround_ms=job.turnaround_ms,
             merged_csv_output=job.merged_csv_output,
             model_name=job.model_name,
+            prompt_id=prompt_id_val,
             prompt_name=prompt_name,
+            project_name=job_project_name,
             items=items
         ))
 

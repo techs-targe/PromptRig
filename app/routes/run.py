@@ -12,8 +12,9 @@ Background Job Execution:
 import logging
 import threading
 import queue
+import urllib.parse
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Response
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
@@ -397,6 +398,80 @@ def get_job_status(job_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to get job status: {str(e)}")
 
 
+@router.get("/api/jobs/{job_id}/details", response_model=JobResponse)
+def get_job_details(job_id: int, db: Session = Depends(get_db)):
+    """Get job with all items and details.
+
+    Returns the full job data including all job items for display in history.
+    """
+    from backend.database.models import Prompt
+    from backend.database import PromptRevision
+
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Load job items
+    job_items = db.query(JobItem).filter(JobItem.job_id == job.id).all()
+    items = [
+        JobItemResponse(
+            id=item.id,
+            created_at=item.created_at,
+            input_params=item.input_params,
+            raw_prompt=item.raw_prompt,
+            raw_response=item.raw_response,
+            parsed_response=item.parsed_response,
+            status=item.status,
+            error_message=item.error_message,
+            turnaround_ms=item.turnaround_ms
+        )
+        for item in job_items
+    ]
+
+    # Get prompt_id, prompt name and project name from prompt_revision relationship
+    prompt_id_val = None
+    prompt_name = None
+    project_name = None
+    if job.prompt_revision_id:
+        # NEW architecture: get from prompt_revision
+        prompt_revision = db.query(PromptRevision).filter(
+            PromptRevision.id == job.prompt_revision_id
+        ).first()
+        if prompt_revision:
+            prompt = db.query(Prompt).filter(Prompt.id == prompt_revision.prompt_id).first()
+            if prompt:
+                prompt_id_val = prompt.id
+                prompt_name = prompt.name
+                if prompt.project:
+                    project_name = prompt.project.name
+    elif job.project_revision_id:
+        # OLD architecture fallback: get from project_revision
+        from backend.database import ProjectRevision, Project
+        project_revision = db.query(ProjectRevision).filter(
+            ProjectRevision.id == job.project_revision_id
+        ).first()
+        if project_revision:
+            project = db.query(Project).filter(Project.id == project_revision.project_id).first()
+            if project:
+                project_name = project.name
+
+    return JobResponse(
+        id=job.id,
+        job_type=job.job_type,
+        status=job.status,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+        turnaround_ms=job.turnaround_ms,
+        merged_csv_output=job.merged_csv_output,
+        model_name=job.model_name,
+        prompt_id=prompt_id_val,
+        prompt_name=prompt_name,
+        project_name=project_name,
+        items=items
+    )
+
+
 @router.post("/api/jobs/{job_id}/cancel", response_model=Dict[str, Any])
 def cancel_job(job_id: int, db: Session = Depends(get_db)):
     """Cancel all pending items in a job.
@@ -627,6 +702,7 @@ class JobListResponse(BaseModel):
     created_at: str
     item_count: int = 0
     prompt_name: Optional[str] = None
+    project_name: Optional[str] = None
     model_name: Optional[str] = None
     is_workflow_job: bool = False  # NEW: distinguish workflow jobs
 
@@ -703,13 +779,27 @@ def list_jobs(
         # Get item count
         item_count = db.query(JobItem).filter(JobItem.job_id == job.id).count()
 
-        # Get prompt name
+        # Get prompt name and project name
         prompt_name = None
+        project_name = None
         if job.prompt_revision_id:
+            # NEW architecture: get from prompt_revision
             from backend.database.models import PromptRevision as PRev
             prev = db.query(PRev).filter(PRev.id == job.prompt_revision_id).first()
             if prev and prev.prompt:
                 prompt_name = prev.prompt.name
+                if prev.prompt.project:
+                    project_name = prev.prompt.project.name
+        elif job.project_revision_id:
+            # OLD architecture fallback: get from project_revision
+            from backend.database import ProjectRevision, Project
+            project_revision = db.query(ProjectRevision).filter(
+                ProjectRevision.id == job.project_revision_id
+            ).first()
+            if project_revision:
+                project = db.query(Project).filter(Project.id == project_revision.project_id).first()
+                if project:
+                    project_name = project.name
 
         result.append(JobListResponse(
             id=job.id,
@@ -718,6 +808,7 @@ def list_jobs(
             created_at=job.created_at,
             item_count=item_count,
             prompt_name=prompt_name,
+            project_name=project_name,
             model_name=job.model_name,
             is_workflow_job=False
         ))
@@ -799,6 +890,168 @@ def get_job_csv_preview(
     }
 
 
+@router.get("/api/jobs/{job_id}/csv")
+def download_job_csv(
+    job_id: int,
+    db: Session = Depends(get_db)
+):
+    """Download job results as CSV file.
+
+    Returns a downloadable CSV file with Content-Disposition header.
+    This endpoint can be used as a direct download link.
+
+    Example: http://localhost:9200/api/jobs/123/csv
+    """
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    csv_data = None
+
+    # First, try to use job.merged_csv_output if available
+    if job.merged_csv_output:
+        csv_data = job.merged_csv_output.strip()
+    else:
+        # Fall back to building from job_items
+        job_items = db.query(JobItem).filter(
+            JobItem.job_id == job_id,
+            JobItem.status == "done"
+        ).all()
+
+        csv_lines = []
+        header = None
+
+        for item in job_items:
+            if not item.parsed_response:
+                continue
+
+            try:
+                parsed = json.loads(item.parsed_response)
+            except:
+                continue
+
+            csv_output = parsed.get("csv_output", "")
+            csv_header = parsed.get("csv_header", "")
+            fields = parsed.get("fields", {})
+
+            if csv_header:
+                if header is None:
+                    header = csv_header
+                    csv_lines.insert(0, header)
+                if csv_output:
+                    for line in csv_output.strip().split("\n"):
+                        if line.strip():
+                            csv_lines.append(line)
+            elif fields:
+                if header is None:
+                    header = ",".join(fields.keys())
+                    csv_lines.insert(0, header)
+                csv_lines.append(",".join([str(v) for v in fields.values()]))
+
+        if csv_lines:
+            csv_data = "\n".join(csv_lines)
+
+    if not csv_data:
+        raise HTTPException(status_code=404, detail="No CSV data available for this job")
+
+    # Get project name for filename
+    project_name = "job"
+    # Access project through prompt_revision chain
+    if job.prompt_revision and job.prompt_revision.prompt and job.prompt_revision.prompt.project:
+        project = job.prompt_revision.prompt.project
+        # Sanitize project name for filename - ASCII only to avoid HTTP header encoding issues
+        project_name = "".join(c for c in project.name if c.isascii() and (c.isalnum() or c in "._- ")).strip()
+        project_name = project_name.replace(" ", "_")[:50]
+        if not project_name:  # If all characters were non-ASCII, use project ID
+            project_name = f"project_{project.id}"
+
+    filename = f"{project_name}_job_{job_id}.csv"
+    # Use RFC 5987 encoding for non-ASCII filename support
+    filename_encoded = urllib.parse.quote(filename)
+
+    return Response(
+        content=csv_data,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f"attachment; filename=\"{filename}\"; filename*=UTF-8''{filename_encoded}",
+            "Content-Type": "text/csv; charset=utf-8"
+        }
+    )
+
+
+@router.get("/api/workflow-jobs/{job_id}/csv")
+def download_workflow_job_csv(
+    job_id: int,
+    db: Session = Depends(get_db)
+):
+    """Download workflow job results as CSV file.
+
+    Returns a downloadable CSV file with Content-Disposition header.
+
+    Example: http://localhost:9200/api/workflow-jobs/123/csv
+    """
+    from backend.database.models import WorkflowJob, Workflow
+
+    wf_job = db.query(WorkflowJob).filter(WorkflowJob.id == job_id).first()
+    if not wf_job:
+        raise HTTPException(status_code=404, detail="Workflow job not found")
+
+    csv_data = None
+
+    # Primary: use merged_csv_output if available
+    if wf_job.merged_csv_output:
+        csv_data = wf_job.merged_csv_output.strip()
+    # Fallback: generate CSV from merged_output vars
+    elif wf_job.merged_output:
+        try:
+            output = json.loads(wf_job.merged_output)
+            vars_data = output.get("vars", {})
+            if vars_data:
+                # Extract flat values (exclude nested objects like ROW)
+                flat_vars = {}
+                for k, v in vars_data.items():
+                    if isinstance(v, (str, int, float, bool)):
+                        flat_vars[k] = str(v)
+                    elif v is None:
+                        flat_vars[k] = ""
+                    # Skip dict/list (iterator variables like ROW)
+
+                if flat_vars:
+                    csv_lines = []
+                    csv_lines.append(",".join(flat_vars.keys()))  # header
+                    csv_lines.append(",".join(flat_vars.values()))  # data
+                    csv_data = "\n".join(csv_lines)
+        except (json.JSONDecodeError, Exception):
+            pass  # Fall through to error
+
+    if not csv_data:
+        raise HTTPException(status_code=404, detail="No CSV data available for this workflow job")
+
+    # Get workflow name for filename
+    workflow_name = "workflow"
+    if wf_job.workflow_id:
+        workflow = db.query(Workflow).filter(Workflow.id == wf_job.workflow_id).first()
+        if workflow:
+            # ASCII only to avoid HTTP header encoding issues
+            workflow_name = "".join(c for c in workflow.name if c.isascii() and (c.isalnum() or c in "._- ")).strip()
+            workflow_name = workflow_name.replace(" ", "_")[:50]
+            if not workflow_name:  # If all characters were non-ASCII, use workflow ID
+                workflow_name = f"workflow_{workflow.id}"
+
+    filename = f"{workflow_name}_job_{job_id}.csv"
+    # Use RFC 5987 encoding for non-ASCII filename support
+    filename_encoded = urllib.parse.quote(filename)
+
+    return Response(
+        content=csv_data,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f"attachment; filename=\"{filename}\"; filename*=UTF-8''{filename_encoded}",
+            "Content-Type": "text/csv; charset=utf-8"
+        }
+    )
+
+
 @router.get("/api/workflow-jobs/{job_id}/csv-preview")
 def get_workflow_job_csv_preview(
     job_id: int,
@@ -814,12 +1067,37 @@ def get_workflow_job_csv_preview(
     if not wf_job:
         raise HTTPException(status_code=404, detail="Workflow job not found")
 
-    # Workflow jobs store merged CSV output directly
+    csv_data = None
+
+    # Primary: use merged_csv_output if available
     if wf_job.merged_csv_output:
-        lines = [line for line in wf_job.merged_csv_output.strip().split("\n") if line.strip()]
+        csv_data = wf_job.merged_csv_output.strip()
+    # Fallback: generate CSV from merged_output vars
+    elif wf_job.merged_output:
+        try:
+            output = json.loads(wf_job.merged_output)
+            vars_data = output.get("vars", {})
+            if vars_data:
+                flat_vars = {}
+                for k, v in vars_data.items():
+                    if isinstance(v, (str, int, float, bool)):
+                        flat_vars[k] = str(v)
+                    elif v is None:
+                        flat_vars[k] = ""
+
+                if flat_vars:
+                    csv_lines = []
+                    csv_lines.append(",".join(flat_vars.keys()))
+                    csv_lines.append(",".join(flat_vars.values()))
+                    csv_data = "\n".join(csv_lines)
+        except (json.JSONDecodeError, Exception):
+            pass
+
+    if csv_data:
+        lines = [line for line in csv_data.split("\n") if line.strip()]
         return {
             "job_id": job_id,
-            "csv_data": wf_job.merged_csv_output.strip() if lines else None,
+            "csv_data": csv_data,
             "row_count": len(lines) - 1 if len(lines) > 1 else 0,  # -1 for header
             "is_workflow_job": True
         }

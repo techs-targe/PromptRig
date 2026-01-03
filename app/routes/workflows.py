@@ -12,6 +12,7 @@ from typing import List, Dict, Optional, Any
 
 from backend.database import get_db, SessionLocal, Workflow, WorkflowStep, WorkflowJob, Project, Prompt
 from backend.workflow import WorkflowManager
+from backend.workflow_validator import validate_workflow
 
 router = APIRouter()
 
@@ -69,7 +70,7 @@ class WorkflowStepResponse(BaseModel):
     prompt_id: Optional[int] = None
     prompt_name: Optional[str] = None
     execution_mode: str
-    input_mapping: Optional[Dict[str, str]] = None
+    input_mapping: Optional[Dict[str, Any]] = None  # Can contain nested dicts for 'set' steps
     condition_config: Optional[Dict[str, Any]] = None  # Control flow configuration
 
 
@@ -102,6 +103,8 @@ class WorkflowJobResponse(BaseModel):
     id: int
     workflow_id: int
     workflow_name: str
+    project_id: Optional[int] = None
+    project_name: Optional[str] = None
     status: str
     input_params: Optional[Dict[str, Any]] = None
     merged_output: Optional[Dict[str, Any]] = None
@@ -139,8 +142,15 @@ def _workflow_to_response(workflow: Workflow, db: Session) -> WorkflowResponse:
 
 def _step_to_response(step: WorkflowStep, db: Session) -> WorkflowStepResponse:
     """Convert WorkflowStep model to response."""
-    project = db.query(Project).filter(Project.id == step.project_id).first() if step.project_id else None
     prompt = db.query(Prompt).filter(Prompt.id == step.prompt_id).first() if step.prompt_id else None
+
+    # Determine project_id: use step's project_id, or derive from prompt if not set
+    effective_project_id = step.project_id
+    if not effective_project_id and prompt and prompt.project_id:
+        effective_project_id = prompt.project_id
+
+    project = db.query(Project).filter(Project.id == effective_project_id).first() if effective_project_id else None
+
     input_mapping = None
     if step.input_mapping:
         try:
@@ -158,7 +168,7 @@ def _step_to_response(step: WorkflowStep, db: Session) -> WorkflowStepResponse:
         step_order=step.step_order,
         step_name=step.step_name,
         step_type=step.step_type or "prompt",
-        project_id=step.project_id,
+        project_id=effective_project_id,
         project_name=project.name if project else None,
         prompt_id=step.prompt_id,
         prompt_name=prompt.name if prompt else None,
@@ -171,6 +181,15 @@ def _step_to_response(step: WorkflowStep, db: Session) -> WorkflowStepResponse:
 def _job_to_response(job: WorkflowJob, db: Session) -> WorkflowJobResponse:
     """Convert WorkflowJob model to response."""
     workflow = db.query(Workflow).filter(Workflow.id == job.workflow_id).first()
+
+    # Get project info from workflow
+    project_id = None
+    project_name = None
+    if workflow and workflow.project_id:
+        project_id = workflow.project_id
+        project = db.query(Project).filter(Project.id == workflow.project_id).first()
+        if project:
+            project_name = project.name
 
     step_results = []
     for step_result in job.step_results:
@@ -190,6 +209,8 @@ def _job_to_response(job: WorkflowJob, db: Session) -> WorkflowJobResponse:
         id=job.id,
         workflow_id=job.workflow_id,
         workflow_name=workflow.name if workflow else "Unknown",
+        project_id=project_id,
+        project_name=project_name,
         status=job.status,
         input_params=json.loads(job.input_params) if job.input_params else None,
         merged_output=json.loads(job.merged_output) if job.merged_output else None,
@@ -241,8 +262,20 @@ def execute_workflow_background(
 
 @router.get("/api/workflows", response_model=List[WorkflowResponse])
 def list_workflows(project_id: Optional[int] = None, db: Session = Depends(get_db)):
-    """List workflows, optionally filtered by project."""
-    query = db.query(Workflow)
+    """List workflows, optionally filtered by project.
+
+    Excludes soft-deleted workflows and workflows whose parent project is deleted.
+    """
+    from sqlalchemy import or_
+
+    query = db.query(Workflow).filter(Workflow.is_deleted == 0)
+
+    # Exclude workflows whose parent project is deleted
+    query = query.outerjoin(Project, Workflow.project_id == Project.id)
+    query = query.filter(
+        or_(Workflow.project_id == None, Project.is_deleted == 0)
+    )
+
     if project_id is not None:
         query = query.filter(Workflow.project_id == project_id)
     workflows = query.order_by(Workflow.created_at.desc()).all()
@@ -281,6 +314,106 @@ def create_workflow(request: WorkflowCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to create workflow: {str(e)}")
 
 
+# ========== Workflow Functions Reference API ==========
+
+@router.get("/api/workflows/functions")
+async def get_workflow_functions():
+    """Get all available workflow functions with documentation.
+
+    Returns function definitions from STRING_FUNCTIONS for use in UI.
+    Organized by category for better presentation.
+    """
+    from backend.workflow import WorkflowManager
+
+    # Get STRING_FUNCTIONS from WorkflowManager
+    functions = WorkflowManager.STRING_FUNCTIONS
+
+    # Organize by category
+    categories = {
+        "text": {
+            "name": "文字列操作 / Text Operations",
+            "functions": []
+        },
+        "search": {
+            "name": "検索・判定 / Search & Check",
+            "functions": []
+        },
+        "math": {
+            "name": "計算 / Math",
+            "functions": []
+        },
+        "json": {
+            "name": "JSON処理 / JSON Processing",
+            "functions": []
+        },
+        "dataset": {
+            "name": "データセット / Dataset",
+            "functions": []
+        },
+        "datetime": {
+            "name": "日時 / Date & Time",
+            "functions": []
+        },
+        "array": {
+            "name": "配列 / Array",
+            "functions": []
+        },
+        "utility": {
+            "name": "ユーティリティ / Utility",
+            "functions": []
+        }
+    }
+
+    # Categorize functions
+    text_funcs = ['upper', 'lower', 'trim', 'lstrip', 'rstrip', 'capitalize', 'title', 'reverse',
+                  'length', 'len', 'slice', 'left', 'right', 'replace', 'repeat', 'concat', 'split', 'join']
+    search_funcs = ['contains', 'startswith', 'endswith', 'count']
+    math_funcs = ['sum', 'calc']
+    json_funcs = ['json_parse', 'json_zip', 'format_choices']
+    dataset_funcs = ['dataset_filter', 'dataset_join']
+    datetime_funcs = ['now', 'today', 'time']
+    array_funcs = ['array_push', 'shuffle']
+    utility_funcs = ['default', 'ifempty', 'debug', 'getprompt', 'getparser']
+
+    for func_name, func_info in functions.items():
+        func_data = {
+            "name": func_name,
+            "args": func_info.get("args", 1),
+            "desc": func_info.get("desc", ""),
+            "example": func_info.get("example", f"{func_name}()"),
+            "usage": func_info.get("usage", [])
+        }
+
+        if func_name in text_funcs:
+            categories["text"]["functions"].append(func_data)
+        elif func_name in search_funcs:
+            categories["search"]["functions"].append(func_data)
+        elif func_name in math_funcs:
+            categories["math"]["functions"].append(func_data)
+        elif func_name in json_funcs:
+            categories["json"]["functions"].append(func_data)
+        elif func_name in dataset_funcs:
+            categories["dataset"]["functions"].append(func_data)
+        elif func_name in datetime_funcs:
+            categories["datetime"]["functions"].append(func_data)
+        elif func_name in array_funcs:
+            categories["array"]["functions"].append(func_data)
+        else:
+            categories["utility"]["functions"].append(func_data)
+
+    # Remove empty categories and sort functions
+    result = {}
+    for cat_key, cat_data in categories.items():
+        if cat_data["functions"]:
+            cat_data["functions"].sort(key=lambda x: x["name"])
+            result[cat_key] = cat_data
+
+    return {
+        "categories": result,
+        "total_count": len(functions)
+    }
+
+
 @router.get("/api/workflows/{workflow_id}", response_model=WorkflowResponse)
 def get_workflow(workflow_id: int, db: Session = Depends(get_db)):
     """Get workflow details."""
@@ -316,16 +449,23 @@ def update_workflow(
 
 @router.delete("/api/workflows/{workflow_id}")
 def delete_workflow(workflow_id: int, db: Session = Depends(get_db)):
-    """Delete a workflow."""
-    try:
-        manager = WorkflowManager(db)
-        manager.delete_workflow(workflow_id)
-        return {"success": True, "message": f"Workflow {workflow_id} deleted"}
+    """Soft delete a workflow (mark as deleted instead of physical removal)."""
+    from datetime import datetime
 
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete workflow: {str(e)}")
+    workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+    if not workflow:
+        raise HTTPException(status_code=404, detail=f"Workflow {workflow_id} not found")
+
+    if workflow.is_deleted:
+        raise HTTPException(status_code=400, detail="Workflow is already deleted")
+
+    # Soft delete: mark as deleted instead of physical delete
+    workflow.is_deleted = 1
+    workflow.deleted_at = datetime.utcnow().isoformat()
+    workflow.updated_at = datetime.utcnow().isoformat()
+    db.commit()
+
+    return {"success": True, "message": f"Workflow {workflow_id} deleted"}
 
 
 class WorkflowCloneRequest(BaseModel):
@@ -368,6 +508,13 @@ def clone_workflow(
                 except:
                     pass
 
+            condition_config = None
+            if step.condition_config:
+                try:
+                    condition_config = json.loads(step.condition_config)
+                except:
+                    pass
+
             manager.add_step(
                 workflow_id=new_workflow.id,
                 step_name=step.step_name,
@@ -375,7 +522,9 @@ def clone_workflow(
                 prompt_id=step.prompt_id,
                 step_order=step.step_order,
                 input_mapping=input_mapping,
-                execution_mode=step.execution_mode
+                execution_mode=step.execution_mode,
+                step_type=step.step_type,
+                condition_config=condition_config
             )
 
         db.refresh(new_workflow)
@@ -692,8 +841,13 @@ def get_workflow_variables(db: Session = Depends(get_db)):
         variables=initial_vars
     ))
 
-    # Get all prompts with their latest revisions (NEW ARCHITECTURE)
-    prompts = db.query(Prompt).all()
+    # Get all active prompts with their latest revisions (NEW ARCHITECTURE)
+    # Filter out deleted prompts and prompts from deleted projects
+    prompts = db.query(Prompt).filter(
+        Prompt.is_deleted == 0
+    ).outerjoin(Project, Prompt.project_id == Project.id).filter(
+        Project.is_deleted == 0
+    ).all()
 
     for prompt in prompts:
         # Get latest revision
@@ -746,7 +900,8 @@ def get_workflow_variables(db: Session = Depends(get_db)):
             ))
 
     # Also check old architecture (ProjectRevision) for backward compatibility
-    projects = db.query(Project).all()
+    # Filter out deleted projects
+    projects = db.query(Project).filter(Project.is_deleted == 0).all()
     for project in projects:
         latest_rev = db.query(ProjectRevision).filter(
             ProjectRevision.project_id == project.id
@@ -838,7 +993,7 @@ class WorkflowExport(BaseModel):
 
 class WorkflowImportRequest(BaseModel):
     """Request model for importing a workflow from JSON."""
-    workflow_json: WorkflowExport
+    workflow_json: dict  # Accept as dict for flexibility, validate internally
     new_name: Optional[str] = None  # Override name if provided
 
 
@@ -912,16 +1067,16 @@ def import_workflow(request: WorkflowImportRequest, db: Session = Depends(get_db
     Resolves prompt references by name.
     """
     try:
-        wf_data = request.workflow_json
+        wf_dict = request.workflow_json
 
         # Use override name or original name
-        workflow_name = request.new_name or wf_data.name
+        workflow_name = request.new_name or wf_dict.get("name", "Imported Workflow")
 
         # Create workflow
         workflow = Workflow(
             name=workflow_name,
-            description=wf_data.description,
-            auto_context=1 if wf_data.auto_context else 0,
+            description=wf_dict.get("description", ""),
+            auto_context=1 if wf_dict.get("auto_context") else 0,
             created_at=datetime.utcnow().isoformat(),
             updated_at=datetime.utcnow().isoformat()
         )
@@ -929,39 +1084,60 @@ def import_workflow(request: WorkflowImportRequest, db: Session = Depends(get_db
         db.flush()  # Get workflow ID
 
         # Create steps
-        for step_data in wf_data.steps:
+        for step_dict in wf_dict.get("steps", []):
             # Resolve prompt by name
             prompt_id = None
-            if step_data.prompt_name:
-                prompt = db.query(Prompt).filter(Prompt.name == step_data.prompt_name).first()
+            prompt_name = step_dict.get("prompt_name")
+            if prompt_name:
+                prompt = db.query(Prompt).filter(Prompt.name == prompt_name).first()
                 if prompt:
                     prompt_id = prompt.id
 
             # Resolve project by name (backward compatibility)
             project_id = None
-            if step_data.project_name:
-                project = db.query(Project).filter(Project.name == step_data.project_name).first()
+            project_name = step_dict.get("project_name")
+            if project_name:
+                project = db.query(Project).filter(Project.name == project_name).first()
                 if project:
                     project_id = project.id
 
+            input_mapping = step_dict.get("input_mapping")
+            condition_config = step_dict.get("condition_config")
+
             step = WorkflowStep(
                 workflow_id=workflow.id,
-                step_order=step_data.step_order,
-                step_name=step_data.step_name,
-                step_type=step_data.step_type,
+                step_order=step_dict.get("step_order", 0),
+                step_name=step_dict.get("step_name", ""),
+                step_type=step_dict.get("step_type", "prompt"),
                 prompt_id=prompt_id,
                 project_id=project_id,
-                execution_mode=step_data.execution_mode,
-                input_mapping=json.dumps(step_data.input_mapping) if step_data.input_mapping else None,
-                condition_config=json.dumps(step_data.condition_config) if step_data.condition_config else None
+                execution_mode=step_dict.get("execution_mode"),
+                input_mapping=json.dumps(input_mapping) if input_mapping else None,
+                condition_config=json.dumps(condition_config) if condition_config else None
             )
             db.add(step)
+
+        # Validate workflow control flow before commit
+        db.flush()  # Ensure all steps are in DB for validation
+        validation = validate_workflow(db, workflow.id)
+        if validation.errors > 0:
+            db.rollback()
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "Workflow validation failed",
+                    "errors": [issue.to_dict() for issue in validation.issues
+                              if issue.severity.value == "error"]
+                }
+            )
 
         db.commit()
         db.refresh(workflow)
 
         return _workflow_to_response(workflow, db)
 
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Import failed: {str(e)}")
@@ -980,45 +1156,64 @@ def update_workflow_json(workflow_id: int, request: WorkflowImportRequest, db: S
         if not workflow:
             raise HTTPException(status_code=404, detail="Workflow not found")
 
-        wf_data = request.workflow_json
+        wf_dict = request.workflow_json
 
         # Update basic info
-        workflow.name = wf_data.name
-        workflow.description = wf_data.description
-        workflow.auto_context = 1 if wf_data.auto_context else 0
+        workflow.name = wf_dict.get("name", workflow.name)
+        workflow.description = wf_dict.get("description", workflow.description or "")
+        workflow.auto_context = 1 if wf_dict.get("auto_context") else 0
         workflow.updated_at = datetime.utcnow().isoformat()
 
         # Delete existing steps
         db.query(WorkflowStep).filter(WorkflowStep.workflow_id == workflow_id).delete()
 
         # Create new steps from JSON
-        for step_data in wf_data.steps:
+        for step_dict in wf_dict.get("steps", []):
             # Resolve prompt by name
             prompt_id = None
-            if step_data.prompt_name:
-                prompt = db.query(Prompt).filter(Prompt.name == step_data.prompt_name).first()
+            prompt_name = step_dict.get("prompt_name")
+            if prompt_name:
+                prompt = db.query(Prompt).filter(Prompt.name == prompt_name).first()
                 if prompt:
                     prompt_id = prompt.id
 
             # Resolve project by name (backward compatibility)
             project_id = None
-            if step_data.project_name:
-                project = db.query(Project).filter(Project.name == step_data.project_name).first()
+            project_name = step_dict.get("project_name")
+            if project_name:
+                project = db.query(Project).filter(Project.name == project_name).first()
                 if project:
                     project_id = project.id
 
+            input_mapping = step_dict.get("input_mapping")
+            condition_config = step_dict.get("condition_config")
+
             step = WorkflowStep(
                 workflow_id=workflow.id,
-                step_order=step_data.step_order,
-                step_name=step_data.step_name,
-                step_type=step_data.step_type,
+                step_order=step_dict.get("step_order", 0),
+                step_name=step_dict.get("step_name", ""),
+                step_type=step_dict.get("step_type", "prompt"),
                 prompt_id=prompt_id,
                 project_id=project_id,
-                execution_mode=step_data.execution_mode,
-                input_mapping=json.dumps(step_data.input_mapping) if step_data.input_mapping else None,
-                condition_config=json.dumps(step_data.condition_config) if step_data.condition_config else None
+                execution_mode=step_dict.get("execution_mode"),
+                input_mapping=json.dumps(input_mapping) if input_mapping else None,
+                condition_config=json.dumps(condition_config) if condition_config else None
             )
             db.add(step)
+
+        # Validate workflow control flow before commit
+        db.flush()  # Ensure all steps are in DB for validation
+        validation = validate_workflow(db, workflow.id)
+        if validation.errors > 0:
+            db.rollback()
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "Workflow validation failed",
+                    "errors": [issue.to_dict() for issue in validation.issues
+                              if issue.severity.value == "error"]
+                }
+            )
 
         db.commit()
         db.refresh(workflow)
@@ -1030,3 +1225,98 @@ def update_workflow_json(workflow_id: int, request: WorkflowImportRequest, db: S
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"JSON update failed: {str(e)}")
+
+
+# ========== Workflow Output File Download Endpoints ==========
+
+@router.get("/api/workflow-outputs/{filename}")
+async def download_workflow_output(filename: str):
+    """Download a workflow output file.
+
+    Files are stored in uploads/workflow_outputs/ directory.
+    """
+    import os
+    from fastapi.responses import FileResponse
+
+    # Sanitize filename to prevent directory traversal
+    safe_filename = os.path.basename(filename)
+
+    # Build path
+    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    filepath = os.path.join(base_dir, "uploads", "workflow_outputs", safe_filename)
+
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail=f"Output file not found: {safe_filename}")
+
+    # Determine media type based on extension
+    media_type = "application/octet-stream"
+    if safe_filename.endswith('.csv'):
+        media_type = "text/csv"
+    elif safe_filename.endswith('.json'):
+        media_type = "application/json"
+    elif safe_filename.endswith('.txt'):
+        media_type = "text/plain"
+
+    return FileResponse(
+        path=filepath,
+        filename=safe_filename,
+        media_type=media_type
+    )
+
+
+@router.get("/api/workflow-outputs")
+async def list_workflow_outputs():
+    """List all workflow output files.
+
+    Returns list of available output files with metadata.
+    """
+    import os
+    from datetime import datetime
+
+    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    outputs_dir = os.path.join(base_dir, "uploads", "workflow_outputs")
+
+    if not os.path.exists(outputs_dir):
+        return {"files": []}
+
+    files = []
+    for filename in os.listdir(outputs_dir):
+        filepath = os.path.join(outputs_dir, filename)
+        if os.path.isfile(filepath):
+            stat = os.stat(filepath)
+            files.append({
+                "filename": filename,
+                "size": stat.st_size,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                "download_url": f"/api/workflow-outputs/{filename}"
+            })
+
+    # Sort by modification time (newest first)
+    files.sort(key=lambda x: x["modified_at"], reverse=True)
+
+    return {"files": files}
+
+
+@router.delete("/api/workflow-outputs/{filename}")
+async def delete_workflow_output(filename: str):
+    """Delete a workflow output file.
+
+    Only deletes files from the workflow_outputs directory.
+    """
+    import os
+
+    # Sanitize filename to prevent directory traversal
+    safe_filename = os.path.basename(filename)
+
+    # Build path
+    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    filepath = os.path.join(base_dir, "uploads", "workflow_outputs", safe_filename)
+
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail=f"Output file not found: {safe_filename}")
+
+    try:
+        os.remove(filepath)
+        return {"success": True, "message": f"Deleted {safe_filename}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")

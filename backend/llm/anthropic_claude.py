@@ -4,13 +4,16 @@ Supports Claude 3.5 Sonnet, Claude 3.5 Haiku, and Claude 3 Opus models.
 Uses the official Anthropic Python SDK.
 """
 
+import base64
+import logging
 import os
 import time
-import base64
 from typing import Optional, List
 from dotenv import load_dotenv
 
-from .base import LLMClient, LLMResponse, Message
+logger = logging.getLogger(__name__)
+
+from .base import LLMClient, LLMResponse, Message, EnvVarConfig
 
 # Load environment variables
 load_dotenv()
@@ -20,7 +23,7 @@ class AnthropicClaudeClient(LLMClient):
     """Anthropic Claude client base class.
 
     Configuration from environment variables:
-    - ANTHROPIC_API_KEY
+    - ANTHROPIC_CLAUDE_API_KEY or ANTHROPIC_API_KEY
 
     Supports Vision API with images.
     """
@@ -29,16 +32,16 @@ class AnthropicClaudeClient(LLMClient):
     MODEL_NAME = "claude-sonnet-4-20250514"
     DISPLAY_NAME = "claude-sonnet-4"
 
+    # Environment variable configuration (shared by all Claude models)
+    ENV_VARS = [
+        EnvVarConfig("api_key", "ANTHROPIC_CLAUDE_API_KEY", "ANTHROPIC_API_KEY"),
+    ]
+
     def __init__(self):
         """Initialize Anthropic client with environment configuration."""
-        self.api_key = os.getenv("ANTHROPIC_API_KEY")
+        self._validate_env_vars()
 
-        # Validate configuration
-        if not self.api_key:
-            raise ValueError(
-                "Anthropic configuration incomplete. "
-                "Please set ANTHROPIC_API_KEY in .env file."
-            )
+        self.api_key = self._get_env_var("api_key")
 
         # Import anthropic SDK
         try:
@@ -111,7 +114,7 @@ class AnthropicClaudeClient(LLMClient):
                                 media_info = parts[0]
                                 base64_data = parts[1]
                                 media_type = media_info.replace("data:", "").replace(";base64", "")
-                                print(f"📷 Claude Vision: Adding image (media_type: {media_type})")
+                                logger.debug(f"Claude Vision: Adding image (media_type: {media_type})")
                                 api_content.append({
                                     "type": "image",
                                     "source": {
@@ -136,7 +139,7 @@ class AnthropicClaudeClient(LLMClient):
                         for c in content:
                             if c.get("type") == "text":
                                 api_content.append({"type": "text", "text": c.get("text", "")})
-                    print(f"📤 Claude Vision: Sending {len(msg_images)} image(s) with prompt")
+                    logger.debug(f"Claude Vision: Sending {len(msg_images)} image(s) with prompt")
                     api_messages.append({"role": role, "content": api_content})
                 else:
                     # Text-only content

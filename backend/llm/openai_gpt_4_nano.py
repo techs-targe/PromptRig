@@ -4,13 +4,16 @@ Based on specification in docs/req.txt section 8 (Phase 1).
 Uses OpenAI gpt-4.1-nano (2025 model) as secondary LLM provider.
 """
 
+import logging
 import os
 import time
 from typing import Optional, List
 from openai import OpenAI
 from dotenv import load_dotenv
 
-from .base import LLMClient, LLMResponse, Message
+logger = logging.getLogger(__name__)
+
+from .base import LLMClient, LLMResponse, Message, EnvVarConfig
 
 # Load environment variables
 load_dotenv()
@@ -20,24 +23,25 @@ class OpenAIGPT4NanoClient(LLMClient):
     """OpenAI GPT-4.1-nano client.
 
     Configuration from environment variables:
-    - OPENAI_API_KEY
+    - OPENAI_GPT4_NANO_API_KEY or OPENAI_API_KEY
 
     Specification: docs/req.txt section 8 (Phase 1)
     """
 
     # Model identifier for gpt-4.1-nano
-    MODEL_NAME = "gpt-4o-mini"  # Using available model name
+    MODEL_NAME = "gpt-4.1-nano"
+    DISPLAY_NAME = "openai-gpt-4.1-nano"
+
+    # Environment variable configuration
+    ENV_VARS = [
+        EnvVarConfig("api_key", "OPENAI_GPT4_NANO_API_KEY", "OPENAI_API_KEY"),
+    ]
 
     def __init__(self):
         """Initialize OpenAI client with environment configuration."""
-        self.api_key = os.getenv("OPENAI_API_KEY")
+        self._validate_env_vars()
 
-        # Validate configuration
-        if not self.api_key:
-            raise ValueError(
-                "OpenAI configuration incomplete. "
-                "Please set OPENAI_API_KEY in .env file."
-            )
+        self.api_key = self._get_env_var("api_key")
 
         # Initialize client
         self.client = OpenAI(api_key=self.api_key)
@@ -97,12 +101,12 @@ class OpenAIGPT4NanoClient(LLMClient):
                         api_content = content.copy() if isinstance(content, list) else [content]
 
                     for img_data_uri in msg_images:
-                        print(f"📷 Vision API: Adding image (data URI length: {len(img_data_uri)} chars)")
+                        logger.debug(f"Vision API: Adding image (data URI length: {len(img_data_uri)} chars)")
                         api_content.append({
                             "type": "image_url",
                             "image_url": {"url": img_data_uri, "detail": "high"}
                         })
-                    print(f"📤 Vision API: Sending {len(msg_images)} image(s) with prompt")
+                    logger.debug(f"Vision API: Sending {len(msg_images)} image(s) with prompt")
                     api_messages.append({"role": role, "content": api_content})
                 else:
                     # Text-only content

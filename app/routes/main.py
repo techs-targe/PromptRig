@@ -7,10 +7,24 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
+from app.theme_config import get_config
+
 router = APIRouter()
 
 # Configure Jinja2 templates
 templates = Jinja2Templates(directory="app/templates")
+
+
+def get_template_context(request: Request) -> dict:
+    """Get common template context with theme configuration."""
+    theme = get_config()
+    return {
+        "request": request,
+        "app_name": theme.app_name,
+        "app_version": theme.app_version,
+        "theme": theme,
+        "css_vars": theme.to_css_vars(),
+    }
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -21,4 +35,4 @@ def index(request: Request):
 
     Specification: docs/req.txt section 3.2 step 1, 4.2.1
     """
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse("index.html", get_template_context(request))

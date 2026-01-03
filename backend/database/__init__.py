@@ -6,7 +6,9 @@ from .models import (
     # NEW ARCHITECTURE (v3.0)
     Prompt, PromptRevision,
     # TAG SYSTEM (v3.1)
-    Tag, PromptTag
+    Tag, PromptTag,
+    # DATASET MULTI-PROJECT (v3.2)
+    ProjectDataset,
 )
 from .database import engine, SessionLocal, get_db, init_db
 
@@ -29,6 +31,8 @@ __all__ = [
     # TAG SYSTEM (v3.1)
     "Tag",
     "PromptTag",
+    # DATASET MULTI-PROJECT (v3.2)
+    "ProjectDataset",
     # Database utilities
     "engine",
     "SessionLocal",

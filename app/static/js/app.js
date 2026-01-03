@@ -17,6 +17,11 @@ let currentPromptId = null;  // NEW ARCHITECTURE: ID of selected prompt
 let currentSelectionType = 'project'; // 'project', 'workflow', or 'prompt'
 let currentExecutionTargets = null;  // NEW ARCHITECTURE: Cache of prompts/workflows for current project
 
+// Feature flags (loaded from server)
+let featureFlags = {
+    huggingface_import: false  // Default to disabled
+};
+
 // History pagination state
 let singleHistoryOffset = 0;
 const SINGLE_HISTORY_PAGE_SIZE = 10;
@@ -25,6 +30,7 @@ let singleHistoryHasMore = true;
 let batchHistoryOffset = 0;
 const BATCH_HISTORY_PAGE_SIZE = 10;
 let batchHistoryHasMore = true;
+let currentBatchPromptId = null;  // Current selected prompt ID for batch history filtering
 
 // Dataset preview state
 let currentPreviewDatasetId = null;
@@ -81,6 +87,38 @@ function formatJST(dateInput, includeSeconds = false) {
         return date.toLocaleString('ja-JP', options);
     } catch (e) {
         return '-';
+    }
+}
+
+/**
+ * Show loading spinner in a container
+ * @param {string} containerId - The ID of the container element
+ * @param {string} message - Loading message to display
+ */
+function showLoadingSpinner(containerId, message = '読み込み中...') {
+    const container = document.getElementById(containerId);
+    if (container) {
+        container.innerHTML = `<div class="loading-overlay">
+            <span class="spinner"></span>
+            <span>${message}</span>
+        </div>`;
+    }
+}
+
+/**
+ * Set button loading state
+ * @param {HTMLElement} button - The button element
+ * @param {boolean} loading - Whether to show loading state
+ */
+function setButtonLoading(button, loading) {
+    if (!button) return;
+    if (loading) {
+        button.classList.add('btn-loading');
+        button.disabled = true;
+        button.dataset.originalText = button.textContent;
+    } else {
+        button.classList.remove('btn-loading');
+        button.disabled = false;
     }
 }
 
@@ -217,10 +255,48 @@ function setupTabNavigation() {
             button.classList.add('active');
             document.getElementById(`tab-${targetTab}`).classList.add('active');
 
+            // Update utility button visibility
+            updateUtilityButtonVisibility(targetTab);
+
             // Load tab-specific data
             loadTabData(targetTab);
         });
     });
+
+    // Initialize utility button visibility for default tab
+    updateUtilityButtonVisibility('single');
+}
+
+/**
+ * Update utility button visibility based on active tab
+ * @param {string} activeTab - The active tab name
+ */
+function updateUtilityButtonVisibility(activeTab) {
+    const singleButtons = document.getElementById('single-utility-buttons');
+    const batchButtons = document.getElementById('batch-utility-buttons');
+
+    if (singleButtons) {
+        singleButtons.style.display = activeTab === 'single' ? 'flex' : 'none';
+    }
+    if (batchButtons) {
+        batchButtons.style.display = activeTab === 'batch' ? 'flex' : 'none';
+    }
+}
+
+/**
+ * Load feature flags from server
+ */
+async function loadFeatureFlags() {
+    try {
+        const response = await fetch('/api/settings/features');
+        if (response.ok) {
+            const data = await response.json();
+            featureFlags = data.features || {};
+        }
+    } catch (error) {
+        // Keep defaults if load fails
+        console.warn('Failed to load feature flags:', error);
+    }
 }
 
 /**
@@ -228,6 +304,9 @@ function setupTabNavigation() {
  */
 async function loadInitialData() {
     try {
+        // Load feature flags first (for UI state)
+        await loadFeatureFlags();
+
         // Load projects first (this also sets default project and loads config)
         await loadProjects();
 
@@ -281,10 +360,16 @@ function loadTabData(tabName) {
             loadAvailableModels();
             loadModelConfigurationSettings();
             loadJobParallelism();
+            loadAgentMaxIterations();
             loadTextFileExtensions();
+            loadGuardrailModel();
+            loadAgentStreamTimeout();
             break;
         case 'datasets':
             loadDatasets();
+            break;
+        case 'agent':
+            initAgentTab();
             break;
     }
 }
@@ -303,19 +388,21 @@ function setupEventListeners() {
     document.getElementById('single-target-select')?.addEventListener('change', onExecutionTargetChange);  // NEW ARCHITECTURE
     document.getElementById('btn-edit-prompt')?.addEventListener('click', showEditPromptModal);
     document.getElementById('btn-reload-single-history')?.addEventListener('click', async () => {
-        const projectId = document.getElementById('single-project-select').value;
-        if (projectId) {
-            await loadConfig(parseInt(projectId));
-            // Re-select the previously selected job if any
-            if (selectedJobId) {
-                selectHistoryItem(selectedJobId);
-            }
-        }
+        await reloadSingleExecutionWithFilter();
+    });
+    document.getElementById('btn-new-input')?.addEventListener('click', () => {
+        clearInputsForNewEntry();
+    });
+    document.getElementById('btn-context-execute')?.addEventListener('click', () => {
+        executePrompt(1);  // Execute 1 time
+        // Scroll to bottom of right pane (same behavior as utility down button)
+        scrollToBottom('tab-single');
     });
 
     // Batch execution
     document.getElementById('btn-batch-execute')?.addEventListener('click', executeBatch);
     document.getElementById('batch-project-select')?.addEventListener('change', onBatchProjectChange);
+    document.getElementById('batch-prompt-select')?.addEventListener('change', onBatchPromptChange);
     document.getElementById('btn-batch-edit-prompt')?.addEventListener('click', showBatchEditPromptModal);
     document.getElementById('btn-reload-batch-history')?.addEventListener('click', async () => {
         const selectValue = document.getElementById('batch-project-select').value;
@@ -339,21 +426,28 @@ function setupEventListeners() {
 
     // Settings
     document.getElementById('btn-save-default-model')?.addEventListener('click', saveDefaultModel);
-    document.getElementById('btn-save-default-project')?.addEventListener('click', saveDefaultProject);
     document.getElementById('param-model-select')?.addEventListener('change', loadModelParameters);
     document.getElementById('btn-save-model-params')?.addEventListener('click', saveModelParameters);
     document.getElementById('btn-reset-model-params')?.addEventListener('click', resetModelParameters);
 
     // Job execution settings
     document.getElementById('btn-save-parallelism')?.addEventListener('click', saveJobParallelism);
+    document.getElementById('btn-save-agent-iterations')?.addEventListener('click', saveAgentMaxIterations);
 
     // Text file extensions buttons
     document.getElementById('btn-save-text-extensions')?.addEventListener('click', saveTextFileExtensions);
     document.getElementById('btn-reset-text-extensions')?.addEventListener('click', resetTextFileExtensions);
 
+    // Agent settings
+    document.getElementById('btn-save-guardrail-model')?.addEventListener('click', saveGuardrailModel);
+    document.getElementById('btn-save-agent-stream-timeout')?.addEventListener('click', saveAgentStreamTimeout);
+
     // Job cancellation buttons
     document.getElementById('btn-stop-single')?.addEventListener('click', cancelSingleJob);
     document.getElementById('btn-stop-batch')?.addEventListener('click', cancelBatchJob);
+
+    // Workflow name input - update title as user types
+    document.getElementById('workflow-name')?.addEventListener('input', updateWorkflowEditorTitle);
 
     // Modal overlay click - DO NOT close on outside click (user requested)
     // Removed event listener to prevent accidental modal close
@@ -417,6 +511,105 @@ function renderSingleExecutionTab() {
 
     // Render history
     renderHistory(currentConfig.recent_jobs);
+
+    // Update context bar with project name
+    updateContextBar(currentConfig.project_name, null);
+}
+
+/**
+ * Update the context bar with project and prompt names
+ */
+function updateContextBar(projectName, promptName) {
+    const projectEl = document.getElementById('current-project-name');
+    const promptEl = document.getElementById('current-prompt-name');
+
+    if (projectEl) {
+        projectEl.textContent = projectName || '-';
+    }
+    if (promptEl) {
+        promptEl.textContent = promptName || '-';
+    }
+}
+
+/**
+ * Update the batch context bar with project and prompt names
+ */
+function updateBatchContextBar(projectName, promptName) {
+    const projectEl = document.getElementById('batch-project-name');
+    const promptEl = document.getElementById('batch-prompt-name');
+
+    if (projectEl) {
+        projectEl.textContent = projectName || '-';
+    }
+    if (promptEl) {
+        promptEl.textContent = promptName || '-';
+    }
+}
+
+/**
+ * Update the context bar with history info (for single execution)
+ * @param {object|null} job - Job object with id, status, created_at, or null to hide
+ */
+function updateContextBarHistoryInfo(job) {
+    const historyInfoEl = document.getElementById('current-history-info');
+    const jobInfoEl = document.getElementById('current-job-info');
+    const executeBtn = document.getElementById('btn-context-execute');
+
+    if (!historyInfoEl || !jobInfoEl) return;
+
+    if (job) {
+        // Format job info: Job #123 (n items) - timestamp (JST)
+        const createdAt = formatJST(job.created_at);
+        const itemCount = job.items?.length || job.item_count || 0;
+        jobInfoEl.textContent = `Job #${job.id} (${itemCount} items) - ${createdAt}`;
+        historyInfoEl.style.display = 'inline-flex';
+        // Show execute button when history is selected
+        if (executeBtn) executeBtn.style.display = 'inline-flex';
+    } else {
+        historyInfoEl.style.display = 'none';
+        jobInfoEl.textContent = '-';
+        // Hide execute button when history is deselected
+        if (executeBtn) executeBtn.style.display = 'none';
+    }
+}
+
+/**
+ * Update the batch context bar with history info
+ * @param {object|null} job - Job object with id, status, created_at, or null to hide
+ */
+function updateBatchContextBarHistoryInfo(job) {
+    const historyInfoEl = document.getElementById('batch-history-info');
+    const jobInfoEl = document.getElementById('batch-job-info');
+
+    if (!historyInfoEl || !jobInfoEl) return;
+
+    if (job) {
+        // Format job info: Job #123 (n items) - timestamp (JST)
+        const createdAt = formatJST(job.created_at);
+        const itemCount = job.items?.length || job.item_count || 0;
+        jobInfoEl.textContent = `Job #${job.id} (${itemCount} items) - ${createdAt}`;
+        historyInfoEl.style.display = 'inline-flex';
+    } else {
+        historyInfoEl.style.display = 'none';
+        jobInfoEl.textContent = '-';
+    }
+}
+
+/**
+ * Deselect all history items in batch execution tab
+ */
+function deselectBatchHistory() {
+    selectedBatchJobId = null;
+    document.querySelectorAll('#tab-batch .history-item').forEach(item => {
+        item.classList.remove('selected');
+    });
+    // Clear the history info from context bar
+    updateBatchContextBarHistoryInfo(null);
+    // Clear the results area
+    const resultsArea = document.getElementById('batch-results-area');
+    if (resultsArea) {
+        resultsArea.innerHTML = '<p class="info">バッチジョブを選択すると結果が表示されます / Select a batch job to view results</p>';
+    }
 }
 
 /**
@@ -574,18 +767,92 @@ function renderWorkflowHistory(jobs) {
         return;
     }
 
-    container.innerHTML = jobs.map(job => `
+    container.innerHTML = jobs.map(job => createWorkflowHistoryItemHtml(job)).join('');
+}
+
+/**
+ * Create HTML for a workflow history item (extracted from renderWorkflowHistory)
+ * @param {Object} job - Job object
+ * @returns {string} HTML string for the history item
+ */
+function createWorkflowHistoryItemHtml(job) {
+    return `
         <div class="history-item ${selectedJobId === job.id ? 'selected' : ''}"
-             onclick="selectWorkflowJob(${job.id})">
+             onclick="selectWorkflowJob(${job.id})"
+             data-job-id="${job.id}"
+             data-project-name="${escapeHtmlGlobal(job.project_name || '')}"
+             data-workflow-name="${escapeHtmlGlobal(job.workflow_name || '')}"
+             data-created-at="${job.created_at || ''}">
             <div class="history-item-header">
-                <span class="history-item-id">WF-Job #${job.id}</span>
+                <span class="history-item-id">WF #${job.id}</span>
                 <span class="history-item-status status-${job.status}">${job.status}</span>
             </div>
-            <div class="history-item-time">${formatJST(job.created_at)}</div>
-            <div class="history-item-model">${job.model_name || 'default'}</div>
-            ${job.turnaround_ms ? `<div class="history-item-time">${job.turnaround_ms}ms</div>` : ''}
+            <div class="history-item-row1">
+                <span class="history-project-name">📁 ${escapeHtmlGlobal(job.project_name || '-')}</span>
+            </div>
+            <div class="history-item-row2">
+                <span class="history-workflow-name">🔄 ${escapeHtmlGlobal(job.workflow_name || '-')}</span>
+            </div>
+            <div class="history-item-meta">
+                <span class="history-item-time">${formatJST(job.created_at)}</span>
+                <span class="history-item-model">${job.model_name || 'default'}</span>
+                ${job.turnaround_ms ? `<span class="history-item-ms">${job.turnaround_ms}ms</span>` : ''}
+            </div>
         </div>
-    `).join('');
+    `;
+}
+
+/**
+ * Prepend a job to the workflow execution history list
+ * @param {Object} job - Job object to prepend
+ */
+function prependJobToWorkflowHistory(job) {
+    const historyList = document.getElementById('history-list');
+    if (!historyList) return;
+
+    // Remove "no history" message if present
+    const emptyMsg = historyList.querySelector('.history-item');
+    if (emptyMsg && emptyMsg.textContent.includes('履歴がありません')) {
+        emptyMsg.remove();
+    }
+
+    // Check if job already exists in history (avoid duplicates)
+    const existingItem = historyList.querySelector(`[data-job-id="${job.id}"]`);
+    if (existingItem) return;
+
+    // Create and prepend the new job item
+    const jobHtml = createWorkflowHistoryItemHtml(job);
+    historyList.insertAdjacentHTML('afterbegin', jobHtml);
+}
+
+/**
+ * Update workflow history item status during polling
+ * @param {number} jobId - Job ID
+ * @param {string} status - New status
+ * @param {Object} job - Optional full job object for additional updates
+ */
+function updateWorkflowHistoryItemStatus(jobId, status, job = null) {
+    const historyItem = document.querySelector(`#history-list [data-job-id="${jobId}"]`);
+    if (!historyItem) return;
+
+    const statusBadge = historyItem.querySelector('.history-item-status');
+    if (statusBadge) {
+        statusBadge.className = `history-item-status status-${status}`;
+        statusBadge.textContent = status;
+    }
+
+    // Update turnaround time if job is complete
+    if (job && job.turnaround_ms) {
+        let msSpan = historyItem.querySelector('.history-item-ms');
+        if (msSpan) {
+            msSpan.textContent = `${job.turnaround_ms}ms`;
+        } else {
+            const metaDiv = historyItem.querySelector('.history-item-meta');
+            if (metaDiv) {
+                metaDiv.insertAdjacentHTML('beforeend', `<span class="history-item-ms">${job.turnaround_ms}ms</span>`);
+            }
+        }
+    }
 }
 
 /**
@@ -596,10 +863,12 @@ async function selectWorkflowJob(jobId) {
     selectedJobId = jobId;
 
     // Update selection in history list
+    let selectedItem = null;
     document.querySelectorAll('.history-item').forEach(item => {
         item.classList.remove('selected');
         if (item.querySelector(`[onclick*="selectWorkflowJob(${jobId})"]`) || item.getAttribute('onclick')?.includes(`selectWorkflowJob(${jobId})`)) {
             item.classList.add('selected');
+            selectedItem = item;
         }
     });
 
@@ -608,6 +877,7 @@ async function selectWorkflowJob(jobId) {
     historyItems.forEach(item => {
         if (item.getAttribute('onclick')?.includes(`selectWorkflowJob(${jobId})`)) {
             item.classList.add('selected');
+            selectedItem = item;
         }
     });
 
@@ -615,6 +885,40 @@ async function selectWorkflowJob(jobId) {
         const response = await fetch(`/api/workflow-jobs/${jobId}`);
         if (!response.ok) throw new Error('Failed to fetch workflow job');
         const job = await response.json();
+
+        // If current workflow is not loaded or different from job's workflow, load it first
+        if (currentSelectionType !== 'workflow' || currentWorkflowId !== job.workflow_id) {
+            console.log(`Loading workflow ${job.workflow_id} for job ${jobId}`);
+
+            // Update dropdown selection to match the workflow
+            const targetSelect = document.getElementById('single-target-select');
+            if (targetSelect) {
+                targetSelect.value = `workflow:${job.workflow_id}`;
+            }
+
+            // Load workflow config (this will set currentSelectionType and currentWorkflowId)
+            await loadWorkflowConfig(job.workflow_id);
+
+            // Re-select the job in the history after loading
+            selectedJobId = jobId;
+            document.querySelectorAll('.history-item').forEach(item => {
+                item.classList.remove('selected');
+                if (item.getAttribute('onclick')?.includes(`selectWorkflowJob(${jobId})`)) {
+                    item.classList.add('selected');
+                }
+            });
+        }
+
+        // Update context bar with project name and workflow name
+        updateContextBar(job.project_name || '-', job.workflow_name || '-');
+
+        // Update history info bar
+        updateContextBarHistoryInfo({
+            id: job.id,
+            status: job.status,
+            created_at: job.created_at,
+            item_count: job.step_results?.length || 0
+        });
 
         // Populate input form with the job's input params
         if (job.input_params) {
@@ -654,6 +958,17 @@ function displayWorkflowJobResults(job) {
             </div>
     `;
 
+    // Display error banner if _error exists in merged_output
+    if (job.merged_output && job.merged_output._error) {
+        html += `
+            <div class="workflow-error-banner">
+                <span class="error-icon">⚠️</span>
+                <span class="error-label">エラー / Error:</span>
+                <span class="error-message">${escapeHtmlGlobal(job.merged_output._error)}</span>
+            </div>
+        `;
+    }
+
     // Display step results
     if (job.step_results && job.step_results.length > 0) {
         html += '<div class="workflow-steps">';
@@ -666,13 +981,19 @@ function displayWorkflowJobResults(job) {
                         ${step.turnaround_ms ? `<span class="step-time">${step.turnaround_ms}ms</span>` : ''}
                     </div>
                     ${step.input_params && Object.keys(step.input_params).length > 0 ? `
-                        <div class="step-input">
+                        <div class="step-input response-box-container">
+                            <button class="response-box-copy-btn" onclick="copyWorkflowStepContent(this)" title="コピー / Copy" data-raw-content="${escapeHtmlGlobal(JSON.stringify(step.input_params, null, 2)).replace(/"/g, '&quot;')}">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                            </button>
                             <h6>📤 送信 / Input</h6>
                             <pre>${escapeHtmlGlobal(JSON.stringify(step.input_params, null, 2))}</pre>
                         </div>
                     ` : '<div class="step-input"><h6>📤 送信 / Input</h6><pre>(なし / none)</pre></div>'}
                     ${step.output_fields ? `
-                        <div class="step-output">
+                        <div class="step-output response-box-container">
+                            <button class="response-box-copy-btn" onclick="copyWorkflowStepContent(this)" title="コピー / Copy" data-raw-content="${escapeHtmlGlobal(JSON.stringify(step.output_fields, null, 2)).replace(/"/g, '&quot;')}">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                            </button>
                             <h6>📥 受信 / Output</h6>
                             <pre>${escapeHtmlGlobal(JSON.stringify(step.output_fields, null, 2))}</pre>
                         </div>
@@ -688,8 +1009,12 @@ function displayWorkflowJobResults(job) {
 
     // Display execution trace (control flow visibility)
     if (job.merged_output && job.merged_output._execution_trace && job.merged_output._execution_trace.length > 0) {
+        const executionTraceStr = JSON.stringify(job.merged_output._execution_trace, null, 2);
         html += `
-            <div class="workflow-execution-trace">
+            <div class="workflow-execution-trace response-box-container">
+                <button class="response-box-copy-btn" onclick="copyWorkflowStepContent(this)" title="コピー / Copy" data-raw-content="${escapeHtmlGlobal(executionTraceStr).replace(/"/g, '&quot;')}">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                </button>
                 <h5>実行トレース / Execution Trace</h5>
                 <div class="execution-trace-list">
         `;
@@ -749,11 +1074,15 @@ function displayWorkflowJobResults(job) {
         // Remove _execution_trace from display to avoid duplication
         const displayOutput = {...job.merged_output};
         delete displayOutput._execution_trace;
+        const mergedOutputStr = JSON.stringify(displayOutput, null, 2);
 
         html += `
-            <div class="workflow-merged-output">
+            <div class="workflow-merged-output response-box-container">
+                <button class="response-box-copy-btn" onclick="copyWorkflowStepContent(this)" title="コピー / Copy" data-raw-content="${escapeHtmlGlobal(mergedOutputStr).replace(/"/g, '&quot;')}">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                </button>
                 <h5>統合結果 / Merged Output</h5>
-                <pre>${escapeHtmlGlobal(JSON.stringify(displayOutput, null, 2))}</pre>
+                <pre>${escapeHtmlGlobal(mergedOutputStr)}</pre>
             </div>
         `;
     }
@@ -887,6 +1216,54 @@ function renderParameterInputs() {
     });
 }
 
+/**
+ * Load single execution history with optional prompt/workflow filter
+ * @param {number} projectId - Project ID
+ * @param {number|null} promptId - Prompt ID to filter by (null for all prompts)
+ * @param {number|null} workflowId - Workflow ID to filter by (null for prompt jobs)
+ * @param {boolean} append - Whether to append to existing history
+ */
+async function loadSingleHistory(projectId, promptId = null, workflowId = null, append = false) {
+    const container = document.getElementById('history-list');
+
+    try {
+        if (!append) {
+            singleHistoryOffset = 0;
+            singleHistoryHasMore = true;
+            // Show loading spinner
+            if (container) {
+                container.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>履歴を読み込み中... / Loading history...</p></div>';
+            }
+        }
+
+        let url;
+        if (workflowId) {
+            // Workflow jobs use different endpoint
+            url = `/api/workflows/${workflowId}/jobs?limit=${SINGLE_HISTORY_PAGE_SIZE}&offset=${singleHistoryOffset}`;
+        } else if (promptId) {
+            // Filter by specific prompt
+            url = `/api/projects/${projectId}/jobs?limit=${SINGLE_HISTORY_PAGE_SIZE}&offset=${singleHistoryOffset}&job_type=single&prompt_id=${promptId}`;
+        } else {
+            // All jobs in project
+            url = `/api/projects/${projectId}/jobs?limit=${SINGLE_HISTORY_PAGE_SIZE}&offset=${singleHistoryOffset}&job_type=single`;
+        }
+
+        const response = await fetch(url);
+        if (!response.ok) throw new Error('Failed to load history');
+        const jobs = await response.json();
+
+        singleHistoryHasMore = jobs.length >= SINGLE_HISTORY_PAGE_SIZE;
+        singleHistoryOffset += jobs.length;
+
+        renderHistory(jobs, append);
+    } catch (error) {
+        console.error('Failed to load single history:', error);
+        if (!append && container) {
+            container.innerHTML = '<p class="info">履歴の読み込みに失敗しました / Failed to load history</p>';
+        }
+    }
+}
+
 function renderHistory(jobs, append = false) {
     const container = document.getElementById('history-list');
     if (!container) return;
@@ -923,6 +1300,7 @@ function renderHistory(jobs, append = false) {
         const itemCount = job.items ? job.items.length : 0;
         const modelName = job.model_name || '-';
         const promptName = job.prompt_name || '-';
+        const projectName = job.project_name || '-';
 
         // Show delete button for pending/running jobs
         const canDelete = job.status === 'pending' || job.status === 'running';
@@ -935,6 +1313,7 @@ function renderHistory(jobs, append = false) {
                     <div class="job-id">Job #${job.id} (${itemCount} items)</div>
                     ${deleteBtn}
                 </div>
+                <div class="prompt-info">📁 ${projectName}</div>
                 <div class="prompt-info">🎯 ${promptName}</div>
                 <div class="timestamp">実行: ${createdAt}</div>
                 <div class="timestamp">完了: ${finishedAt}</div>
@@ -958,6 +1337,102 @@ function renderHistory(jobs, append = false) {
     }
 }
 
+/**
+ * Create HTML for a single history item (extracted from renderHistory)
+ * @param {Object} job - Job object
+ * @returns {string} HTML string for the history item
+ */
+function createHistoryItemHtml(job) {
+    const createdAt = formatJST(job.created_at);
+    const finishedAt = formatJST(job.finished_at);
+    const turnaround = job.turnaround_ms ? `${(job.turnaround_ms / 1000).toFixed(1)}s` : 'N/A';
+    const itemCount = job.items ? job.items.length : (job.item_count || 0);
+    const modelName = job.model_name || '-';
+    const promptName = job.prompt_name || '-';
+    const projectName = job.project_name || '-';
+
+    // Show delete button for pending/running jobs
+    const canDelete = job.status === 'pending' || job.status === 'running';
+    const deleteBtn = canDelete ?
+        `<button class="delete-job-btn" onclick="event.stopPropagation(); deleteJob(${job.id}, 'single')" title="ジョブを削除">🗑️</button>` : '';
+
+    return `
+        <div class="history-item" data-job-id="${job.id}" onclick="selectHistoryItem(${job.id})">
+            <div class="job-header">
+                <div class="job-id">Job #${job.id} (${itemCount} items)</div>
+                ${deleteBtn}
+            </div>
+            <div class="prompt-info">📁 ${projectName}</div>
+            <div class="prompt-info">🎯 ${promptName}</div>
+            <div class="timestamp">実行: ${createdAt}</div>
+            <div class="timestamp">完了: ${finishedAt}</div>
+            <div class="turnaround">モデル: ${modelName} | 実行時間: ${turnaround}</div>
+            <span class="status ${job.status}">${job.status}</span>
+        </div>
+    `;
+}
+
+/**
+ * Prepend a job to the single execution history list
+ * @param {Object} job - Job object to prepend
+ */
+function prependJobToHistory(job) {
+    const historyList = document.getElementById('history-list');
+    if (!historyList) return;
+
+    // Remove "no history" message if present
+    const emptyMsg = historyList.querySelector('.info');
+    if (emptyMsg) emptyMsg.remove();
+
+    // Check if job already exists in history (avoid duplicates)
+    const existingItem = historyList.querySelector(`[data-job-id="${job.id}"]`);
+    if (existingItem) return;
+
+    // Create and prepend the new job item
+    const jobHtml = createHistoryItemHtml(job);
+    historyList.insertAdjacentHTML('afterbegin', jobHtml);
+}
+
+/**
+ * Update history item status during polling
+ * @param {number} jobId - Job ID
+ * @param {string} status - New status
+ * @param {Object} job - Optional full job object for additional updates
+ */
+function updateHistoryItemStatus(jobId, status, job = null) {
+    const historyItem = document.querySelector(`#history-list [data-job-id="${jobId}"]`);
+    if (!historyItem) return;
+
+    const statusBadge = historyItem.querySelector('.status');
+    if (statusBadge) {
+        statusBadge.className = `status ${status}`;
+        statusBadge.textContent = status;
+    }
+
+    // Update turnaround time if job is complete
+    if (job && job.turnaround_ms) {
+        const turnaroundEl = historyItem.querySelector('.turnaround');
+        if (turnaroundEl) {
+            const turnaround = `${(job.turnaround_ms / 1000).toFixed(1)}s`;
+            turnaroundEl.textContent = `モデル: ${job.model_name || '-'} | 実行時間: ${turnaround}`;
+        }
+    }
+
+    // Update finished time
+    if (job && job.finished_at) {
+        const timestamps = historyItem.querySelectorAll('.timestamp');
+        if (timestamps.length >= 2) {
+            timestamps[1].textContent = `完了: ${formatJST(job.finished_at)}`;
+        }
+    }
+
+    // Remove delete button when job completes
+    if (status === 'done' || status === 'error') {
+        const deleteBtn = historyItem.querySelector('.delete-job-btn');
+        if (deleteBtn) deleteBtn.remove();
+    }
+}
+
 let singleHistoryLoading = false;
 
 async function loadMoreSingleHistory() {
@@ -974,19 +1449,8 @@ async function loadMoreSingleHistory() {
 
     try {
         const pid = currentProjectId || 1;
-
-        // Fetch next page of single-type jobs
-        const response = await fetch(`/api/projects/${pid}/jobs?limit=${SINGLE_HISTORY_PAGE_SIZE}&offset=${singleHistoryOffset}&job_type=single`);
-        if (!response.ok) throw new Error('Failed to load more jobs');
-        const singleJobs = await response.json();
-
-        // Update pagination state BEFORE rendering
-        // No more items if we got fewer than requested
-        singleHistoryHasMore = singleJobs.length >= SINGLE_HISTORY_PAGE_SIZE;
-        singleHistoryOffset += singleJobs.length;
-
-        // Append to existing history (or update Load More button state)
-        renderHistory(singleJobs, true);
+        // Use the unified loadSingleHistory function with current filters (append mode)
+        await loadSingleHistory(pid, currentPromptId, currentWorkflowId, true);
     } catch (error) {
         showStatus('履歴の読み込みに失敗しました / Failed to load more history', 'error');
     } finally {
@@ -994,7 +1458,7 @@ async function loadMoreSingleHistory() {
     }
 }
 
-function selectHistoryItem(jobId) {
+async function selectHistoryItem(jobId) {
     selectedJobId = jobId;
 
     document.querySelectorAll('.history-item').forEach(item => {
@@ -1007,13 +1471,74 @@ function selectHistoryItem(jobId) {
 
     // Safely access recent_jobs with null check
     const recentJobs = currentConfig?.recent_jobs || [];
-    const job = recentJobs.find(j => j.id === jobId);
+    let job = recentJobs.find(j => j.id === jobId);
+
+    // If job not found in cache, fetch it from API
+    if (!job) {
+        try {
+            const response = await fetch(`/api/jobs/${jobId}/details`);
+            if (response.ok) {
+                job = await response.json();
+                // Add to cache for future clicks
+                if (currentConfig) {
+                    if (!currentConfig.recent_jobs) {
+                        currentConfig.recent_jobs = [];
+                    }
+                    currentConfig.recent_jobs.push(job);
+                }
+            } else {
+                console.error('Failed to fetch job details:', response.statusText);
+            }
+        } catch (error) {
+            console.error('Error fetching job details:', error);
+        }
+    }
+
     if (job) {
+        // If prompt is not loaded or different from job's prompt, load it first
+        if (job.prompt_id && (currentSelectionType !== 'prompt' || currentPromptId !== job.prompt_id)) {
+            console.log(`Loading prompt ${job.prompt_id} for job ${jobId}`);
+
+            // Update dropdown selection to match the prompt
+            const targetSelect = document.getElementById('single-target-select');
+            if (targetSelect) {
+                targetSelect.value = `prompt:${job.prompt_id}`;
+            }
+
+            // Find and load the prompt from execution targets
+            if (currentExecutionTargets?.prompts) {
+                const prompt = currentExecutionTargets.prompts.find(p => p.id === job.prompt_id);
+                if (prompt) {
+                    currentSelectionType = 'prompt';
+                    currentPromptId = job.prompt_id;
+                    await loadPromptConfig(prompt);
+                }
+            }
+
+            // Re-select the job in the history after loading
+            selectedJobId = jobId;
+            document.querySelectorAll('.history-item').forEach(item => {
+                if (parseInt(item.dataset.jobId) === jobId) {
+                    item.classList.add('selected');
+                } else {
+                    item.classList.remove('selected');
+                }
+            });
+        }
+
         displayJobResults(job);
         if (job.items && job.items.length > 0) {
             const params = JSON.parse(job.items[0].input_params);
             populateInputForm(params);
         }
+
+        // Update context bar with job's project/prompt names
+        const projectName = job.project_name || '-';
+        const promptName = job.prompt_name || '-';
+        updateContextBar(projectName, promptName);
+
+        // Update context bar with history info
+        updateContextBarHistoryInfo(job);
     }
 }
 
@@ -1205,16 +1730,31 @@ function displayJobResults(job, targetContainer = null) {
                 }
             }
 
+            // Copy button SVG icon
+            const copyBtnSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+
+            // Store raw content for copy (escape quotes for data attribute)
+            const promptContent = item.raw_prompt || '';
+            const responseContent = item.raw_response || '';
+            const escapedPromptAttr = escapeHtml(promptContent).replace(/"/g, '&quot;');
+            const escapedResponseAttr = escapeHtml(responseContent).replace(/"/g, '&quot;');
+
             content = `
                 <div>
                     <h4 style="color: #34495e; margin-bottom: 0.5rem;">📤 送信プロンプト / Sent Prompt:</h4>
-                    <div class="response-box" style="background-color: #f8f9fa; max-height: 300px; overflow-y: auto;">
-                        <pre>${escapeHtml(item.raw_prompt) || 'No prompt'}</pre>
+                    <div class="response-box-container">
+                        <button class="response-box-copy-btn" onclick="copyResponseBox(this)" title="コピー / Copy" data-raw-content="${escapedPromptAttr}">${copyBtnSvg}</button>
+                        <div class="response-box" style="background-color: #f8f9fa; max-height: 300px; overflow-y: auto;">
+                            <pre>${escapeHtml(promptContent) || 'No prompt'}</pre>
+                        </div>
                     </div>
 
                     <h4 style="color: #2c3e50; margin-top: 1rem; margin-bottom: 0.5rem;">📄 生レスポンス / Raw Response:</h4>
-                    <div class="response-box">
-                        <pre>${escapeHtml(item.raw_response) || 'No response'}</pre>
+                    <div class="response-box-container">
+                        <button class="response-box-copy-btn" onclick="copyResponseBox(this)" title="コピー / Copy" data-raw-content="${escapedResponseAttr}">${copyBtnSvg}</button>
+                        <div class="response-box">
+                            <pre>${escapeHtml(responseContent) || 'No response'}</pre>
+                        </div>
                     </div>
                     ${parsedContent}
                 </div>
@@ -1367,6 +1907,11 @@ async function executePrompt(repeat) {
                 showStatus(`ジョブ開始！ ${result.message}`, 'info');
                 displayJobResults(result.job);
 
+                // Add job to history list immediately (running state)
+                if (result.job) {
+                    prependJobToHistory(result.job);
+                }
+
                 // Restore execution state (but keep stop button visible)
                 setExecutionState(false);
 
@@ -1420,6 +1965,11 @@ async function executeWorkflow(inputParams, modelName, temperature, repeat) {
         const result = await response.json();
         console.log('📥 Workflow job created:', result);
 
+        // Add job to workflow history list immediately (running state)
+        if (result) {
+            prependJobToWorkflowHistory(result);
+        }
+
         // Start polling for workflow job progress
         pollWorkflowJobProgress(result.id, currentWorkflowId);
 
@@ -1458,11 +2008,17 @@ async function pollWorkflowJobProgress(jobId, workflowId) {
             // Update display with latest job data
             displayWorkflowJobResults(job);
 
+            // Update history item status
+            updateWorkflowHistoryItemStatus(jobId, job.status, job);
+
             // If job is complete or error, stop polling
             if (job.status === 'done' || job.status === 'completed' || job.status === 'error') {
                 clearInterval(workflowPollIntervalId);
                 workflowPollIntervalId = null;
                 hideSingleStopButton();
+
+                // Update final status in history
+                updateWorkflowHistoryItemStatus(jobId, job.status, job);
 
                 if (job.status === 'done' || job.status === 'completed') {
                     showStatus('ワークフロー完了！', 'success');
@@ -1512,6 +2068,9 @@ async function pollSingleJobProgress(jobId, projectId) {
             // Update display with latest job data
             displayJobResults(job);
 
+            // Update history item status
+            updateHistoryItemStatus(jobId, job.status, job);
+
             // Check if job is complete (including cancelled)
             const isComplete = job.status === 'done' || job.status === 'error' || job.status === 'cancelled';
             const allItemsComplete = job.items && job.items.every(item =>
@@ -1523,6 +2082,9 @@ async function pollSingleJobProgress(jobId, projectId) {
                 clearInterval(singlePollIntervalId);
                 singlePollIntervalId = null;
                 hideSingleStopButton();
+
+                // Update final status in history
+                updateHistoryItemStatus(jobId, job.status, job);
 
                 // Show completion status
                 const completedCount = job.items.filter(i => i.status === 'done').length;
@@ -1727,6 +2289,9 @@ async function onProjectChange(e) {
         }
     }
 
+    // Deselect any selected history item when changing project
+    deselectSingleHistory();
+
     // Parse the select value to determine type
     const { type, id } = parseSelectValue(selectValue);
 
@@ -1763,35 +2328,33 @@ async function loadExecutionTargets(projectId) {
         // Update the execution target selector
         updateExecutionTargetSelector(currentExecutionTargets);
 
-        // Also load and display history for this project
-        singleHistoryOffset = 0;
-        singleHistoryHasMore = true;
-        const jobsResponse = await fetch(`/api/projects/${projectId}/jobs?limit=${SINGLE_HISTORY_PAGE_SIZE}&offset=0&job_type=single`);
-        if (jobsResponse.ok) {
-            const singleJobs = await jobsResponse.json();
-            singleHistoryHasMore = singleJobs.length >= SINGLE_HISTORY_PAGE_SIZE;
-            singleHistoryOffset = singleJobs.length;
-            renderHistory(singleJobs);
+        // Start with no selection - user must choose a prompt
+        currentPromptId = null;
+        currentWorkflowId = null;
+        currentSelectionType = 'none';
+
+        // Load all history for the project (no filter)
+        await loadSingleHistory(projectId, null, null);
+
+        // Clear the prompt template and input form
+        const templateEl = document.getElementById('prompt-template');
+        if (templateEl) {
+            templateEl.textContent = 'プロンプトを選択してください / Please select a prompt';
+        }
+        const inputsEl = document.getElementById('parameter-inputs');
+        if (inputsEl) {
+            inputsEl.innerHTML = '<p class="info">プロンプトを選択してください / Please select a prompt</p>';
         }
 
-        // Auto-select first prompt if available
-        if (currentExecutionTargets.prompts && currentExecutionTargets.prompts.length > 0) {
-            const firstPrompt = currentExecutionTargets.prompts[0];
-            currentPromptId = firstPrompt.id;
-            currentSelectionType = 'prompt';
-
-            // Update selector value
-            const targetSelect = document.getElementById('single-target-select');
-            if (targetSelect) {
-                targetSelect.value = `prompt:${firstPrompt.id}`;
-            }
-
-            // Load config for the first prompt
-            await loadPromptConfig(firstPrompt);
-        } else {
-            // Fallback to old behavior if no prompts
-            await loadConfig();
+        // Update context bar with project name only
+        const projectSelect = document.getElementById('single-project-select');
+        let projectName = '-';
+        if (projectSelect) {
+            const projectOption = projectSelect.options[projectSelect.selectedIndex];
+            projectName = projectOption ? projectOption.textContent : '-';
         }
+        updateContextBar(projectName, '-');
+
     } catch (error) {
         console.error('Failed to load execution targets:', error);
         // Fallback to old behavior
@@ -1809,7 +2372,8 @@ function updateExecutionTargetSelector(targets) {
         return;
     }
 
-    let options = '';
+    // Start with empty option
+    let options = '<option value="">プロンプトを選択 / Select Prompt</option>';
 
     // Add prompts
     if (targets.prompts && targets.prompts.length > 0) {
@@ -1830,7 +2394,7 @@ function updateExecutionTargetSelector(targets) {
     }
 
     targetSelect.innerHTML = options;
-    targetSelect.style.display = options ? 'block' : 'none';
+    targetSelect.style.display = 'block';
 }
 
 /**
@@ -1867,21 +2431,150 @@ async function refreshSingleExecutionTargets() {
 }
 
 /**
+ * Reload single execution tab with current filter maintained.
+ * Reloads: project, execution target selector, model, history (with filter), results
+ */
+async function reloadSingleExecutionWithFilter() {
+    if (!currentProjectId) {
+        showStatus('プロジェクトが選択されていません / No project selected', 'error');
+        return;
+    }
+
+    try {
+        // Remember current state
+        const savedPromptId = currentPromptId;
+        const savedWorkflowId = currentWorkflowId;
+        const savedSelectionType = currentSelectionType;
+        const savedJobId = selectedJobId;
+
+        // Show loading indicator
+        const historyContainer = document.getElementById('history-list');
+        if (historyContainer) {
+            historyContainer.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>再読込中... / Reloading...</p></div>';
+        }
+
+        // Reload execution targets (prompts and workflows)
+        const targetsResponse = await fetch(`/api/projects/${currentProjectId}/execution-targets`);
+        if (!targetsResponse.ok) throw new Error('Failed to load execution targets');
+        currentExecutionTargets = await targetsResponse.json();
+
+        // Update the dropdown
+        updateExecutionTargetSelector(currentExecutionTargets);
+
+        // Restore selection in dropdown
+        const targetSelect = document.getElementById('single-target-select');
+        if (targetSelect) {
+            if (savedSelectionType === 'prompt' && savedPromptId) {
+                const promptValue = `prompt:${savedPromptId}`;
+                const optionExists = Array.from(targetSelect.options).some(opt => opt.value === promptValue);
+                if (optionExists) {
+                    targetSelect.value = promptValue;
+                    currentPromptId = savedPromptId;
+                    currentWorkflowId = null;
+                    currentSelectionType = 'prompt';
+                }
+            } else if (savedSelectionType === 'workflow' && savedWorkflowId) {
+                const workflowValue = `workflow:${savedWorkflowId}`;
+                const optionExists = Array.from(targetSelect.options).some(opt => opt.value === workflowValue);
+                if (optionExists) {
+                    targetSelect.value = workflowValue;
+                    currentWorkflowId = savedWorkflowId;
+                    currentPromptId = null;
+                    currentSelectionType = 'workflow';
+                }
+            }
+        }
+
+        // Reload history with current filter
+        if (currentSelectionType === 'workflow' && currentWorkflowId) {
+            await loadSingleHistory(currentProjectId, null, currentWorkflowId);
+        } else if (currentSelectionType === 'prompt' && currentPromptId) {
+            await loadSingleHistory(currentProjectId, currentPromptId, null);
+        } else {
+            await loadSingleHistory(currentProjectId, null, null);
+        }
+
+        // Reload prompt/workflow config to update template and parameters
+        if (currentSelectionType === 'prompt' && currentPromptId) {
+            const promptResponse = await fetch(`/api/prompts/${currentPromptId}`);
+            if (promptResponse.ok) {
+                const prompt = await promptResponse.json();
+                await loadPromptConfig(prompt);
+            }
+        } else if (currentSelectionType === 'workflow' && currentWorkflowId) {
+            await loadWorkflowConfig(currentWorkflowId);
+        }
+
+        // Re-select the previously selected job if it still exists
+        if (savedJobId) {
+            // Check if the job is still in the history
+            const historyItems = document.querySelectorAll('.history-item[data-job-id]');
+            const jobExists = Array.from(historyItems).some(
+                item => parseInt(item.dataset.jobId) === savedJobId
+            );
+            if (jobExists) {
+                await selectHistoryItem(savedJobId);
+            } else {
+                // Clear the right pane if the job no longer exists
+                deselectSingleHistory();
+            }
+        }
+
+        showStatus('再読込完了 / Reload complete', 'success');
+    } catch (error) {
+        console.error('Error reloading single execution:', error);
+        showStatus(`再読込エラー: ${error.message}`, 'error');
+    }
+}
+
+/**
  * NEW ARCHITECTURE: Handle execution target selection (prompt or workflow within a project)
  */
 async function onExecutionTargetChange(e) {
     const value = e.target.value;
+
+    // Deselect any selected history item when changing execution target
+    deselectSingleHistory();
+
+    // Handle empty selection (no prompt/workflow selected)
+    if (!value || value === '') {
+        currentSelectionType = 'none';
+        currentPromptId = null;
+        currentWorkflowId = null;
+
+        // Load all history for the project (no filter)
+        await loadSingleHistory(currentProjectId, null, null);
+
+        // Clear the prompt template and input form
+        const templateEl = document.getElementById('prompt-template');
+        if (templateEl) {
+            templateEl.textContent = 'プロンプトを選択してください / Please select a prompt';
+        }
+        const inputsEl = document.getElementById('parameter-inputs');
+        if (inputsEl) {
+            inputsEl.innerHTML = '<p class="info">プロンプトを選択してください / Please select a prompt</p>';
+        }
+
+        // Update context bar
+        updateContextBar('-', '-');
+        return;
+    }
+
     const [type, id] = value.split(':');
 
     if (type === 'workflow') {
         currentSelectionType = 'workflow';
         currentWorkflowId = parseInt(id);
         currentPromptId = null;
+        // loadWorkflowConfig loads workflow-specific history
         await loadWorkflowConfig(currentWorkflowId);
     } else if (type === 'prompt') {
         currentSelectionType = 'prompt';
         currentPromptId = parseInt(id);
         currentWorkflowId = null;
+
+        // Load history filtered by this prompt
+        await loadSingleHistory(currentProjectId, currentPromptId, null);
 
         // Always fetch fresh prompt data from API to ensure we have latest parameters
         try {
@@ -1908,6 +2601,70 @@ async function onExecutionTargetChange(e) {
 }
 
 /**
+ * Deselect all history items in single execution tab
+ */
+function deselectSingleHistory() {
+    selectedJobId = null;
+    document.querySelectorAll('#tab-single .history-item').forEach(item => {
+        item.classList.remove('selected');
+    });
+    // Clear the history info from context bar
+    updateContextBarHistoryInfo(null);
+    // Clear the results area
+    const resultsArea = document.getElementById('results-area');
+    if (resultsArea) {
+        resultsArea.innerHTML = '<p class="info">実行結果がここに表示されます / Results will be displayed here</p>';
+    }
+}
+
+/**
+ * Clear all input parameters for new entry.
+ * Resets inputs to default values and deselects history.
+ */
+function clearInputsForNewEntry() {
+    // Deselect history items (this also clears results area and history info)
+    deselectSingleHistory();
+
+    // Clear all input parameters and reset to default values
+    const inputContainer = document.getElementById('parameter-inputs');
+    if (!inputContainer) return;
+
+    // Iterate through current parameters and reset inputs
+    currentParameters.forEach(param => {
+        const inputId = `param-${param.name}`;
+        const input = document.getElementById(inputId);
+
+        if (input) {
+            if (param.html_type === 'file') {
+                // Clear file input
+                input.value = '';
+                // Hide file info and preview
+                const fileInfo = document.getElementById(`file-info-${param.name}`);
+                const previewContainer = document.getElementById(`preview-container-${param.name}`);
+                const dropZone = document.getElementById(`drop-zone-${param.name}`);
+                if (fileInfo) fileInfo.style.display = 'none';
+                if (previewContainer) previewContainer.style.display = 'none';
+                if (dropZone) dropZone.style.display = 'flex';
+            } else if (param.html_type === 'textarea' || param.html_type === 'text') {
+                // Reset to default value or empty
+                input.value = param.default || '';
+            } else if (param.html_type === 'number') {
+                // Reset to default value or empty
+                input.value = param.default || '';
+            } else if (param.html_type === 'date' || param.html_type === 'datetime-local') {
+                // Reset to default value or empty
+                input.value = param.default || '';
+            } else {
+                // Generic reset
+                input.value = param.default || '';
+            }
+        }
+    });
+
+    showStatus('入力をクリアしました / Input cleared', 'success');
+}
+
+/**
  * NEW ARCHITECTURE: Load configuration for a specific prompt
  */
 async function loadPromptConfig(prompt) {
@@ -1920,7 +2677,9 @@ async function loadPromptConfig(prompt) {
             prompt_template: prompt.prompt_template,
             parser_config: prompt.parser_config,
             parameters: prompt.parameters,
-            recent_jobs: existingJobs  // Preserve history
+            recent_jobs: existingJobs,  // Preserve history
+            prompt_name: prompt.name,
+            project_name: prompt.project_name || currentConfig?.project_name
         };
 
         currentParameters = prompt.parameters || [];
@@ -1933,6 +2692,9 @@ async function loadPromptConfig(prompt) {
 
         // Render parameter inputs
         renderParameterInputs();
+
+        // Update context bar with project and prompt names
+        updateContextBar(currentConfig.project_name, prompt.name);
 
         showStatus(`プロンプト "${prompt.name}" を読み込みました`, 'success');
     } catch (error) {
@@ -2167,10 +2929,15 @@ async function renderPromptManagementModal(prompts) {
 
     // Textarea sizing: consistent height across tabs to prevent size change on tab switch
     // Parser tab has extra selector (~70px), so prompt textarea is larger to match total height
+    const copyBtnSvgModal = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+
     const promptContent = `
         <div class="form-group" style="margin: 0;">
             <label style="display: block; margin-bottom: 5px;">プロンプトテンプレート / Prompt Template:</label>
-            <textarea id="edit-prompt-template" style="font-family: 'Courier New', monospace; width: 100%; box-sizing: border-box; height: 550px; max-height: 2000px; resize: vertical;">${currentModalPromptData.prompt_template || ''}</textarea>
+            <div class="response-box-container" style="position: relative;">
+                <button class="response-box-copy-btn" onclick="copyEditorContent('edit-prompt-template')" title="コピー / Copy">${copyBtnSvgModal}</button>
+                <textarea id="edit-prompt-template" style="font-family: 'Courier New', monospace; width: 100%; box-sizing: border-box; height: 400px; max-height: 1500px; resize: vertical;">${currentModalPromptData.prompt_template || ''}</textarea>
+            </div>
         </div>
     `;
 
@@ -2187,7 +2954,10 @@ async function renderPromptManagementModal(prompts) {
         </div>
         <div class="form-group" style="margin: 0;">
             <label style="display: block; margin-bottom: 5px;">パーサー設定 (JSON) / Parser Config:</label>
-            <textarea id="edit-parser-config" style="font-family: 'Courier New', monospace; width: 100%; box-sizing: border-box; height: 280px; max-height: 2000px; resize: vertical;">${JSON.stringify(parserConfig, null, 2)}</textarea>
+            <div class="response-box-container" style="position: relative;">
+                <button class="response-box-copy-btn" onclick="copyEditorContent('edit-parser-config')" title="コピー / Copy">${copyBtnSvgModal}</button>
+                <textarea id="edit-parser-config" style="font-family: 'Courier New', monospace; width: 100%; box-sizing: border-box; height: 200px; max-height: 1500px; resize: vertical;">${JSON.stringify(parserConfig, null, 2)}</textarea>
+            </div>
         </div>
         <!-- Inline JSON to CSV Converter -->
         <div id="json-csv-converter-section" style="margin-top: 10px; border: 1px solid #9b59b6; border-radius: 5px; display: none;">
@@ -2199,7 +2969,7 @@ async function renderPromptManagementModal(prompts) {
                 <div style="display: flex; gap: 10px;">
                     <div style="flex: 1;">
                         <label style="font-size: 0.85rem; font-weight: bold; display: block; margin-bottom: 3px;">サンプルJSON入力:</label>
-                        <textarea id="json-sample-input" rows="8" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem;" placeholder='{"field1": "value", "field2": {"nested": "data"}}'></textarea>
+                        <textarea id="json-sample-input" rows="5" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem;" placeholder='{"field1": "value", "field2": {"nested": "data"}}'></textarea>
                     </div>
                     <div style="display: flex; flex-direction: column; justify-content: center; gap: 5px;">
                         <button onclick="convertJsonToCsvTemplateInline()" style="background: #9b59b6; color: white; border: none; padding: 8px 12px; border-radius: 3px; cursor: pointer; font-size: 0.85rem;">🔄 変換</button>
@@ -2207,7 +2977,7 @@ async function renderPromptManagementModal(prompts) {
                     </div>
                     <div style="flex: 1;">
                         <label style="font-size: 0.85rem; font-weight: bold; display: block; margin-bottom: 3px;">生成された設定:</label>
-                        <textarea id="generated-parser-config-inline" rows="8" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem; background: #f8f9fa;" readonly placeholder="変換結果がここに表示されます"></textarea>
+                        <textarea id="generated-parser-config-inline" rows="5" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem; background: #f8f9fa;" readonly placeholder="変換結果がここに表示されます"></textarea>
                     </div>
                 </div>
                 <div style="margin-top: 5px;">
@@ -2342,11 +3112,16 @@ function switchModalTab(tab) {
 
     // Update tab content - consistent height across tabs
     const contentDiv = document.getElementById('modal-tab-content');
+    const copyBtnSvgTab = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+
     if (tab === 'prompt') {
         contentDiv.innerHTML = `
             <div class="form-group" style="margin: 0;">
                 <label style="display: block; margin-bottom: 5px;">プロンプトテンプレート / Prompt Template:</label>
-                <textarea id="edit-prompt-template" style="font-family: 'Courier New', monospace; width: 100%; box-sizing: border-box; height: 550px; max-height: 2000px; resize: vertical;">${currentModalPromptData.prompt_template || ''}</textarea>
+                <div class="response-box-container" style="position: relative;">
+                    <button class="response-box-copy-btn" onclick="copyEditorContent('edit-prompt-template')" title="コピー / Copy">${copyBtnSvgTab}</button>
+                    <textarea id="edit-prompt-template" style="font-family: 'Courier New', monospace; width: 100%; box-sizing: border-box; height: 400px; max-height: 1500px; resize: vertical;">${currentModalPromptData.prompt_template || ''}</textarea>
+                </div>
             </div>
         `;
     } else {
@@ -2370,7 +3145,10 @@ function switchModalTab(tab) {
             </div>
             <div class="form-group" style="margin: 0;">
                 <label style="display: block; margin-bottom: 5px;">パーサー設定 (JSON) / Parser Config:</label>
-                <textarea id="edit-parser-config" style="font-family: 'Courier New', monospace; width: 100%; box-sizing: border-box; height: 280px; max-height: 2000px; resize: vertical;">${JSON.stringify(parserConfig, null, 2)}</textarea>
+                <div class="response-box-container" style="position: relative;">
+                    <button class="response-box-copy-btn" onclick="copyEditorContent('edit-parser-config')" title="コピー / Copy">${copyBtnSvgTab}</button>
+                    <textarea id="edit-parser-config" style="font-family: 'Courier New', monospace; width: 100%; box-sizing: border-box; height: 200px; max-height: 1500px; resize: vertical;">${JSON.stringify(parserConfig, null, 2)}</textarea>
+                </div>
             </div>
             <!-- Inline JSON to CSV Converter -->
             <div id="json-csv-converter-section" style="margin-top: 10px; border: 1px solid #9b59b6; border-radius: 5px; display: none;">
@@ -2382,7 +3160,7 @@ function switchModalTab(tab) {
                     <div style="display: flex; gap: 10px;">
                         <div style="flex: 1;">
                             <label style="font-size: 0.85rem; font-weight: bold; display: block; margin-bottom: 3px;">サンプルJSON入力:</label>
-                            <textarea id="json-sample-input" rows="8" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem;" placeholder='{"field1": "value", "field2": {"nested": "data"}}'></textarea>
+                            <textarea id="json-sample-input" rows="5" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem;" placeholder='{"field1": "value", "field2": {"nested": "data"}}'></textarea>
                         </div>
                         <div style="display: flex; flex-direction: column; justify-content: center; gap: 5px;">
                             <button onclick="convertJsonToCsvTemplateInline()" style="background: #9b59b6; color: white; border: none; padding: 8px 12px; border-radius: 3px; cursor: pointer; font-size: 0.85rem;">🔄 変換</button>
@@ -2390,7 +3168,7 @@ function switchModalTab(tab) {
                         </div>
                         <div style="flex: 1;">
                             <label style="font-size: 0.85rem; font-weight: bold; display: block; margin-bottom: 3px;">生成された設定:</label>
-                            <textarea id="generated-parser-config-inline" rows="8" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem; background: #f8f9fa;" readonly placeholder="変換結果がここに表示されます"></textarea>
+                            <textarea id="generated-parser-config-inline" rows="5" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem; background: #f8f9fa;" readonly placeholder="変換結果がここに表示されます"></textarea>
                         </div>
                     </div>
                     <div style="margin-top: 5px;">
@@ -2969,7 +3747,10 @@ async function showEditParserModal() {
                 </div>
                 <div class="form-group">
                     <label>パーサー設定 (JSON) / Parser Configuration (JSON):</label>
-                    <textarea id="edit-parser-config" rows="12" style="font-family: 'Courier New', monospace;">${parserJson}</textarea>
+                    <div class="response-box-container" style="position: relative;">
+                        <button class="response-box-copy-btn" onclick="copyEditorContent('edit-parser-config')" title="コピー / Copy"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>
+                        <textarea id="edit-parser-config" rows="12" style="font-family: 'Courier New', monospace;">${parserJson}</textarea>
+                    </div>
                     <small style="color: #7f8c8d;">
                         JSON Path例: {"type": "json_path", "paths": {"answer": "$.answer"}}<br>
                         正規表現例: {"type": "regex", "patterns": {"answer": "Answer: (.+)"}}
@@ -2985,7 +3766,7 @@ async function showEditParserModal() {
                         <div style="display: flex; gap: 10px;">
                             <div style="flex: 1;">
                                 <label style="font-size: 0.85rem; font-weight: bold; display: block; margin-bottom: 3px;">サンプルJSON入力:</label>
-                                <textarea id="json-sample-input" rows="8" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem;" placeholder='{"field1": "value", "field2": {"nested": "data"}}'></textarea>
+                                <textarea id="json-sample-input" rows="5" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem;" placeholder='{"field1": "value", "field2": {"nested": "data"}}'></textarea>
                             </div>
                             <div style="display: flex; flex-direction: column; justify-content: center; gap: 5px;">
                                 <button onclick="convertJsonToCsvTemplateInline()" style="background: #9b59b6; color: white; border: none; padding: 8px 12px; border-radius: 3px; cursor: pointer; font-size: 0.85rem;">🔄 変換</button>
@@ -2993,7 +3774,7 @@ async function showEditParserModal() {
                             </div>
                             <div style="flex: 1;">
                                 <label style="font-size: 0.85rem; font-weight: bold; display: block; margin-bottom: 3px;">生成された設定:</label>
-                                <textarea id="generated-parser-config-inline" rows="8" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem; background: #f8f9fa;" readonly placeholder="変換結果がここに表示されます"></textarea>
+                                <textarea id="generated-parser-config-inline" rows="5" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem; background: #f8f9fa;" readonly placeholder="変換結果がここに表示されます"></textarea>
                             </div>
                         </div>
                         <div style="margin-top: 5px;">
@@ -3254,7 +4035,10 @@ async function showBatchEditParserModal() {
                 </div>
                 <div class="form-group">
                     <label>パーサー設定 (JSON) / Parser Configuration (JSON):</label>
-                    <textarea id="edit-parser-config" rows="12" style="font-family: 'Courier New', monospace;">${parserJson}</textarea>
+                    <div class="response-box-container" style="position: relative;">
+                        <button class="response-box-copy-btn" onclick="copyEditorContent('edit-parser-config')" title="コピー / Copy"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>
+                        <textarea id="edit-parser-config" rows="12" style="font-family: 'Courier New', monospace;">${parserJson}</textarea>
+                    </div>
                     <small style="color: #7f8c8d;">
                         JSON Path例: {"type": "json_path", "paths": {"answer": "$.answer"}}<br>
                         正規表現例: {"type": "regex", "patterns": {"answer": "Answer: (.+)"}}
@@ -3270,7 +4054,7 @@ async function showBatchEditParserModal() {
                         <div style="display: flex; gap: 10px;">
                             <div style="flex: 1;">
                                 <label style="font-size: 0.85rem; font-weight: bold; display: block; margin-bottom: 3px;">サンプルJSON入力:</label>
-                                <textarea id="json-sample-input" rows="8" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem;" placeholder='{"field1": "value", "field2": {"nested": "data"}}'></textarea>
+                                <textarea id="json-sample-input" rows="5" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem;" placeholder='{"field1": "value", "field2": {"nested": "data"}}'></textarea>
                             </div>
                             <div style="display: flex; flex-direction: column; justify-content: center; gap: 5px;">
                                 <button onclick="convertJsonToCsvTemplateInline()" style="background: #9b59b6; color: white; border: none; padding: 8px 12px; border-radius: 3px; cursor: pointer; font-size: 0.85rem;">🔄 変換</button>
@@ -3278,7 +4062,7 @@ async function showBatchEditParserModal() {
                             </div>
                             <div style="flex: 1;">
                                 <label style="font-size: 0.85rem; font-weight: bold; display: block; margin-bottom: 3px;">生成された設定:</label>
-                                <textarea id="generated-parser-config-inline" rows="8" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem; background: #f8f9fa;" readonly placeholder="変換結果がここに表示されます"></textarea>
+                                <textarea id="generated-parser-config-inline" rows="5" style="font-family: 'Courier New', monospace; width: 100%; font-size: 0.85rem; background: #f8f9fa;" readonly placeholder="変換結果がここに表示されます"></textarea>
                             </div>
                         </div>
                         <div style="margin-top: 5px;">
@@ -3447,24 +4231,36 @@ async function loadBatchJobs() {
     }
 }
 
-async function loadBatchJobHistory(projectId) {
-    try {
-        // Reset pagination state for batch history
-        batchHistoryOffset = 0;
-        batchHistoryHasMore = true;
+async function loadBatchJobHistory(projectId, promptId = null, append = false) {
+    const container = document.getElementById('batch-jobs-list');
 
-        // Get batch-type jobs for this project (first page only)
-        const response = await fetch(`/api/projects/${projectId}/jobs?limit=${BATCH_HISTORY_PAGE_SIZE}&offset=0&job_type=batch`);
+    try {
+        // Reset pagination state for batch history (unless appending)
+        if (!append) {
+            batchHistoryOffset = 0;
+            batchHistoryHasMore = true;
+            // Show loading spinner
+            if (container) {
+                container.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>履歴を読み込み中... / Loading history...</p></div>';
+            }
+        }
+
+        // Build URL with optional prompt filter
+        let url = `/api/projects/${projectId}/jobs?limit=${BATCH_HISTORY_PAGE_SIZE}&offset=${batchHistoryOffset}&job_type=batch`;
+        if (promptId) {
+            url += `&prompt_id=${promptId}`;
+        }
+
+        const response = await fetch(url);
         const batchJobs = await response.json();
 
         // Update pagination state
         batchHistoryHasMore = batchJobs.length >= BATCH_HISTORY_PAGE_SIZE;
-        batchHistoryOffset = batchJobs.length;
+        batchHistoryOffset += batchJobs.length;
 
-        renderBatchHistory(batchJobs);
+        renderBatchHistory(batchJobs, append);
     } catch (error) {
-        const container = document.getElementById('batch-jobs-list');
-        if (container) {
+        if (!append && container) {
             container.innerHTML = '<p class="info">バッチジョブの履歴を読み込めませんでした / Failed to load batch job history</p>';
         }
     }
@@ -3514,6 +4310,7 @@ function renderBatchHistory(jobs, append = false) {
         const itemCount = job.items ? job.items.length : 0;
         const modelName = job.model_name || '-';
         const promptName = job.prompt_name || '-';
+        const projectName = job.project_name || '-';
 
         // Show delete button for pending/running jobs
         const canDelete = job.status === 'pending' || job.status === 'running';
@@ -3521,11 +4318,12 @@ function renderBatchHistory(jobs, append = false) {
             `<button class="delete-job-btn" onclick="event.stopPropagation(); deleteJob(${job.id}, 'batch')" title="ジョブを削除">🗑️</button>` : '';
 
         return `
-            <div class="history-item" data-job-id="${job.id}">
+            <div class="history-item" data-job-id="${job.id}" onclick="selectBatchJob(${job.id})">
                 <div class="job-header">
                     <div class="job-id">Batch Job #${job.id} (${itemCount} items)</div>
                     ${deleteBtn}
                 </div>
+                <div class="prompt-info">📁 ${projectName}</div>
                 <div class="prompt-info">🎯 ${promptName}</div>
                 <div class="timestamp">実行: ${createdAt}</div>
                 <div class="timestamp">完了: ${finishedAt}</div>
@@ -3557,6 +4355,105 @@ function renderBatchHistory(jobs, append = false) {
     });
 }
 
+/**
+ * Create HTML for a batch history item (extracted from renderBatchHistory)
+ * @param {Object} job - Job object
+ * @returns {string} HTML string for the history item
+ */
+function createBatchHistoryItemHtml(job) {
+    const createdAt = formatJST(job.created_at);
+    const finishedAt = formatJST(job.finished_at);
+    const turnaround = job.turnaround_ms ? `${(job.turnaround_ms / 1000).toFixed(1)}s` : 'N/A';
+    const itemCount = job.items ? job.items.length : (job.item_count || 0);
+    const modelName = job.model_name || '-';
+    const promptName = job.prompt_name || '-';
+    const projectName = job.project_name || '-';
+
+    // Show delete button for pending/running jobs
+    const canDelete = job.status === 'pending' || job.status === 'running';
+    const deleteBtn = canDelete ?
+        `<button class="delete-job-btn" onclick="event.stopPropagation(); deleteJob(${job.id}, 'batch')" title="ジョブを削除">🗑️</button>` : '';
+
+    return `
+        <div class="history-item" data-job-id="${job.id}" onclick="selectBatchJob(${job.id})">
+            <div class="job-header">
+                <div class="job-id">Batch Job #${job.id} (${itemCount} items)</div>
+                ${deleteBtn}
+            </div>
+            <div class="prompt-info">📁 ${projectName}</div>
+            <div class="prompt-info">🎯 ${promptName}</div>
+            <div class="timestamp">実行: ${createdAt}</div>
+            <div class="timestamp">完了: ${finishedAt}</div>
+            <div class="turnaround">モデル: ${modelName} | 実行時間: ${turnaround}</div>
+            <span class="status ${job.status}">${job.status}</span>
+        </div>
+    `;
+}
+
+/**
+ * Prepend a job to the batch execution history list
+ * @param {Object} job - Job object to prepend
+ */
+function prependJobToBatchHistory(job) {
+    const historyList = document.getElementById('batch-jobs-list');
+    if (!historyList) return;
+
+    // Remove "no history" message if present
+    const emptyMsg = historyList.querySelector('.info');
+    if (emptyMsg) emptyMsg.remove();
+
+    // Check if job already exists in history (avoid duplicates)
+    const existingItem = historyList.querySelector(`[data-job-id="${job.id}"]`);
+    if (existingItem) return;
+
+    // Create and prepend the new job item
+    const jobHtml = createBatchHistoryItemHtml(job);
+    historyList.insertAdjacentHTML('afterbegin', jobHtml);
+
+    // Add to currentBatchJobs array
+    currentBatchJobs.unshift(job);
+}
+
+/**
+ * Update batch history item status during polling
+ * @param {number} jobId - Job ID
+ * @param {string} status - New status
+ * @param {Object} job - Optional full job object for additional updates
+ */
+function updateBatchHistoryItemStatus(jobId, status, job = null) {
+    const historyItem = document.querySelector(`#batch-jobs-list [data-job-id="${jobId}"]`);
+    if (!historyItem) return;
+
+    const statusBadge = historyItem.querySelector('.status');
+    if (statusBadge) {
+        statusBadge.className = `status ${status}`;
+        statusBadge.textContent = status;
+    }
+
+    // Update turnaround time if job is complete
+    if (job && job.turnaround_ms) {
+        const turnaroundEl = historyItem.querySelector('.turnaround');
+        if (turnaroundEl) {
+            const turnaround = `${(job.turnaround_ms / 1000).toFixed(1)}s`;
+            turnaroundEl.textContent = `モデル: ${job.model_name || '-'} | 実行時間: ${turnaround}`;
+        }
+    }
+
+    // Update finished time
+    if (job && job.finished_at) {
+        const timestamps = historyItem.querySelectorAll('.timestamp');
+        if (timestamps.length >= 2) {
+            timestamps[1].textContent = `完了: ${formatJST(job.finished_at)}`;
+        }
+    }
+
+    // Remove delete button when job completes
+    if (status === 'done' || status === 'error') {
+        const deleteBtn = historyItem.querySelector('.delete-job-btn');
+        if (deleteBtn) deleteBtn.remove();
+    }
+}
+
 let batchHistoryLoading = false;
 
 async function loadMoreBatchHistory() {
@@ -3578,17 +4475,8 @@ async function loadMoreBatchHistory() {
         const parsed = parseSelectValue(projectSelect.value);
         if (!parsed || parsed.type !== 'project' || !parsed.id) return;
 
-        // Fetch next page of batch-type jobs
-        const response = await fetch(`/api/projects/${parsed.id}/jobs?limit=${BATCH_HISTORY_PAGE_SIZE}&offset=${batchHistoryOffset}&job_type=batch`);
-        if (!response.ok) throw new Error('Failed to load more jobs');
-        const batchJobs = await response.json();
-
-        // Update pagination state BEFORE rendering
-        batchHistoryHasMore = batchJobs.length >= BATCH_HISTORY_PAGE_SIZE;
-        batchHistoryOffset += batchJobs.length;
-
-        // Append to existing history (or update Load More button state)
-        renderBatchHistory(batchJobs, true);
+        // Use the unified loadBatchJobHistory function with current filters (append mode)
+        await loadBatchJobHistory(parsed.id, currentBatchPromptId, true);
     } catch (error) {
         showStatus('履歴の読み込みに失敗しました / Failed to load more history', 'error');
     } finally {
@@ -3606,6 +4494,14 @@ async function selectBatchJob(jobId) {
 
         if (job) {
             displayBatchResult(job);
+
+            // Update context bar with job's project/prompt names
+            const projectName = job.project_name || '-';
+            const promptName = job.prompt_name || '-';
+            updateBatchContextBar(projectName, promptName);
+
+            // Update history info in context bar
+            updateBatchContextBarHistoryInfo(job);
         }
 
         // Highlight selected item
@@ -3703,6 +4599,11 @@ async function executeBatch() {
 
             // Display results immediately
             displayBatchResult(result.job);
+
+            // Add job to batch history list immediately (running state)
+            if (result.job) {
+                prependJobToBatchHistory(result.job);
+            }
 
             // Restore execute button (but keep stop button visible)
             executeBtn.disabled = false;
@@ -4108,6 +5009,9 @@ async function pollBatchJobProgress(jobId, projectId) {
             // Update display with latest job data
             displayBatchResult(job);
 
+            // Update history item status
+            updateBatchHistoryItemStatus(jobId, job.status, job);
+
             // Check if job is complete (including cancelled)
             const isComplete = job.status === 'done' || job.status === 'error' || job.status === 'cancelled';
             const allItemsComplete = job.items && job.items.every(item =>
@@ -4119,6 +5023,10 @@ async function pollBatchJobProgress(jobId, projectId) {
                 clearInterval(batchPollIntervalId);
                 batchPollIntervalId = null;
                 hideBatchStopButton();
+
+                // Update final status in history
+                updateBatchHistoryItemStatus(jobId, job.status, job);
+
                 // Reload history to show final status
                 await loadBatchJobHistory(projectId);
             }
@@ -4138,6 +5046,14 @@ async function onBatchProjectChange(e) {
     const selectValue = e.target.value;
     const { type, id } = parseSelectValue(selectValue);
 
+    // Deselect batch history when changing project
+    deselectBatchHistory();
+
+    // Get selected project/workflow name for context bar
+    const selectEl = e.target;
+    const selectedOption = selectEl.options[selectEl.selectedIndex];
+    const projectName = selectedOption ? selectedOption.textContent : '-';
+
     if (type === 'workflow') {
         // For workflows, load datasets from the first step's project
         await loadDatasetsForWorkflow(id);
@@ -4152,15 +5068,63 @@ async function onBatchProjectChange(e) {
         if (historyContainer) {
             historyContainer.innerHTML = '<p class="info">ワークフロージョブ履歴は準備中 / Workflow job history coming soon</p>';
         }
+        // Update context bar for workflow (no prompt)
+        updateBatchContextBar(projectName, 'ワークフロー');
     } else {
-        // Load datasets, prompts, and job history in parallel
-        await Promise.all([
-            loadDatasetsForProject(id),
-            loadBatchPromptsForProject(id),
-            loadBatchJobHistory(id)
-        ]);
+        // Load datasets first
+        await loadDatasetsForProject(id);
+
+        // Load prompts - this will also load filtered history if auto-selecting
+        await loadBatchPromptsForProject(id);
+
         const promptSelect = document.getElementById('batch-prompt-select');
         if (promptSelect) promptSelect.disabled = false;
+
+        // If no prompt was auto-selected, load all history for the project
+        if (!currentBatchPromptId) {
+            await loadBatchJobHistory(id, null);
+            updateBatchContextBar(projectName, '-');
+        }
+    }
+}
+
+/**
+ * Handle batch prompt select change
+ */
+async function onBatchPromptChange(e) {
+    const selectEl = e.target;
+    const selectedOption = selectEl.options[selectEl.selectedIndex];
+    const promptName = selectedOption ? selectedOption.textContent : '-';
+    const promptValue = selectEl.value;
+
+    // Deselect batch history when changing prompt
+    deselectBatchHistory();
+
+    // Parse the prompt ID from the value (could be "all" or a number)
+    let promptId = null;
+    if (promptValue && promptValue !== '' && promptValue !== 'all') {
+        promptId = parseInt(promptValue);
+    }
+    currentBatchPromptId = promptId;
+
+    // Get current project from project select
+    const projectSelect = document.getElementById('batch-project-select');
+    let projectName = '-';
+    let projectId = null;
+    if (projectSelect) {
+        const projectOption = projectSelect.options[projectSelect.selectedIndex];
+        projectName = projectOption ? projectOption.textContent : '-';
+        const parsed = parseSelectValue(projectSelect.value);
+        if (parsed && parsed.type === 'project') {
+            projectId = parsed.id;
+        }
+    }
+
+    updateBatchContextBar(projectName, promptName);
+
+    // Reload batch history filtered by the selected prompt
+    if (projectId) {
+        await loadBatchJobHistory(projectId, promptId);
     }
 }
 
@@ -4190,13 +5154,28 @@ async function loadBatchPromptsForProject(projectId) {
 
         select.innerHTML = options;
 
-        // Auto-select first prompt if only one
+        // Auto-select first prompt if only one and update context bar
         if (prompts.length === 1) {
             select.value = prompts[0].id;
+            currentBatchPromptId = prompts[0].id;
+            // Trigger context bar update
+            const projectSelect = document.getElementById('batch-project-select');
+            let projectName = '-';
+            if (projectSelect) {
+                const projectOption = projectSelect.options[projectSelect.selectedIndex];
+                projectName = projectOption ? projectOption.textContent : '-';
+            }
+            updateBatchContextBar(projectName, prompts[0].name);
+            // Load history filtered by this prompt
+            await loadBatchJobHistory(projectId, prompts[0].id);
+        } else {
+            // Multiple prompts or none - clear prompt filter
+            currentBatchPromptId = null;
         }
     } catch (error) {
         console.error('Failed to load prompts for batch:', error);
         select.innerHTML = '<option value="">エラー / Error</option>';
+        currentBatchPromptId = null;
     }
 }
 
@@ -4249,12 +5228,16 @@ async function loadDatasetsForProject(projectId) {
 
 // ========== PROJECTS TAB ==========
 
+// Default project ID for highlighting in project list
+let defaultProjectId = null;
+
 async function loadProjects() {
     try {
-        // Load both projects and workflows in parallel
-        const [projectsResponse, workflowsResponse] = await Promise.all([
+        // Load projects, workflows, and default project setting in parallel
+        const [projectsResponse, workflowsResponse, defaultProjectResponse] = await Promise.all([
             fetch('/api/projects'),
-            fetch('/api/workflows')
+            fetch('/api/workflows'),
+            fetch('/api/settings/default-project')
         ]);
 
         allProjects = await projectsResponse.json();
@@ -4264,6 +5247,12 @@ async function loadProjects() {
             allWorkflows = await workflowsResponse.json();
         } else {
             allWorkflows = [];
+        }
+
+        // Load default project ID
+        if (defaultProjectResponse.ok) {
+            const defaultData = await defaultProjectResponse.json();
+            defaultProjectId = defaultData.project_id || null;
         }
 
         renderProjects();
@@ -4279,37 +5268,234 @@ function renderProjects() {
     if (!container) return;
 
     if (allProjects.length === 0) {
-        container.innerHTML = '<p class="info">プロジェクトがありません / No projects</p>';
+        container.innerHTML = `
+            <div class="projects-empty">
+                <div class="projects-empty-icon">📁</div>
+                <p>プロジェクトがありません</p>
+                <p class="projects-empty-hint">「新規プロジェクト作成」ボタンをクリックして開始</p>
+            </div>
+        `;
         return;
     }
 
-    container.innerHTML = allProjects.map(project => `
-        <div class="list-item">
-            <div class="item-header">
-                <div class="item-title">${project.name}</div>
-                <div class="item-actions">
-                    <button class="btn btn-secondary" onclick="editProject(${project.id})">編集 / Edit</button>
-                    <button class="btn btn-secondary" onclick="deleteProject(${project.id})">削除 / Delete</button>
+    container.innerHTML = allProjects.map(project => {
+        const isDefault = project.id === defaultProjectId;
+        const defaultBadge = isDefault ? '<span class="project-badge project-badge-default">★ デフォルト</span>' : '';
+        const cardClass = isDefault ? 'project-card project-card-default' : 'project-card';
+
+        return `
+        <div class="${cardClass}" data-project-id="${project.id}">
+            <div class="project-card-header">
+                <div class="project-card-icon">📁</div>
+                <div class="project-card-title-wrap">
+                    <h3 class="project-card-title">${escapeHtml(project.name)}</h3>
+                    ${defaultBadge}
                 </div>
             </div>
-            <div class="item-description">${project.description || ''}</div>
-            <div class="item-meta">
-                リビジョン数: ${project.revision_count} | 作成日: ${formatJST(project.created_at)}
+            <div class="project-card-body">
+                <p class="project-card-description">${escapeHtml(project.description) || '<span class="text-muted">説明なし</span>'}</p>
+                <div class="project-card-stats">
+                    <span class="project-stat">
+                        <span class="project-stat-icon">📝</span>
+                        リビジョン: ${project.revision_count || 0}
+                    </span>
+                    <span class="project-stat">
+                        <span class="project-stat-icon">📅</span>
+                        ${formatJST(project.created_at)}
+                    </span>
+                </div>
+            </div>
+            <div class="project-card-actions">
+                ${!isDefault ? `<button class="btn btn-outline btn-sm" onclick="setAsDefaultProject(${project.id})" title="デフォルトに設定">
+                    <span class="btn-icon">⭐</span> デフォルト
+                </button>` : ''}
+                <button class="btn btn-outline btn-sm" onclick="showManageDatasetsModal(${project.id}, '${escapeHtml(project.name)}')" title="データセット管理">
+                    <span class="btn-icon">📊</span> データセット
+                </button>
+                <button class="btn btn-outline btn-sm" onclick="editProject(${project.id})" title="プロジェクト設定">
+                    <span class="btn-icon">⚙️</span> プロジェクト設定
+                </button>
+                <button class="btn btn-outline btn-sm btn-danger-outline" onclick="deleteProject(${project.id})" title="削除">
+                    <span class="btn-icon">🗑️</span> 削除
+                </button>
             </div>
         </div>
-    `).join('');
+    `}).join('');
+}
+
+/**
+ * Set a project as the default project
+ */
+async function setAsDefaultProject(projectId) {
+    try {
+        const response = await fetch(`/api/settings/default-project?project_id=${projectId}`, {
+            method: 'PUT'
+        });
+
+        if (!response.ok) throw new Error('Failed to set default project');
+
+        const data = await response.json();
+        defaultProjectId = projectId;
+
+        // Re-render projects to update UI
+        renderProjects();
+
+        // Update single execution dropdown
+        const singleSelect = document.getElementById('single-project-select');
+        if (singleSelect) {
+            singleSelect.value = `project-${projectId}`;
+        }
+
+        alert(`デフォルトプロジェクトを設定しました / Default project set: ${data.project_name}`);
+    } catch (error) {
+        alert(`エラー / Error: ${error.message}`);
+    }
+}
+
+/**
+ * Escape HTML special characters to prevent XSS
+ */
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+/**
+ * Show modal to manage datasets associated with a project
+ */
+async function showManageDatasetsModal(projectId, projectName) {
+    // Fetch all datasets and their project associations
+    try {
+        const [datasetsRes, allProjectsRes] = await Promise.all([
+            fetch('/api/datasets'),
+            fetch('/api/projects')
+        ]);
+
+        if (!datasetsRes.ok) throw new Error('Failed to load datasets');
+        if (!allProjectsRes.ok) throw new Error('Failed to load projects');
+
+        const datasets = await datasetsRes.json();
+        const projects = await allProjectsRes.json();
+
+        // Find datasets associated with this project (owned or associated)
+        const associatedDatasets = datasets.filter(d =>
+            d.project_ids && d.project_ids.includes(projectId)
+        );
+
+        // Find datasets NOT associated with this project
+        const availableDatasets = datasets.filter(d =>
+            !d.project_ids || !d.project_ids.includes(projectId)
+        );
+
+        showModal(`
+            <div class="modal-header">データセット管理 / Manage Datasets - ${escapeHtml(projectName)}</div>
+            <div class="modal-body">
+                <h4>関連付けられたデータセット / Associated Datasets</h4>
+                <div id="associated-datasets-list" style="max-height: 200px; overflow-y: auto; margin-bottom: 20px;">
+                    ${associatedDatasets.length === 0
+                        ? '<p class="info">データセットがありません / No datasets associated</p>'
+                        : associatedDatasets.map(d => `
+                            <div class="list-item" style="padding: 8px; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center;">
+                                <div>
+                                    <strong>${escapeHtml(d.name)}</strong>
+                                    <span class="meta">(${d.row_count}行 / rows)</span>
+                                    ${d.project_id === projectId ? '<span class="badge" style="background: #4caf50; color: white; padding: 2px 6px; border-radius: 3px; font-size: 0.8em; margin-left: 8px;">所有者 / Owner</span>' : ''}
+                                </div>
+                                ${d.project_id !== projectId
+                                    ? `<button class="btn btn-secondary" onclick="removeDatasetFromProject(${d.id}, ${projectId}, '${escapeHtml(projectName)}')">解除 / Remove</button>`
+                                    : '<span class="info" style="font-size: 0.85em;">（削除不可）</span>'
+                                }
+                            </div>
+                        `).join('')
+                    }
+                </div>
+
+                <h4>利用可能なデータセット / Available Datasets</h4>
+                <div id="available-datasets-list" style="max-height: 200px; overflow-y: auto;">
+                    ${availableDatasets.length === 0
+                        ? '<p class="info">追加可能なデータセットがありません / No datasets available to add</p>'
+                        : availableDatasets.map(d => `
+                            <div class="list-item" style="padding: 8px; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center;">
+                                <div>
+                                    <strong>${escapeHtml(d.name)}</strong>
+                                    <span class="meta">(${d.row_count}行 / rows)</span>
+                                    <span class="meta">所有: ${escapeHtml(projects.find(p => p.id === d.project_id)?.name || 'Unknown')}</span>
+                                </div>
+                                <button class="btn btn-primary" onclick="addDatasetToProject(${d.id}, ${projectId}, '${escapeHtml(projectName)}')">追加 / Add</button>
+                            </div>
+                        `).join('')
+                    }
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal()">閉じる / Close</button>
+            </div>
+        `);
+    } catch (error) {
+        alert('データセットの読み込みに失敗しました / Failed to load datasets: ' + error.message);
+    }
+}
+
+/**
+ * Add a dataset to a project
+ */
+async function addDatasetToProject(datasetId, projectId, projectName) {
+    try {
+        const response = await fetch(`/api/datasets/${datasetId}/projects/${projectId}`, {
+            method: 'POST'
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to add dataset');
+        }
+
+        // Refresh the modal
+        await showManageDatasetsModal(projectId, projectName);
+
+        // Refresh datasets list if on datasets tab
+        await loadDatasets();
+    } catch (error) {
+        alert('データセットの追加に失敗しました / Failed to add dataset: ' + error.message);
+    }
+}
+
+/**
+ * Remove a dataset from a project
+ */
+async function removeDatasetFromProject(datasetId, projectId, projectName) {
+    if (!confirm('このデータセットをプロジェクトから解除しますか？ / Remove this dataset from the project?')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/datasets/${datasetId}/projects/${projectId}`, {
+            method: 'DELETE'
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to remove dataset');
+        }
+
+        // Refresh the modal
+        await showManageDatasetsModal(projectId, projectName);
+
+        // Refresh datasets list if on datasets tab
+        await loadDatasets();
+    } catch (error) {
+        alert('データセットの解除に失敗しました / Failed to remove dataset: ' + error.message);
+    }
 }
 
 async function updateProjectSelects() {
     const singleSelect = document.getElementById('single-project-select');
     const batchSelect = document.getElementById('batch-project-select');
-    const defaultProjectSelect = document.getElementById('default-project-select');
 
     // Build project options (no workflows - workflows are now selected in prompt/target selector)
     const projectOptions = allProjects.map(p => `<option value="project-${p.id}">${p.name}</option>`).join('');
-
-    // Plain project options for settings (no workflows)
-    const plainProjectOptions = allProjects.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
 
     if (singleSelect) {
         singleSelect.innerHTML = projectOptions;
@@ -4371,21 +5557,6 @@ async function updateProjectSelects() {
                     await loadDatasetsForProject(id);
                 }
             }
-        }
-    }
-
-    if (defaultProjectSelect) {
-        // Settings dropdown only shows projects, not workflows
-        defaultProjectSelect.innerHTML = plainProjectOptions;
-        // Set current default project in settings
-        try {
-            const response = await fetch('/api/settings/default-project');
-            const data = await response.json();
-            if (data.project_id) {
-                defaultProjectSelect.value = data.project_id;
-            }
-        } catch (error) {
-            console.error('Failed to load default project for settings:', error);
         }
     }
 }
@@ -4459,7 +5630,7 @@ async function editProject(id) {
     if (!project) return;
 
     showModal(`
-        <div class="modal-header">プロジェクト編集 / Edit Project</div>
+        <div class="modal-header">プロジェクト設定 / Project Settings</div>
         <div class="modal-body">
             <div class="form-group">
                 <label>プロジェクト名 / Name:</label>
@@ -4514,24 +5685,92 @@ async function deleteProject(id) {
 
 // ========== SYSTEM SETTINGS TAB ==========
 
+// Global cache for model env status data
+let modelEnvStatusCache = [];
+
 async function loadAvailableModels() {
     try {
-        const response = await fetch('/api/settings/models/available');
-        const models = await response.json();
+        // Fetch both env status and available models
+        const [envStatusResponse, availableResponse] = await Promise.all([
+            fetch('/api/settings/models/env-status'),
+            fetch('/api/settings/models/available')
+        ]);
+
+        const envStatus = await envStatusResponse.json();
+        const availableModels = await availableResponse.json();
+
+        // Cache env status for use in loadModelParameters
+        modelEnvStatusCache = envStatus;
 
         const container = document.getElementById('available-models');
         if (!container) return;
 
-        container.innerHTML = models.map(model => {
-            const privateIcon = model.is_private ? '&#128274; ' : '';
-            return `<div class="badge badge-info">${privateIcon}${model.display_name || model.name || model}</div>`;
-        }).join(' ');
+        // Create a set of available model names for quick lookup
+        const availableNames = new Set(availableModels.map(m => m.name));
+
+        // Render as horizontal button grid (all models in one row/wrap)
+        const modelButtons = envStatus.map(model => {
+            const isAvailable = model.available && availableNames.has(model.name);
+            const shortName = model.display_name || model.name.replace(/^(azure-|openai-|claude-)/, '');
+            const providerIcon = model.name.startsWith('azure-') ? '🔷' :
+                                 model.name.startsWith('openai-') ? '🟢' :
+                                 model.name.startsWith('claude-') ? '🟠' :
+                                 model.name.startsWith('gemini-') ? '🔵' : '⚪';
+
+            return `<button type="button" class="model-btn ${isAvailable ? 'model-btn-available' : 'model-btn-unavailable'}"
+                            title="${model.name}${isAvailable ? ' (利用可能)' : ' (設定が必要)'}"
+                            ${!isAvailable ? 'disabled' : ''}>
+                        <span class="model-btn-icon">${providerIcon}</span>
+                        <span class="model-btn-name">${shortName}</span>
+                        ${isAvailable ? '<span class="model-btn-check">✓</span>' : ''}
+                    </button>`;
+        }).join('');
+
+        container.innerHTML = modelButtons;
 
         // Also load model configuration settings
         await loadModelConfigurationSettings();
     } catch (error) {
-        // Failed to load models - silently continue
+        console.error('Failed to load models:', error);
+        // Fallback to simple display
+        const container = document.getElementById('available-models');
+        if (container) {
+            container.innerHTML = '<p class="error">モデル情報の読み込みに失敗しました</p>';
+        }
     }
+}
+
+/**
+ * Display environment variable status for the selected model
+ * @param {Object} modelEnv - Model environment status object
+ */
+function displayModelEnvStatus(modelEnv) {
+    const envStatusSection = document.getElementById('model-env-status');
+    const envVarsList = document.getElementById('model-env-vars-list');
+
+    if (!envStatusSection || !envVarsList) return;
+
+    if (!modelEnv || !modelEnv.env_vars || modelEnv.env_vars.length === 0) {
+        envStatusSection.style.display = 'none';
+        return;
+    }
+
+    envStatusSection.style.display = 'block';
+
+    envVarsList.innerHTML = modelEnv.env_vars.map(ev => {
+        const isSet = ev.is_set;
+        const icon = isSet ? '✓' : '✗';
+        const className = isSet ? 'env-var-set' : 'env-var-missing';
+        const value = ev.masked_value || '未設定';
+        const required = ev.required ? ' *' : '';
+        const usedVar = ev.used_var ? ` (${ev.used_var})` : '';
+
+        return `<div class="env-var-item ${className}">
+            <span class="env-var-icon">${icon}</span>
+            <span class="env-var-key">${ev.key}${required}${usedVar}</span>
+            <span class="env-var-value">${value}</span>
+        </div>`;
+    }).join('');
 }
 
 /**
@@ -4811,20 +6050,874 @@ function renderDatasets() {
         return;
     }
 
-    container.innerHTML = allDatasets.map(dataset => `
+    container.innerHTML = allDatasets.map(dataset => {
+        // Get project names for display
+        const projectNames = (dataset.project_ids || [])
+            .map(pid => {
+                const project = allProjects.find(p => p.id === pid);
+                return project ? escapeHtmlGlobal(project.name) : `#${pid}`;
+            })
+            .join(', ');
+
+        return `
         <div class="list-item">
             <div class="item-header">
-                <div class="item-title">${dataset.name}</div>
+                <div class="item-title">${escapeHtmlGlobal(dataset.name)} <span class="dataset-id-badge">ID: ${dataset.id}</span></div>
                 <div class="item-actions">
+                    <button class="btn btn-secondary" onclick="downloadDataset(${dataset.id}, '${escapeHtmlGlobal(dataset.name)}')" title="CSVダウンロード">📥 ダウンロード</button>
+                    <button class="btn btn-secondary" onclick="editDatasetProjects(${dataset.id})" title="プロジェクト・列名編集">⚙️ 編集</button>
                     <button class="btn btn-secondary" onclick="previewDataset(${dataset.id})">プレビュー / Preview</button>
                     <button class="btn btn-secondary" onclick="deleteDataset(${dataset.id})">削除 / Delete</button>
                 </div>
             </div>
             <div class="item-meta">
-                ファイル: ${dataset.source_file_name} | 行数: ${dataset.row_count} | 作成日: ${formatJST(dataset.created_at)}
+                ファイル: ${escapeHtmlGlobal(dataset.source_file_name)} | 行数: ${dataset.row_count} | 作成日: ${formatJST(dataset.created_at)}
+            </div>
+            <div class="item-meta">
+                プロジェクト: ${projectNames || '<em>なし</em>'}
             </div>
         </div>
+    `;
+    }).join('');
+}
+
+// ========== DATASET DOWNLOAD ==========
+
+/**
+ * Download a dataset as CSV file
+ */
+async function downloadDataset(datasetId, datasetName) {
+    try {
+        const response = await fetch(`/api/datasets/${datasetId}/download`);
+        if (!response.ok) {
+            throw new Error('Failed to download dataset');
+        }
+
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${datasetName}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+    } catch (error) {
+        console.error('Error downloading dataset:', error);
+        alert('ダウンロードに失敗しました / Failed to download');
+    }
+}
+
+// ========== DATASET COLUMN NAME EDITING ==========
+
+/**
+ * Open modal to edit dataset column names
+ */
+async function editDatasetColumns(datasetId) {
+    try {
+        // Get current columns from dataset preview API
+        const response = await fetch(`/api/datasets/${datasetId}/preview?limit=0`);
+        if (!response.ok) {
+            throw new Error('Failed to load dataset columns');
+        }
+        const data = await response.json();
+        const columns = data.columns;
+
+        if (!columns || columns.length === 0) {
+            alert('列が見つかりません / No columns found');
+            return;
+        }
+
+        // Populate the modal with column inputs
+        const container = document.getElementById('column-edit-list');
+        container.innerHTML = columns.map((col, index) => `
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+                <label style="min-width: 60px; font-weight: 500;">列 ${index + 1}:</label>
+                <input type="text"
+                       data-original="${escapeHtmlGlobal(col)}"
+                       value="${escapeHtmlGlobal(col)}"
+                       class="column-name-input"
+                       style="flex: 1; padding: 0.5rem; border: 1px solid var(--color-border); border-radius: 4px;">
+            </div>
+        `).join('');
+
+        // Store dataset ID for save operation
+        document.getElementById('dataset-columns-modal').dataset.datasetId = datasetId;
+
+        // Show the modal
+        document.getElementById('dataset-columns-overlay').style.display = 'flex';
+    } catch (error) {
+        console.error('Error loading columns:', error);
+        alert('列の読み込みに失敗しました / Failed to load columns');
+    }
+}
+
+/**
+ * Save dataset column name changes
+ */
+async function saveDatasetColumns() {
+    const modal = document.getElementById('dataset-columns-modal');
+    const datasetId = modal.dataset.datasetId;
+    const inputs = document.querySelectorAll('.column-name-input');
+
+    // Build column mapping (only changed columns)
+    const columnMapping = {};
+    inputs.forEach(input => {
+        const original = input.dataset.original;
+        const newName = input.value.trim();
+        if (original !== newName && newName !== '') {
+            columnMapping[original] = newName;
+        }
+    });
+
+    // If no changes, just close the modal
+    if (Object.keys(columnMapping).length === 0) {
+        closeDatasetColumnsModal();
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/datasets/${datasetId}/columns`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({column_mapping: columnMapping})
+        });
+
+        if (response.ok) {
+            alert('列名を更新しました / Column names updated');
+            closeDatasetColumnsModal();
+            loadDatasets();  // Refresh dataset list
+        } else {
+            const error = await response.json();
+            alert(`エラー: ${error.detail || 'Unknown error'}`);
+        }
+    } catch (error) {
+        console.error('Error saving column names:', error);
+        alert('保存に失敗しました / Failed to save');
+    }
+}
+
+/**
+ * Close the dataset columns edit modal
+ */
+function closeDatasetColumnsModal() {
+    document.getElementById('dataset-columns-overlay').style.display = 'none';
+}
+
+// ========== DATASET PROJECT ASSOCIATION EDITING ==========
+
+/**
+ * Open modal to edit dataset project associations
+ */
+async function editDatasetProjects(datasetId) {
+    const dataset = allDatasets.find(d => d.id === datasetId);
+    if (!dataset) {
+        alert('データセットが見つかりません / Dataset not found');
+        return;
+    }
+
+    // Get current associations from API (includes owner info)
+    let currentProjects = [];
+    try {
+        const response = await fetch(`/api/datasets/${datasetId}/projects`);
+        if (response.ok) {
+            currentProjects = await response.json();
+        }
+    } catch (error) {
+        console.error('Failed to load dataset projects:', error);
+    }
+
+    // Get columns for column editing
+    let columns = [];
+    try {
+        const response = await fetch(`/api/datasets/${datasetId}/preview?limit=0`);
+        if (response.ok) {
+            const data = await response.json();
+            columns = data.columns || [];
+        }
+    } catch (error) {
+        console.error('Failed to load dataset columns:', error);
+    }
+
+    // Find owner project ID
+    const ownerProject = currentProjects.find(p => p.is_owner);
+    const ownerProjectId = ownerProject ? ownerProject.id : dataset.project_id;
+
+    // Build project checkboxes
+    const projectCheckboxes = allProjects.map(project => {
+        const isOwner = project.id === ownerProjectId;
+        const isChecked = (dataset.project_ids || []).includes(project.id);
+        const disabled = isOwner ? 'disabled' : '';
+        const ownerLabel = isOwner ? ' <span style="color: var(--color-primary);">(所有者/Owner)</span>' : '';
+
+        return `
+            <label style="display: block; margin: 0.5rem 0; padding: 0.5rem; border-radius: 4px; background: ${isChecked ? 'var(--color-background-alt)' : 'transparent'};">
+                <input type="checkbox" name="dataset-project" value="${project.id}"
+                       ${isChecked ? 'checked' : ''} ${disabled}
+                       style="margin-right: 0.5rem;">
+                ${escapeHtmlGlobal(project.name)}${ownerLabel}
+            </label>
+        `;
+    }).join('');
+
+    // Build column inputs with management buttons (up/down/delete)
+    const columnInputs = columns.map((col, index) => `
+        <div class="column-manage-row" data-column-index="${index}">
+            <div class="column-order-buttons">
+                <button type="button" onclick="moveColumnUp(${index})" ${index === 0 ? 'disabled' : ''} title="上に移動">▲</button>
+                <button type="button" onclick="moveColumnDown(${index})" ${index === columns.length - 1 ? 'disabled' : ''} title="下に移動">▼</button>
+            </div>
+            <input type="text"
+                   data-original="${escapeHtmlGlobal(col)}"
+                   value="${escapeHtmlGlobal(col)}"
+                   class="column-name-input dataset-input-field"
+                   style="resize: none;">
+            <button type="button" class="column-delete-btn" onclick="deleteColumn(this)" title="列を削除">✕</button>
+        </div>
     `).join('');
+
+    // Add column section
+    const addColumnSection = `
+        <div class="column-add-section">
+            <input type="text" id="new-column-name" class="dataset-input-field" placeholder="新しい列名..." style="flex: 1; resize: none;">
+            <button type="button" class="btn btn-outline" onclick="addNewColumn()">+ 列を追加</button>
+        </div>
+    `;
+
+    // Build add row inputs (textarea with resize and zoom)
+    const addRowInputs = columns.map((col, index) => `
+        <div class="dataset-input-row">
+            <label class="dataset-input-label">${escapeHtmlGlobal(col)}:</label>
+            <textarea
+                data-column="${escapeHtmlGlobal(col)}"
+                class="add-row-input dataset-input-field"
+                placeholder="値を入力... (ダブルクリックで拡大)"
+                rows="2"
+                ondblclick="openZoomEditor(this)"></textarea>
+        </div>
+    `).join('');
+
+    showModal(`
+        <div class="modal-header">データセット編集 / Edit Dataset</div>
+        <div class="modal-body dataset-edit-body" style="min-width: 500px;">
+            <p style="margin-bottom: 1rem;">
+                <strong>${escapeHtmlGlobal(dataset.name)}</strong>
+            </p>
+
+            <!-- Tab buttons -->
+            <div style="display: flex; border-bottom: 2px solid var(--color-border); margin-bottom: 1rem;">
+                <button id="tab-projects" class="btn" style="border-radius: 4px 4px 0 0; border: none; border-bottom: 2px solid var(--color-primary); margin-bottom: -2px; background: transparent; font-weight: 600;" onclick="switchDatasetEditTab('projects')">
+                    📁 プロジェクト
+                </button>
+                <button id="tab-columns" class="btn" style="border-radius: 4px 4px 0 0; border: none; margin-bottom: -2px; background: transparent;" onclick="switchDatasetEditTab('columns')">
+                    📝 列名
+                </button>
+                <button id="tab-addrow" class="btn" style="border-radius: 4px 4px 0 0; border: none; margin-bottom: -2px; background: transparent;" onclick="switchDatasetEditTab('addrow')">
+                    ➕ データ追加
+                </button>
+            </div>
+
+            <!-- Projects tab -->
+            <div id="panel-projects" class="dataset-panel" style="display: flex;">
+                <p style="margin-bottom: 0.5rem; color: var(--color-text-muted); font-size: 0.9rem; flex-shrink: 0;">
+                    このデータセットを使用可能にするプロジェクトを選択してください。
+                </p>
+                <div class="dataset-panel-content">
+                    ${projectCheckboxes || '<p>プロジェクトがありません / No projects available</p>'}
+                </div>
+            </div>
+
+            <!-- Columns tab -->
+            <div id="panel-columns" class="dataset-panel" style="display: none;">
+                <p style="margin-bottom: 0.5rem; color: var(--color-text-muted); font-size: 0.9rem; flex-shrink: 0;">
+                    列の編集・追加・削除・並び替えができます。
+                </p>
+                <div class="dataset-panel-content">
+                    ${columnInputs || '<p>列がありません / No columns</p>'}
+                    ${addColumnSection}
+                </div>
+            </div>
+
+            <!-- Add Row tab -->
+            <div id="panel-addrow" class="dataset-panel" style="display: none;">
+                <p style="margin-bottom: 0.5rem; color: var(--color-text-muted); font-size: 0.9rem; flex-shrink: 0;">
+                    新しい行を追加します。各カラムに値を入力してください。
+                </p>
+                <div class="dataset-panel-content">
+                    ${addRowInputs || '<p>列がありません / No columns</p>'}
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal()">閉じる / Close</button>
+            <button id="preview-dataset-btn" class="btn btn-outline" onclick="previewDatasetWithEdit(${datasetId})">編集/削除</button>
+            <button id="save-projects-btn" class="btn btn-primary" onclick="saveDatasetProjects(${datasetId}, ${ownerProjectId})">プロジェクト保存</button>
+            <button id="save-columns-btn" class="btn btn-primary" style="display: none;" onclick="saveDatasetColumnsFromModal(${datasetId})">列構造を保存</button>
+            <button id="add-row-btn" class="btn btn-primary" style="display: none;" onclick="addDatasetRow(${datasetId})">行を追加</button>
+        </div>
+    `);
+}
+
+/**
+ * Switch between dataset edit tabs
+ */
+function switchDatasetEditTab(tab) {
+    // Update tab buttons
+    document.getElementById('tab-projects').style.borderBottom = tab === 'projects' ? '2px solid var(--color-primary)' : 'none';
+    document.getElementById('tab-projects').style.fontWeight = tab === 'projects' ? '600' : '400';
+    document.getElementById('tab-columns').style.borderBottom = tab === 'columns' ? '2px solid var(--color-primary)' : 'none';
+    document.getElementById('tab-columns').style.fontWeight = tab === 'columns' ? '600' : '400';
+    document.getElementById('tab-addrow').style.borderBottom = tab === 'addrow' ? '2px solid var(--color-primary)' : 'none';
+    document.getElementById('tab-addrow').style.fontWeight = tab === 'addrow' ? '600' : '400';
+
+    // Update panels (use flex for proper height expansion)
+    document.getElementById('panel-projects').style.display = tab === 'projects' ? 'flex' : 'none';
+    document.getElementById('panel-columns').style.display = tab === 'columns' ? 'flex' : 'none';
+    document.getElementById('panel-addrow').style.display = tab === 'addrow' ? 'flex' : 'none';
+
+    // Update save buttons
+    document.getElementById('save-projects-btn').style.display = tab === 'projects' ? 'inline-block' : 'none';
+    document.getElementById('save-columns-btn').style.display = tab === 'columns' ? 'inline-block' : 'none';
+    document.getElementById('add-row-btn').style.display = tab === 'addrow' ? 'inline-block' : 'none';
+}
+
+/**
+ * Move column up in the list
+ */
+function moveColumnUp(index) {
+    const rows = document.querySelectorAll('.column-manage-row');
+    if (index <= 0 || index >= rows.length) return;
+    const currentRow = rows[index];
+    const prevRow = rows[index - 1];
+    prevRow.parentNode.insertBefore(currentRow, prevRow);
+    updateColumnIndexes();
+}
+
+/**
+ * Move column down in the list
+ */
+function moveColumnDown(index) {
+    const rows = document.querySelectorAll('.column-manage-row');
+    if (index < 0 || index >= rows.length - 1) return;
+    const currentRow = rows[index];
+    const nextRow = rows[index + 1];
+    nextRow.parentNode.insertBefore(nextRow, currentRow);
+    updateColumnIndexes();
+}
+
+/**
+ * Update column indexes and button states after reordering
+ */
+function updateColumnIndexes() {
+    const rows = document.querySelectorAll('.column-manage-row');
+    rows.forEach((row, idx) => {
+        row.dataset.columnIndex = idx;
+        const buttons = row.querySelectorAll('.column-order-buttons button');
+        if (buttons.length >= 2) {
+            buttons[0].disabled = idx === 0;
+            buttons[1].disabled = idx === rows.length - 1;
+            // Update onclick handlers with new index
+            buttons[0].onclick = () => moveColumnUp(idx);
+            buttons[1].onclick = () => moveColumnDown(idx);
+        }
+    });
+}
+
+/**
+ * Delete a column (UI only - saved on save button click)
+ */
+function deleteColumn(button) {
+    const row = button.closest('.column-manage-row');
+    if (!row) return;
+
+    const input = row.querySelector('.column-name-input');
+    const columnName = input ? input.value.trim() : 'this column';
+
+    // Count remaining columns
+    const remainingCount = document.querySelectorAll('.column-manage-row').length;
+    if (remainingCount <= 1) {
+        alert('少なくとも1つの列が必要です / At least one column is required');
+        return;
+    }
+
+    if (!confirm(`列 "${columnName}" を削除しますか？\nこの操作は保存時に反映されます。`)) {
+        return;
+    }
+
+    row.remove();
+    updateColumnIndexes();
+}
+
+/**
+ * Add a new column
+ */
+function addNewColumn() {
+    const input = document.getElementById('new-column-name');
+    const name = input.value.trim();
+
+    if (!name) {
+        alert('列名を入力してください / Enter a column name');
+        return;
+    }
+
+    // Check for duplicate names
+    const existingNames = Array.from(document.querySelectorAll('.column-name-input')).map(i => i.value.trim().toLowerCase());
+    if (existingNames.includes(name.toLowerCase())) {
+        alert('この列名は既に存在します / This column name already exists');
+        return;
+    }
+
+    // Find the container and add section
+    const container = document.querySelector('#panel-columns .dataset-panel-content');
+    const addSection = container.querySelector('.column-add-section');
+    if (!container || !addSection) return;
+
+    const newIndex = document.querySelectorAll('.column-manage-row').length;
+
+    // Create new row element
+    const newRow = document.createElement('div');
+    newRow.className = 'column-manage-row';
+    newRow.dataset.columnIndex = newIndex;
+    newRow.dataset.isNew = 'true';
+    newRow.innerHTML = `
+        <div class="column-order-buttons">
+            <button type="button" title="上に移動">▲</button>
+            <button type="button" disabled title="下に移動">▼</button>
+        </div>
+        <input type="text" value="${escapeHtmlGlobal(name)}" class="column-name-input dataset-input-field" style="resize: none;">
+        <button type="button" class="column-delete-btn" onclick="deleteColumn(this)" title="列を削除">✕</button>
+    `;
+
+    // Insert before add section
+    container.insertBefore(newRow, addSection);
+
+    // Update all indexes and button states
+    updateColumnIndexes();
+
+    // Clear input
+    input.value = '';
+}
+
+/**
+ * Save column structure (add/delete/reorder/rename) from the Edit modal
+ */
+async function saveDatasetColumnsFromModal(datasetId) {
+    const rows = document.querySelectorAll('.column-manage-row');
+
+    // Build ordered column list and renames
+    const columns = [];
+    const renames = {};
+
+    rows.forEach(row => {
+        const input = row.querySelector('.column-name-input');
+        if (!input) return;
+
+        const original = input.dataset.original;
+        const newName = input.value.trim();
+        const isNew = row.dataset.isNew === 'true';
+
+        if (newName) {
+            columns.push(newName);
+            // Track renames: existing column with different name
+            if (!isNew && original && original !== newName) {
+                renames[original] = newName;
+            }
+        }
+    });
+
+    if (columns.length === 0) {
+        alert('少なくとも1つの列が必要です / At least one column is required');
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/datasets/${datasetId}/columns/restructure`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ columns, renames })
+        });
+
+        if (response.ok) {
+            alert('列構造を更新しました / Column structure updated');
+            closeModal();
+            loadDatasets();
+        } else {
+            const error = await response.json();
+            alert(`エラー: ${error.detail || 'Unknown error'}`);
+        }
+    } catch (error) {
+        console.error('Error saving column structure:', error);
+        alert('保存に失敗しました / Failed to save');
+    }
+}
+
+/**
+ * Save dataset project associations
+ */
+async function saveDatasetProjects(datasetId, ownerProjectId) {
+    // Get all checked project IDs
+    const checkboxes = document.querySelectorAll('input[name="dataset-project"]:checked');
+    const projectIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+
+    // Ensure owner is always included
+    if (!projectIds.includes(ownerProjectId)) {
+        projectIds.push(ownerProjectId);
+    }
+
+    try {
+        const response = await fetch(`/api/datasets/${datasetId}/projects`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project_ids: projectIds })
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to update');
+        }
+
+        closeModal();
+        await loadDatasets();  // Refresh list
+        alert('プロジェクト関連付けを更新しました / Project associations updated');
+    } catch (error) {
+        console.error('Failed to save dataset projects:', error);
+        alert('保存に失敗しました: ' + error.message);
+    }
+}
+
+/**
+ * Add a new row to the dataset
+ */
+async function addDatasetRow(datasetId) {
+    const inputs = document.querySelectorAll('.add-row-input');
+
+    // Build row data
+    const data = {};
+    inputs.forEach(input => {
+        const column = input.dataset.column;
+        const value = input.value;
+        if (column) {
+            data[column] = value;
+        }
+    });
+
+    // Check if all values are empty
+    const allEmpty = Object.values(data).every(v => v === '');
+    if (allEmpty) {
+        alert('少なくとも1つの値を入力してください / Please enter at least one value');
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/datasets/${datasetId}/rows`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ data: data })
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to add row');
+        }
+
+        const result = await response.json();
+
+        // Clear inputs for next row
+        inputs.forEach(input => input.value = '');
+
+        // Refresh datasets
+        await loadDatasets();
+
+        alert(`行を追加しました (rowid: ${result.rowid}) / Row added`);
+    } catch (error) {
+        console.error('Failed to add row:', error);
+        alert('行の追加に失敗しました: ' + error.message);
+    }
+}
+
+/**
+ * Preview dataset with edit capability (double-click to edit rows)
+ */
+async function previewDatasetWithEdit(datasetId, showAll = false) {
+    try {
+        // Store dataset ID for toggle functionality
+        currentPreviewDatasetId = datasetId;
+
+        // Use rows API to get rowid
+        const limit = showAll ? 0 : 10;
+        const response = await fetch(`/api/datasets/${datasetId}/rows?limit=${limit}`);
+        const preview = await response.json();
+
+        // Helper function for escaping HTML
+        function escapeHtml(unsafe) {
+            if (unsafe === null || unsafe === undefined) return '';
+            return String(unsafe)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        const rowsHtml = preview.rows.map(row => {
+            const rowid = row.rowid;
+            const cells = preview.columns.map(col => {
+                const cellValue = row[col];
+                const displayValue = escapeHtml(cellValue) || '';
+                const tooltipValue = String(cellValue ?? '').replace(/"/g, '&quot;');
+                return `<td title="${tooltipValue}" style="border: 1px solid #ddd; padding: 8px;">${displayValue}</td>`;
+            }).join('');
+            return `<tr data-rowid="${rowid}" ondblclick="showRowEditModal(${datasetId}, ${rowid})" style="cursor: pointer;">${cells}</tr>`;
+        }).join('');
+
+        showModal(`
+            <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center;">
+                <span>データセットプレビュー / Dataset Preview: ${escapeHtml(preview.name)}</span>
+                <button onclick="closeModal()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #7f8c8d; padding: 0 0.5rem;" title="閉じる / Close">×</button>
+            </div>
+            <div class="modal-body">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
+                    <div>
+                        <p style="margin: 0;">総行数 / Total Rows: ${preview.total_count}</p>
+                        <p style="margin: 0.25rem 0 0 0; color: var(--color-text-muted); font-size: 0.85rem;">ダブルクリックで行を編集 / Double-click to edit row</p>
+                    </div>
+                    <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+                        <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer; user-select: none;">
+                            <input type="checkbox" id="preview-show-all" ${showAll ? 'checked' : ''} onchange="togglePreviewShowAllWithEdit(this.checked, ${datasetId})">
+                            <span style="font-size: 0.9rem;">全件表示 / Show All</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer; user-select: none;">
+                            <input type="checkbox" id="preview-truncate" checked onchange="togglePreviewTruncate(this.checked)">
+                            <span style="font-size: 0.9rem;">折り返し省略 / Truncate</span>
+                        </label>
+                    </div>
+                </div>
+                <div id="preview-table-container" style="overflow-x: auto; max-height: 60vh; overflow-y: auto;">
+                    <table id="preview-table" style="width: 100%; border-collapse: collapse;">
+                        <thead>
+                            <tr>${preview.columns.map(col => `<th style="border: 1px solid #ddd; padding: 8px; background: #f8f9fa;">${escapeHtml(col)}</th>`).join('')}</tr>
+                        </thead>
+                        <tbody>${rowsHtml}</tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="closeModal()">閉じる / Close</button>
+            </div>
+        `, 'modal-large');
+
+        // Apply default styles
+        togglePreviewTruncate(true);
+    } catch (error) {
+        alert(`エラー / Error: ${error.message}`);
+    }
+}
+
+/**
+ * Toggle show all for editable preview
+ */
+function togglePreviewShowAllWithEdit(showAll, datasetId) {
+    previewDatasetWithEdit(datasetId, showAll);
+}
+
+/**
+ * Show row edit modal
+ */
+async function showRowEditModal(datasetId, rowid) {
+    try {
+        // Get dataset columns and the specific row
+        const response = await fetch(`/api/datasets/${datasetId}/rows?limit=0`);
+        const data = await response.json();
+
+        // Find the row with matching rowid
+        const row = data.rows.find(r => r.rowid === rowid);
+        if (!row) {
+            alert('行が見つかりません / Row not found');
+            return;
+        }
+
+        const columns = data.columns;
+
+        function escapeHtml(unsafe) {
+            if (unsafe === null || unsafe === undefined) return '';
+            return String(unsafe)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        const inputsHtml = columns.map(col => `
+            <div class="dataset-input-row">
+                <label class="dataset-input-label">${escapeHtml(col)}:</label>
+                <textarea
+                    data-column="${escapeHtml(col)}"
+                    class="row-edit-input dataset-input-field"
+                    rows="2"
+                    ondblclick="openZoomEditor(this)">${escapeHtml(row[col] ?? '')}</textarea>
+            </div>
+        `).join('');
+
+        // Use second modal (higher z-index) to overlay the preview modal
+        showModal2(`
+            <div class="modal-header">行編集 / Edit Row (ID: ${rowid})</div>
+            <div class="modal-body dataset-edit-body" style="min-width: 400px;">
+                <div style="flex: 1; overflow-y: auto;">
+                    ${inputsHtml}
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-danger" onclick="deleteDatasetRow(${datasetId}, ${rowid})" style="margin-right: auto;">削除 / Delete</button>
+                <button class="btn btn-secondary" onclick="closeModal2()">キャンセル / Cancel</button>
+                <button class="btn btn-primary" onclick="saveDatasetRow(${datasetId}, ${rowid})">保存 / Save</button>
+            </div>
+        `);
+    } catch (error) {
+        console.error('Failed to load row for editing:', error);
+        alert('行の読み込みに失敗しました: ' + error.message);
+    }
+}
+
+/**
+ * Save edited row
+ */
+async function saveDatasetRow(datasetId, rowid) {
+    const inputs = document.querySelectorAll('.row-edit-input');
+
+    const data = {};
+    inputs.forEach(input => {
+        const column = input.dataset.column;
+        if (column) {
+            data[column] = input.value;
+        }
+    });
+
+    try {
+        const response = await fetch(`/api/datasets/${datasetId}/rows/${rowid}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ data: data })
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to update row');
+        }
+
+        closeModal2();
+        await loadDatasets();
+        alert('行を更新しました / Row updated');
+    } catch (error) {
+        console.error('Failed to save row:', error);
+        alert('保存に失敗しました: ' + error.message);
+    }
+}
+
+/**
+ * Delete a row from the dataset
+ */
+async function deleteDatasetRow(datasetId, rowid) {
+    if (!confirm('この行を削除しますか？ / Delete this row?')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/datasets/${datasetId}/rows/${rowid}`, {
+            method: 'DELETE'
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to delete row');
+        }
+
+        closeModal2();
+        closeModal();  // Also close preview modal
+        await loadDatasets();
+        alert('行を削除しました / Row deleted');
+    } catch (error) {
+        console.error('Failed to delete row:', error);
+        alert('削除に失敗しました: ' + error.message);
+    }
+}
+
+/**
+ * Open zoom editor modal for long text editing
+ * @param {HTMLElement} sourceElement - The textarea that was double-clicked
+ */
+function openZoomEditor(sourceElement) {
+    const columnName = sourceElement.dataset.column || 'テキスト';
+    const currentValue = sourceElement.value || '';
+
+    // Escape HTML for safe display
+    function escapeHtml(unsafe) {
+        if (unsafe === null || unsafe === undefined) return '';
+        return String(unsafe)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+    }
+
+    showModal2(`
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>📝 ${escapeHtml(columnName)} - 拡大編集 / Zoom Edit</span>
+            <button onclick="closeModal2()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #7f8c8d; padding: 0 0.5rem;" title="閉じる / Close">&times;</button>
+        </div>
+        <div class="modal-body" style="flex: 1; display: flex; flex-direction: column; padding: 1rem;">
+            <textarea id="zoom-editor-textarea"
+                      style="flex: 1; width: 100%; min-height: 300px;
+                             padding: 1rem; font-size: 1rem; line-height: 1.6;
+                             border: 1px solid var(--color-border);
+                             border-radius: 4px; resize: none;
+                             font-family: inherit;">${escapeHtml(currentValue)}</textarea>
+        </div>
+        <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="color: var(--color-text-muted); font-size: 0.85rem;">
+                文字数 / Chars: <span id="zoom-char-count">${currentValue.length}</span>
+            </span>
+            <div style="display: flex; gap: 0.5rem;">
+                <button class="btn btn-secondary" onclick="closeModal2()">キャンセル / Cancel</button>
+                <button class="btn btn-primary" onclick="applyZoomEditor()">適用 / Apply</button>
+            </div>
+        </div>
+    `);
+
+    // Store reference to source element
+    window._zoomEditorSource = sourceElement;
+
+    // Update char count on input
+    const textarea = document.getElementById('zoom-editor-textarea');
+    if (textarea) {
+        textarea.addEventListener('input', function() {
+            const countEl = document.getElementById('zoom-char-count');
+            if (countEl) {
+                countEl.textContent = this.value.length;
+            }
+        });
+
+        // Focus and move cursor to end
+        setTimeout(() => {
+            textarea.focus();
+            textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+        }, 100);
+    }
+}
+
+/**
+ * Apply zoom editor content back to source element
+ */
+function applyZoomEditor() {
+    const textarea = document.getElementById('zoom-editor-textarea');
+    if (window._zoomEditorSource && textarea) {
+        window._zoomEditorSource.value = textarea.value;
+        // Trigger input event for any listeners
+        window._zoomEditorSource.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    closeModal2();
+    window._zoomEditorSource = null;
 }
 
 // Dataset import state
@@ -4839,6 +6932,11 @@ function showImportDatasetModal() {
         `<option value="${d.id}">${escapeHtmlGlobal(d.name)} (${d.row_count}行)</option>`
     ).join('');
 
+    // Check if HuggingFace import is enabled
+    const hfEnabled = featureFlags.huggingface_import;
+    const hfTabClass = hfEnabled ? 'import-tab' : 'import-tab disabled';
+    const hfTabAttrs = hfEnabled ? 'onclick="switchImportTab(\'huggingface\')"' : 'disabled title="この機能は無効です / This feature is disabled"';
+
     showModal(`
         <div class="modal-header">データセットインポート / Import Dataset</div>
         <div class="modal-body">
@@ -4847,6 +6945,7 @@ function showImportDatasetModal() {
                 <button type="button" class="import-tab active" onclick="switchImportTab('excel')">Excel</button>
                 <button type="button" class="import-tab" onclick="switchImportTab('csv')">CSV</button>
                 <button type="button" class="import-tab" onclick="switchImportTab('results')">実行結果 / Results</button>
+                <button type="button" class="${hfTabClass}" ${hfTabAttrs}>🤗 Hugging Face</button>
             </div>
 
             <!-- Excel Tab -->
@@ -4878,9 +6977,27 @@ function showImportDatasetModal() {
                         </select>
                     </div>
                 </div>
+                <div class="import-option-group">
+                    <label>
+                        <input type="radio" name="excel-mode" value="replace" onchange="toggleExcelMode()">
+                        既存データセットを置換 / Replace existing (IDを維持)
+                    </label>
+                    <div id="excel-replace-options" class="import-option-select" style="display: none;">
+                        <select id="import-excel-replace-dataset">
+                            <option value="">-- 選択 / Select --</option>
+                            ${datasetsOptions}
+                        </select>
+                    </div>
+                </div>
                 <div class="form-group">
                     <label>範囲名 / Range Name:</label>
                     <input type="text" id="import-excel-range-name" value="DSRange">
+                </div>
+                <div class="import-option-group">
+                    <label>
+                        <input type="checkbox" id="import-excel-add-rowid">
+                        RowIDを追加 / Add RowID (連番を1列目に追加)
+                    </label>
                 </div>
                 <div class="form-group">
                     <label>Excelファイル / Excel File:</label>
@@ -4912,6 +7029,18 @@ function showImportDatasetModal() {
                     </label>
                     <div id="csv-append-options" class="import-option-select" style="display: none;">
                         <select id="import-csv-target-dataset">
+                            <option value="">-- 選択 / Select --</option>
+                            ${datasetsOptions}
+                        </select>
+                    </div>
+                </div>
+                <div class="import-option-group">
+                    <label>
+                        <input type="radio" name="csv-mode" value="replace" onchange="toggleCsvMode()">
+                        既存データセットを置換 / Replace existing (IDを維持)
+                    </label>
+                    <div id="csv-replace-options" class="import-option-select" style="display: none;">
+                        <select id="import-csv-replace-dataset">
                             <option value="">-- 選択 / Select --</option>
                             ${datasetsOptions}
                         </select>
@@ -4952,6 +7081,12 @@ function showImportDatasetModal() {
                             <option value="0">ヘッダーなし（自動生成）</option>
                         </select>
                     </div>
+                </div>
+                <div class="import-option-group">
+                    <label>
+                        <input type="checkbox" id="import-csv-add-rowid">
+                        RowIDを追加 / Add RowID (連番を1列目に追加)
+                    </label>
                 </div>
                 <div class="form-group">
                     <label>CSVファイル / CSV File:</label>
@@ -5005,6 +7140,102 @@ function showImportDatasetModal() {
                         </select>
                     </div>
                 </div>
+                <div class="import-option-group">
+                    <label>
+                        <input type="checkbox" id="import-results-add-rowid">
+                        RowIDを追加 / Add RowID (連番を1列目に追加)
+                    </label>
+                </div>
+            </div>
+
+            <!-- Hugging Face Tab -->
+            <div id="import-tab-huggingface" class="import-tab-content">
+                <div class="form-group">
+                    <label>プロジェクト / Project:</label>
+                    <select id="import-hf-project-id">
+                        ${allProjects.map(p => `<option value="${p.id}">${escapeHtmlGlobal(p.name)}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>キーワード検索 / Keyword Search:</label>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <input type="text" id="import-hf-search-query" placeholder="例: question answering, sentiment, japanese" style="flex: 1;" onkeypress="if(event.key==='Enter')searchHuggingFaceDataset()">
+                        <button type="button" class="btn btn-secondary" onclick="searchHuggingFaceDataset()" id="hf-search-btn">
+                            🔍 検索 / Search
+                        </button>
+                    </div>
+                    <small style="color: var(--color-text-muted); font-size: 0.8rem;">
+                        キーワードで検索、または完全なデータセット名を入力 (例: squad, username/dataset-name)
+                    </small>
+                </div>
+
+                <!-- Search Results Panel (hidden initially) -->
+                <div id="hf-search-results" class="hf-search-results" style="display: none;">
+                    <div class="hf-search-header">
+                        <span>🔍 検索結果 / Search Results</span>
+                        <span id="hf-search-count"></span>
+                    </div>
+                    <div id="hf-search-list" class="hf-search-list">
+                        <!-- Results will be populated here -->
+                    </div>
+                </div>
+
+                <!-- Dataset Info Panel (hidden initially) -->
+                <div id="hf-dataset-info" class="hf-info-panel" style="display: none;">
+                    <div class="hf-info-header">
+                        <span id="hf-info-name"></span>
+                        <span id="hf-info-gated" class="hf-badge" style="display: none;">🔒 Gated</span>
+                    </div>
+                    <div id="hf-info-description" class="hf-info-desc"></div>
+                    <div id="hf-info-warning" class="hf-warning" style="display: none;"></div>
+
+                    <div class="form-group" style="margin-top: 1rem;">
+                        <label>Split:</label>
+                        <select id="import-hf-split" onchange="onHuggingFaceSplitChange()">
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>表示名 / Display Name:</label>
+                        <input type="text" id="import-hf-display-name" placeholder="インポート後のデータセット名">
+                    </div>
+
+                    <div class="form-group">
+                        <label>行数制限 / Row Limit:</label>
+                        <input type="number" id="import-hf-row-limit" placeholder="空 = 全件インポート" min="1">
+                    </div>
+
+                    <div class="import-option-group">
+                        <label>
+                            <input type="checkbox" id="import-hf-add-rowid">
+                            RowIDを追加 / Add RowID (連番を1列目に追加)
+                        </label>
+                    </div>
+
+                    <div class="form-group">
+                        <label>カラム選択 / Select Columns:</label>
+                        <div id="hf-columns-container" class="hf-columns-grid">
+                            <!-- Columns will be populated here -->
+                        </div>
+                    </div>
+
+                    <!-- Preview Panel -->
+                    <div id="hf-preview-panel" style="display: none;">
+                        <div class="hf-preview-header">
+                            <span>📋 プレビュー / Preview</span>
+                            <span id="hf-preview-count"></span>
+                        </div>
+                        <div id="hf-preview-table" class="hf-preview-table-container">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Loading/Error states -->
+                <div id="hf-loading" class="hf-loading" style="display: none;">
+                    <div class="spinner"></div>
+                    <span>検索中... / Searching...</span>
+                </div>
+                <div id="hf-error" class="hf-error" style="display: none;"></div>
             </div>
         </div>
         <div class="modal-footer">
@@ -5059,6 +7290,16 @@ function updateImportButtonState() {
             btn.disabled = false;
             btn.title = '';
         }
+    } else if (tabId === 'import-tab-huggingface') {
+        // Hugging Face tab: require dataset info to be loaded
+        const infoPanel = document.getElementById('hf-dataset-info');
+        if (!infoPanel || infoPanel.style.display === 'none') {
+            btn.disabled = true;
+            btn.title = 'データセットを検索してください / Please search for a dataset';
+        } else {
+            btn.disabled = false;
+            btn.title = '';
+        }
     } else {
         // Excel/CSV tabs: always enabled (file validation happens on import)
         btn.disabled = false;
@@ -5070,12 +7311,14 @@ function toggleExcelMode() {
     const mode = document.querySelector('input[name="excel-mode"]:checked').value;
     document.getElementById('excel-new-options').style.display = mode === 'new' ? 'block' : 'none';
     document.getElementById('excel-append-options').style.display = mode === 'append' ? 'block' : 'none';
+    document.getElementById('excel-replace-options').style.display = mode === 'replace' ? 'block' : 'none';
 }
 
 function toggleCsvMode() {
     const mode = document.querySelector('input[name="csv-mode"]:checked').value;
     document.getElementById('csv-new-options').style.display = mode === 'new' ? 'block' : 'none';
     document.getElementById('csv-append-options').style.display = mode === 'append' ? 'block' : 'none';
+    document.getElementById('csv-replace-options').style.display = mode === 'replace' ? 'block' : 'none';
 }
 
 function toggleResultsMode() {
@@ -5086,20 +7329,22 @@ function toggleResultsMode() {
 
 function updateExcelDatasetOptions() {
     const projectId = document.getElementById('import-excel-project-id').value;
-    const select = document.getElementById('import-excel-target-dataset');
-    select.innerHTML = '<option value="">-- 選択 / Select --</option>' +
+    const options = '<option value="">-- 選択 / Select --</option>' +
         allDatasets.filter(d => d.project_id == projectId)
             .map(d => `<option value="${d.id}">${escapeHtmlGlobal(d.name)} (${d.row_count}行)</option>`)
             .join('');
+    document.getElementById('import-excel-target-dataset').innerHTML = options;
+    document.getElementById('import-excel-replace-dataset').innerHTML = options;
 }
 
 function updateCsvDatasetOptions() {
     const projectId = document.getElementById('import-csv-project-id').value;
-    const select = document.getElementById('import-csv-target-dataset');
-    select.innerHTML = '<option value="">-- 選択 / Select --</option>' +
+    const options = '<option value="">-- 選択 / Select --</option>' +
         allDatasets.filter(d => d.project_id == projectId)
             .map(d => `<option value="${d.id}">${escapeHtmlGlobal(d.name)} (${d.row_count}行)</option>`)
             .join('');
+    document.getElementById('import-csv-target-dataset').innerHTML = options;
+    document.getElementById('import-csv-replace-dataset').innerHTML = options;
 }
 
 async function loadJobHistory() {
@@ -5253,6 +7498,8 @@ async function executeDatasetImport() {
             await importCsvDataset();
         } else if (tabId === 'import-tab-results') {
             await importResultsDataset();
+        } else if (tabId === 'import-tab-huggingface') {
+            await importHuggingFaceDataset();
         }
     } catch (error) {
         alert(`エラー / Error: ${error.message}`);
@@ -5263,6 +7510,7 @@ async function importExcelDataset() {
     const projectId = document.getElementById('import-excel-project-id').value;
     const mode = document.querySelector('input[name="excel-mode"]:checked').value;
     const rangeName = document.getElementById('import-excel-range-name').value;
+    const addRowId = document.getElementById('import-excel-add-rowid').checked;
     const fileInput = document.getElementById('import-excel-file');
 
     if (!fileInput.files[0]) {
@@ -5272,6 +7520,7 @@ async function importExcelDataset() {
     const formData = new FormData();
     formData.append('project_id', projectId);
     formData.append('range_name', rangeName);
+    formData.append('add_row_id', addRowId);
     formData.append('file', fileInput.files[0]);
 
     if (mode === 'new') {
@@ -5287,12 +7536,25 @@ async function importExcelDataset() {
             const error = await response.json();
             throw new Error(error.detail || 'Import failed');
         }
-    } else {
+    } else if (mode === 'append') {
         const targetDatasetId = document.getElementById('import-excel-target-dataset').value;
         if (!targetDatasetId) throw new Error('追加先のデータセットを選択してください / Please select target dataset');
         formData.append('target_dataset_id', targetDatasetId);
 
         const response = await fetch('/api/datasets/import/append', {
+            method: 'POST',
+            body: formData
+        });
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Import failed');
+        }
+    } else if (mode === 'replace') {
+        const replaceDatasetId = document.getElementById('import-excel-replace-dataset').value;
+        if (!replaceDatasetId) throw new Error('置換するデータセットを選択してください / Please select dataset to replace');
+        formData.append('replace_dataset_id', replaceDatasetId);
+
+        const response = await fetch('/api/datasets/import', {
             method: 'POST',
             body: formData
         });
@@ -5314,6 +7576,7 @@ async function importCsvDataset() {
     const delimiter = document.getElementById('import-csv-delimiter').value;
     const quotechar = document.getElementById('import-csv-quotechar').value;
     const hasHeader = document.getElementById('import-csv-header').value;
+    const addRowId = document.getElementById('import-csv-add-rowid').checked;
     const fileInput = document.getElementById('import-csv-file');
 
     if (!fileInput.files[0]) {
@@ -5326,16 +7589,21 @@ async function importCsvDataset() {
     formData.append('delimiter', delimiter);
     formData.append('quotechar', quotechar);
     formData.append('has_header', hasHeader);
+    formData.append('add_row_id', addRowId);
     formData.append('file', fileInput.files[0]);
 
     if (mode === 'new') {
         const name = document.getElementById('import-csv-dataset-name').value;
         if (!name) throw new Error('データセット名を入力してください / Please enter dataset name');
         formData.append('dataset_name', name);
-    } else {
+    } else if (mode === 'append') {
         const targetDatasetId = document.getElementById('import-csv-target-dataset').value;
         if (!targetDatasetId) throw new Error('追加先のデータセットを選択してください / Please select target dataset');
         formData.append('target_dataset_id', targetDatasetId);
+    } else if (mode === 'replace') {
+        const replaceDatasetId = document.getElementById('import-csv-replace-dataset').value;
+        if (!replaceDatasetId) throw new Error('置換するデータセットを選択してください / Please select dataset to replace');
+        formData.append('replace_dataset_id', replaceDatasetId);
     }
 
     const response = await fetch('/api/datasets/import/csv', {
@@ -5360,10 +7628,12 @@ async function importResultsDataset() {
 
     const mode = document.querySelector('input[name="results-mode"]:checked').value;
     const projectId = document.getElementById('import-results-project').value;
+    const addRowId = document.getElementById('import-results-add-rowid')?.checked || false;
 
     const body = {
         job_id: importSelectedJobId,
-        project_id: parseInt(projectId)
+        project_id: parseInt(projectId),
+        add_row_id: addRowId
     };
 
     if (mode === 'new') {
@@ -5390,6 +7660,358 @@ async function importResultsDataset() {
     closeModal();
     await loadDatasets();
     alert('データセットをインポートしました / Dataset imported');
+}
+
+// ========== Hugging Face Dataset Import Functions ==========
+
+// Store selected dataset ID
+window.hfSelectedDatasetId = null;
+
+/**
+ * Search for Hugging Face datasets by keyword
+ */
+async function searchHuggingFaceDataset() {
+    const query = document.getElementById('import-hf-search-query').value.trim();
+    if (!query) {
+        alert('検索キーワードを入力してください / Please enter a search query');
+        return;
+    }
+
+    // Show loading, hide results/info/error
+    document.getElementById('hf-loading').style.display = 'flex';
+    document.getElementById('hf-search-results').style.display = 'none';
+    document.getElementById('hf-dataset-info').style.display = 'none';
+    document.getElementById('hf-error').style.display = 'none';
+    document.getElementById('hf-search-btn').disabled = true;
+
+    try {
+        // Check if input looks like a direct dataset path (contains /)
+        // Only use direct lookup for explicit paths like "username/dataset-name"
+        // For single keywords, always use search to show multiple results
+        const looksLikeDirectPath = query.includes('/');
+
+        if (looksLikeDirectPath) {
+            // Try direct lookup for explicit dataset paths
+            try {
+                const directResponse = await fetch(`/api/datasets/huggingface/info?name=${encodeURIComponent(query)}`);
+                if (directResponse.ok) {
+                    const info = await directResponse.json();
+                    // Direct match found, show it directly
+                    window.hfSelectedDatasetId = info.name;
+                    await displayHuggingFaceDatasetInfo(info);
+                    return;
+                }
+            } catch (e) {
+                // Direct lookup failed, proceed with search
+            }
+        }
+
+        // Perform keyword search
+        const response = await fetch(`/api/datasets/huggingface/search?query=${encodeURIComponent(query)}&limit=20`);
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Search failed');
+        }
+
+        const data = await response.json();
+
+        if (data.count === 0) {
+            document.getElementById('hf-error').textContent = `"${query}" に一致するデータセットが見つかりませんでした / No datasets found for "${query}"`;
+            document.getElementById('hf-error').style.display = 'block';
+            return;
+        }
+
+        // Display search results
+        document.getElementById('hf-search-count').textContent = `(${data.count} 件)`;
+
+        const listHtml = data.results.map(ds => `
+            <div class="hf-search-item" onclick="selectHuggingFaceDataset('${escapeHtmlGlobal(ds.id)}')">
+                <div class="hf-search-item-header">
+                    <span class="hf-search-item-name">${escapeHtmlGlobal(ds.id)}</span>
+                    ${ds.is_gated ? '<span class="hf-badge-small">🔒</span>' : ''}
+                </div>
+                <div class="hf-search-item-desc">${escapeHtmlGlobal(ds.description || 'No description')}</div>
+                <div class="hf-search-item-meta">
+                    <span>⬇️ ${formatNumber(ds.downloads)}</span>
+                    <span>❤️ ${formatNumber(ds.likes)}</span>
+                    ${ds.tags.length > 0 ? `<span class="hf-search-item-tags">${ds.tags.slice(0, 3).map(t => `<span class="hf-tag">${escapeHtmlGlobal(t)}</span>`).join('')}</span>` : ''}
+                </div>
+            </div>
+        `).join('');
+
+        document.getElementById('hf-search-list').innerHTML = listHtml;
+        document.getElementById('hf-search-results').style.display = 'block';
+
+    } catch (error) {
+        document.getElementById('hf-error').textContent = error.message;
+        document.getElementById('hf-error').style.display = 'block';
+    } finally {
+        document.getElementById('hf-loading').style.display = 'none';
+        document.getElementById('hf-search-btn').disabled = false;
+    }
+}
+
+/**
+ * Format large numbers for display (e.g., 1234567 -> 1.2M)
+ */
+function formatNumber(num) {
+    if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+    if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+    return num.toString();
+}
+
+/**
+ * Select a dataset from search results and load its details
+ */
+async function selectHuggingFaceDataset(datasetId) {
+    // Show loading
+    document.getElementById('hf-loading').style.display = 'flex';
+    document.getElementById('hf-error').style.display = 'none';
+
+    try {
+        const response = await fetch(`/api/datasets/huggingface/info?name=${encodeURIComponent(datasetId)}`);
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to fetch dataset info');
+        }
+
+        const info = await response.json();
+        window.hfSelectedDatasetId = datasetId;
+
+        await displayHuggingFaceDatasetInfo(info);
+
+    } catch (error) {
+        document.getElementById('hf-error').textContent = error.message;
+        document.getElementById('hf-error').style.display = 'block';
+    } finally {
+        document.getElementById('hf-loading').style.display = 'none';
+    }
+}
+
+/**
+ * Display detailed dataset info in the info panel
+ */
+async function displayHuggingFaceDatasetInfo(info) {
+    // Populate info panel
+    document.getElementById('hf-info-name').textContent = info.name;
+    document.getElementById('hf-info-description').textContent = info.description || 'No description available';
+
+    // Show gated badge if applicable
+    const gatedBadge = document.getElementById('hf-info-gated');
+    if (info.is_gated) {
+        gatedBadge.style.display = 'inline-block';
+        if (info.requires_auth) {
+            gatedBadge.textContent = '🔒 Gated (要認証 / Auth Required)';
+            gatedBadge.style.background = '#e74c3c';
+        } else {
+            gatedBadge.textContent = '🔓 Gated (認証済 / Authenticated)';
+            gatedBadge.style.background = '#27ae60';
+        }
+    } else {
+        gatedBadge.style.display = 'none';
+    }
+
+    // Show warning if present
+    const warningEl = document.getElementById('hf-info-warning');
+    if (info.warning) {
+        warningEl.textContent = '⚠️ ' + info.warning;
+        warningEl.style.display = 'block';
+    } else {
+        warningEl.style.display = 'none';
+    }
+
+    // Populate splits dropdown
+    const splitSelect = document.getElementById('import-hf-split');
+    splitSelect.innerHTML = info.splits.map(split => {
+        const sizeInfo = info.size_info[split];
+        const rowCount = sizeInfo?.num_rows ? ` (${sizeInfo.num_rows.toLocaleString()} rows)` : '';
+        return `<option value="${split}">${split}${rowCount}</option>`;
+    }).join('');
+
+    // Set default display name
+    const displayNameInput = document.getElementById('import-hf-display-name');
+    const safeName = info.name.replace(/\//g, '_');
+    displayNameInput.value = safeName + '_' + (info.splits[0] || 'data');
+
+    // Populate columns
+    const columnsContainer = document.getElementById('hf-columns-container');
+    columnsContainer.innerHTML = Object.entries(info.features).map(([name, type]) => `
+        <label class="hf-column-item">
+            <input type="checkbox" value="${name}" checked>
+            <span class="hf-column-name">${escapeHtmlGlobal(name)}</span>
+            <span class="hf-column-type">${escapeHtmlGlobal(type)}</span>
+        </label>
+    `).join('');
+
+    // Store dataset info for import
+    window.hfCurrentDatasetInfo = info;
+
+    // Hide search results, show info panel
+    document.getElementById('hf-search-results').style.display = 'none';
+    document.getElementById('hf-dataset-info').style.display = 'block';
+    document.getElementById('hf-loading').style.display = 'none';
+
+    // Load preview for first split
+    if (info.splits.length > 0) {
+        await loadHuggingFacePreview(info.name, info.splits[0]);
+    }
+
+    // Update import button state
+    updateImportButtonState();
+}
+
+/**
+ * Handle split change - load preview for the new split
+ */
+async function onHuggingFaceSplitChange() {
+    const datasetId = window.hfSelectedDatasetId;
+    const split = document.getElementById('import-hf-split').value;
+
+    if (datasetId && split) {
+        // Update display name with new split
+        const displayNameInput = document.getElementById('import-hf-display-name');
+        const safeName = datasetId.replace(/\//g, '_');
+        displayNameInput.value = safeName + '_' + split;
+
+        await loadHuggingFacePreview(datasetId, split);
+    }
+}
+
+/**
+ * Load preview data for a Hugging Face dataset split
+ */
+async function loadHuggingFacePreview(datasetName, split) {
+    const previewPanel = document.getElementById('hf-preview-panel');
+    const previewTable = document.getElementById('hf-preview-table');
+    const previewCount = document.getElementById('hf-preview-count');
+
+    previewPanel.style.display = 'block';
+    previewTable.innerHTML = '<div style="padding: 1rem; text-align: center; color: #9e9e9e;">読み込み中... / Loading...</div>';
+
+    try {
+        const response = await fetch(`/api/datasets/huggingface/preview?name=${encodeURIComponent(datasetName)}&split=${encodeURIComponent(split)}&limit=5`);
+
+        if (!response.ok) {
+            throw new Error('Failed to load preview');
+        }
+
+        const preview = await response.json();
+
+        // Update count
+        previewCount.textContent = `(${preview.total_count.toLocaleString()} 行 / rows)`;
+
+        // Get selected columns
+        const selectedColumns = Array.from(document.querySelectorAll('#hf-columns-container input:checked'))
+            .map(cb => cb.value);
+
+        // Filter columns to only show selected ones
+        const displayColumns = preview.columns.filter(col => selectedColumns.includes(col));
+
+        // Build table
+        let tableHtml = '<table class="hf-preview-table-inner"><thead><tr>';
+        displayColumns.forEach(col => {
+            tableHtml += `<th>${escapeHtmlGlobal(col)}</th>`;
+        });
+        tableHtml += '</tr></thead><tbody>';
+
+        preview.rows.forEach(row => {
+            tableHtml += '<tr>';
+            displayColumns.forEach(col => {
+                const value = row[col] || '';
+                const truncated = value.length > 100 ? value.substring(0, 100) + '...' : value;
+                tableHtml += `<td title="${escapeHtmlGlobal(value)}">${escapeHtmlGlobal(truncated)}</td>`;
+            });
+            tableHtml += '</tr>';
+        });
+
+        tableHtml += '</tbody></table>';
+        previewTable.innerHTML = tableHtml;
+
+    } catch (error) {
+        previewTable.innerHTML = `<div style="padding: 1rem; color: #e74c3c;">プレビューの読み込みに失敗しました / Failed to load preview: ${error.message}</div>`;
+    }
+}
+
+/**
+ * Import Hugging Face dataset
+ */
+async function importHuggingFaceDataset() {
+    const projectId = document.getElementById('import-hf-project-id').value;
+    const datasetName = window.hfSelectedDatasetId;
+    const split = document.getElementById('import-hf-split').value;
+    const displayName = document.getElementById('import-hf-display-name').value.trim();
+    const rowLimitInput = document.getElementById('import-hf-row-limit').value;
+
+    if (!datasetName) {
+        throw new Error('データセットを選択してください / Please select a dataset');
+    }
+    if (!split) {
+        throw new Error('Splitを選択してください / Please select a split');
+    }
+    if (!displayName) {
+        throw new Error('表示名を入力してください / Please enter a display name');
+    }
+
+    // Get selected columns
+    const selectedColumns = Array.from(document.querySelectorAll('#hf-columns-container input:checked'))
+        .map(cb => cb.value);
+
+    if (selectedColumns.length === 0) {
+        throw new Error('少なくとも1つのカラムを選択してください / Please select at least one column');
+    }
+
+    // Get RowID option
+    const addRowIdCheckbox = document.getElementById('import-hf-add-rowid');
+    const addRowId = addRowIdCheckbox ? addRowIdCheckbox.checked : false;
+
+    // Prepare request body
+    const body = {
+        project_id: parseInt(projectId),
+        dataset_name: datasetName,
+        split: split,
+        display_name: displayName,
+        columns: selectedColumns,
+        add_row_id: addRowId
+    };
+
+    // Add row limit if specified
+    if (rowLimitInput) {
+        const rowLimit = parseInt(rowLimitInput);
+        if (rowLimit > 0) {
+            body.row_limit = rowLimit;
+        }
+    }
+
+    // Show loading state
+    const submitBtn = document.getElementById('import-submit-btn');
+    const originalText = submitBtn.textContent;
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'インポート中... / Importing...';
+
+    try {
+        const response = await fetch('/api/datasets/huggingface/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Import failed');
+        }
+
+        const result = await response.json();
+
+        closeModal();
+        await loadDatasets();
+        alert(`Hugging Faceデータセットをインポートしました / Imported Hugging Face dataset (${result.row_count || 0} rows)`);
+
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = originalText;
+    }
 }
 
 async function previewDataset(id, showAll = false) {
@@ -6479,47 +9101,33 @@ async function saveDefaultModel() {
     }
 }
 
-async function saveDefaultProject() {
-    const projectId = document.getElementById('default-project-select').value;
-
-    if (!projectId) {
-        alert('プロジェクトを選択してください / Please select a project');
-        return;
-    }
-
-    try {
-        const response = await fetch(`/api/settings/default-project?project_id=${projectId}`, {
-            method: 'PUT'
-        });
-
-        if (!response.ok) throw new Error('Failed to save default project');
-
-        const data = await response.json();
-        alert(`デフォルトプロジェクトを保存しました / Default project saved: ${data.project_name}`);
-
-        // Update single execution dropdown
-        const singleSelect = document.getElementById('single-project-select');
-        if (singleSelect) {
-            singleSelect.value = projectId;
-            // Trigger project change to load prompts
-            await onProjectChange();
-        }
-
-    } catch (error) {
-        alert(`エラー / Error: ${error.message}`);
-    }
-}
 
 async function loadModelParameters() {
     const modelName = document.getElementById('param-model-select').value;
     if (!modelName) return;
 
+    const formContainer = document.getElementById('model-parameters-form');
+    // Get parent card body for full-card loading overlay
+    const cardBody = document.getElementById('param-model-select').closest('.settings-card-body');
+
+    // Show loading state - cover entire card body
+    formContainer.style.display = 'block';
+    if (cardBody) {
+        cardBody.classList.add('card-loading');
+    }
+
     try {
         const response = await fetch(`/api/settings/models/${modelName}/parameters`);
         currentModelParams = await response.json();
 
-        // Show form
-        document.getElementById('model-parameters-form').style.display = 'block';
+        // Hide loading state
+        if (cardBody) {
+            cardBody.classList.remove('card-loading');
+        }
+
+        // Display environment variable status for this model
+        const modelEnv = modelEnvStatusCache.find(m => m.name === modelName);
+        displayModelEnvStatus(modelEnv);
 
         // Populate form with active parameters
         const active = currentModelParams.active_parameters;
@@ -6585,7 +9193,11 @@ async function loadModelParameters() {
         }
 
     } catch (error) {
-        alert(`エラー / Error: ${error.message}`);
+        // Hide loading state on error
+        if (cardBody) {
+            cardBody.classList.remove('card-loading');
+        }
+        alert(`エラー: ${error.message}`);
     }
 }
 
@@ -6594,6 +9206,9 @@ async function saveModelParameters() {
     const isGPT5 = modelName.includes('gpt-5') || modelName.includes('gpt5');
     const isAzureGPT5 = isGPT5 && modelName.includes('azure');
     const isOpenAIGPT5 = isGPT5 && modelName.includes('openai');
+
+    const saveBtn = document.getElementById('btn-save-model-params');
+    setButtonLoading(saveBtn, true);
 
     let parameters;
 
@@ -6626,18 +9241,23 @@ async function saveModelParameters() {
 
         if (!response.ok) throw new Error('Failed to save parameters');
 
-        alert('パラメータを保存しました / Parameters saved');
+        alert('パラメータを保存しました');
         await loadModelParameters();
 
     } catch (error) {
-        alert(`エラー / Error: ${error.message}`);
+        alert(`エラー: ${error.message}`);
+    } finally {
+        setButtonLoading(saveBtn, false);
     }
 }
 
 async function resetModelParameters() {
     const modelName = document.getElementById('param-model-select').value;
 
-    if (!confirm('パラメータをデフォルトに戻しますか？ / Reset parameters to defaults?')) return;
+    if (!confirm('パラメータをデフォルトに戻しますか？')) return;
+
+    const resetBtn = document.getElementById('btn-reset-model-params');
+    setButtonLoading(resetBtn, true);
 
     try {
         const response = await fetch(`/api/settings/models/${modelName}/parameters`, {
@@ -6646,11 +9266,13 @@ async function resetModelParameters() {
 
         if (!response.ok) throw new Error('Failed to reset parameters');
 
-        alert('パラメータをリセットしました / Parameters reset');
+        alert('パラメータをリセットしました');
         await loadModelParameters();
 
     } catch (error) {
-        alert(`エラー / Error: ${error.message}`);
+        alert(`エラー: ${error.message}`);
+    } finally {
+        setButtonLoading(resetBtn, false);
     }
 }
 
@@ -6690,6 +9312,175 @@ async function saveJobParallelism() {
         });
 
         if (!response.ok) throw new Error('Failed to save parallelism setting');
+
+        const data = await response.json();
+        statusEl.textContent = '保存しました / Saved';
+        statusEl.style.color = '#27ae60';
+
+        setTimeout(() => {
+            statusEl.textContent = '';
+        }, 2000);
+
+    } catch (error) {
+        statusEl.textContent = `エラー / Error: ${error.message}`;
+        statusEl.style.color = '#e74c3c';
+    }
+}
+
+// ========================================
+// Agent Max Iterations Setting
+// ========================================
+
+async function loadAgentMaxIterations() {
+    try {
+        const response = await fetch('/api/settings/agent-max-iterations');
+        if (!response.ok) throw new Error('Failed to load agent max iterations');
+
+        const data = await response.json();
+        const selectEl = document.getElementById('agent-max-iterations');
+        const savedValue = data.max_iterations;
+
+        // Find matching option or fallback to 30
+        const validOptions = [10, 20, 30, 50, 70, 99];
+        if (validOptions.includes(savedValue)) {
+            selectEl.value = savedValue;
+        } else {
+            // If saved value is not in options, find closest or default to 30
+            selectEl.value = 30;
+        }
+
+    } catch (error) {
+        console.error('Failed to load agent max iterations:', error);
+    }
+}
+
+async function saveAgentMaxIterations() {
+    const maxIterations = parseInt(document.getElementById('agent-max-iterations').value);
+    const statusEl = document.getElementById('agent-iterations-status');
+
+    // Valid options: 10, 20, 30, 50, 70, 99
+    const validOptions = [10, 20, 30, 50, 70, 99];
+    if (!validOptions.includes(maxIterations)) {
+        statusEl.textContent = 'エラー: 無効な選択です / Error: Invalid selection';
+        statusEl.style.color = '#e74c3c';
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/settings/agent-max-iterations?max_iterations=${maxIterations}`, {
+            method: 'PUT'
+        });
+
+        if (!response.ok) throw new Error('Failed to save agent max iterations');
+
+        const data = await response.json();
+        statusEl.textContent = '保存しました / Saved';
+        statusEl.style.color = '#27ae60';
+
+        setTimeout(() => {
+            statusEl.textContent = '';
+        }, 2000);
+
+    } catch (error) {
+        statusEl.textContent = `エラー / Error: ${error.message}`;
+        statusEl.style.color = '#e74c3c';
+    }
+}
+
+// ========================================
+// Guardrail Model Setting
+// ========================================
+
+async function loadGuardrailModel() {
+    try {
+        const response = await fetch('/api/settings/guardrail-model');
+        if (!response.ok) throw new Error('Failed to load guardrail model');
+
+        const data = await response.json();
+        const select = document.getElementById('guardrail-model-select');
+
+        // Clear existing options
+        select.innerHTML = '';
+
+        // Add options from available models
+        if (data.available_models) {
+            data.available_models.forEach(model => {
+                const option = document.createElement('option');
+                option.value = model;
+                option.textContent = model;
+                if (model === data.model) {
+                    option.selected = true;
+                }
+                select.appendChild(option);
+            });
+        }
+
+    } catch (error) {
+        console.error('Failed to load guardrail model:', error);
+    }
+}
+
+async function saveGuardrailModel() {
+    const model = document.getElementById('guardrail-model-select').value;
+    const statusEl = document.getElementById('guardrail-model-status');
+
+    try {
+        const response = await fetch(`/api/settings/guardrail-model?model=${encodeURIComponent(model)}`, {
+            method: 'PUT'
+        });
+
+        if (!response.ok) throw new Error('Failed to save guardrail model');
+
+        const data = await response.json();
+        statusEl.textContent = '保存しました / Saved';
+        statusEl.style.color = '#27ae60';
+
+        setTimeout(() => {
+            statusEl.textContent = '';
+        }, 2000);
+
+    } catch (error) {
+        statusEl.textContent = `エラー / Error: ${error.message}`;
+        statusEl.style.color = '#e74c3c';
+    }
+}
+
+// ========================================
+// Agent Stream Timeout Setting
+// ========================================
+
+async function loadAgentStreamTimeout() {
+    try {
+        const response = await fetch('/api/settings/agent-stream-timeout');
+        if (!response.ok) throw new Error('Failed to load agent stream timeout');
+
+        const data = await response.json();
+        const select = document.getElementById('agent-stream-timeout');
+
+        // Set the value if it exists in options
+        if (select) {
+            const options = Array.from(select.options);
+            const matchingOption = options.find(opt => parseInt(opt.value) === data.timeout);
+            if (matchingOption) {
+                select.value = data.timeout.toString();
+            }
+        }
+
+    } catch (error) {
+        console.error('Failed to load agent stream timeout:', error);
+    }
+}
+
+async function saveAgentStreamTimeout() {
+    const timeout = parseInt(document.getElementById('agent-stream-timeout').value);
+    const statusEl = document.getElementById('agent-stream-timeout-status');
+
+    try {
+        const response = await fetch(`/api/settings/agent-stream-timeout?timeout=${timeout}`, {
+            method: 'PUT'
+        });
+
+        if (!response.ok) throw new Error('Failed to save agent stream timeout');
 
         const data = await response.json();
         statusEl.textContent = '保存しました / Saved';
@@ -7240,6 +10031,68 @@ function escapeHtmlGlobal(unsafe) {
 }
 
 /**
+ * Convert Markdown links [text](url) to HTML anchor tags
+ * Call this BEFORE linkifyUrls
+ * @param {string} text - Text that may contain Markdown links
+ * @returns {string} - Text with Markdown links converted to <a> tags
+ */
+function convertMarkdownLinks(text) {
+    if (!text) return '';
+    // Match Markdown link pattern: [text](url)
+    // Handle both normal and HTML-escaped brackets
+    const markdownLinkPattern = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/gi;
+    return text.replace(markdownLinkPattern, function(match, linkText, url) {
+        const decodedUrl = url
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#039;/g, "'");
+        return `<a href="${decodedUrl}" target="_blank" rel="noopener noreferrer" class="agent-link">${linkText}</a>`;
+    });
+}
+
+/**
+ * Convert URLs in text to clickable hyperlinks
+ * Call this AFTER escapeHtmlGlobal and newline replacement, and AFTER convertMarkdownLinks
+ * @param {string} text - HTML-escaped text with <br> tags
+ * @returns {string} - Text with URLs converted to <a> tags
+ */
+function linkifyUrls(text) {
+    if (!text) return '';
+    // Match URLs that start with http:// or https://
+    // Exclude URLs already inside <a> tags and stop at common delimiters
+    // Stop matching at: whitespace, <, >, ", ', ), ], or end of string
+    const urlPattern = /(?<!href="|">)(https?:\/\/[^\s<>"'\)\]]+)/gi;
+    return text.replace(urlPattern, function(url) {
+        // The URL may contain HTML entities like &amp; - decode them for the href
+        const decodedUrl = url
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#039;/g, "'");
+        return `<a href="${decodedUrl}" target="_blank" rel="noopener noreferrer" class="agent-link">${url}</a>`;
+    });
+}
+
+/**
+ * Format agent message with hyperlinks, newlines, and code formatting
+ * @param {string} text - Raw text content
+ * @returns {string} - Formatted HTML string
+ */
+function formatAgentMessage(text) {
+    if (!text) return '';
+    let formatted = escapeHtmlGlobal(text)
+        .replace(/\n/g, '<br>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Convert Markdown links first [text](url), then remaining plain URLs
+    formatted = convertMarkdownLinks(formatted);
+    formatted = linkifyUrls(formatted);
+    return formatted;
+}
+
+/**
  * Escape string for use in JavaScript string within HTML onclick attribute
  * First escapes for JavaScript (backslash and single quote), then for HTML
  * @param {string} str - String to escape
@@ -7273,7 +10126,8 @@ function getStepTypeIcon(stepType) {
         'foreach': '🔁',
         'endforeach': '🔁',
         'break': '⏹',
-        'continue': '⏭'
+        'continue': '⏭',
+        'output': '📤'
     };
     return icons[stepType] || '❓';
 }
@@ -7311,7 +10165,8 @@ function getActionLabel(action) {
         'break_no_loop': '⚠ ループ外',
         'continue_loop': '⏭ ENDLOOP へ',
         'continue_foreach': '⏭ ENDFOREACH へ',
-        'continue_no_loop': '⚠ ループ外'
+        'continue_no_loop': '⚠ ループ外',
+        'output_executed': '📤 出力完了'
     };
     return labels[action] || action;
 }
@@ -7324,6 +10179,7 @@ let selectedWorkflowProjectId = null;
 
 /**
  * Initialize workflow tab - populate project selector
+ * Preserves previously selected project and workflow editor state on tab switch
  */
 async function initWorkflowTab() {
     try {
@@ -7335,15 +10191,41 @@ async function initWorkflowTab() {
         const select = document.getElementById('workflow-project-select');
         if (!select) return;
 
-        // Populate project options
+        // Remember the current selection before repopulating
+        const previousValue = select.value;
+        const hadPreviousSelection = previousValue !== '';
+
+        // Populate project options with "Show All" option
         select.innerHTML = '<option value="">-- プロジェクトを選択 / Select Project --</option>' +
+            '<option value="all">すべて表示 / Show All</option>' +
             allProjects.map(p => `<option value="${p.id}">${escapeHtmlGlobal(p.name)}</option>`).join('');
 
-        // Clear workflow list until project is selected
+        // Restore previous selection if there was one
+        if (hadPreviousSelection) {
+            // Check if the previous value is still valid (project still exists)
+            const optionExists = Array.from(select.options).some(opt => opt.value === previousValue);
+            if (optionExists) {
+                select.value = previousValue;
+                console.log('[initWorkflowTab] Restored previous project selection:', previousValue);
+                // Reload workflows silently without hiding editor
+                if (previousValue === 'all') {
+                    await loadWorkflowsAll();
+                } else {
+                    selectedWorkflowProjectId = parseInt(previousValue);
+                    await loadWorkflows();
+                }
+                return; // Don't show empty message, don't hide editor
+            }
+        }
+
+        // No previous selection or project no longer exists - show empty message and hide editor
         const list = document.getElementById('workflow-list');
         if (list) {
             list.innerHTML = '<div class="empty-message">プロジェクトを選択してください<br>Please select a project</div>';
         }
+        // Also hide the workflow editor since no project is selected
+        hideWorkflowEditor();
+        console.log('[initWorkflowTab] No project selected, hiding workflow editor');
     } catch (error) {
         console.error('Error initializing workflow tab:', error);
     }
@@ -7357,10 +10239,18 @@ async function onWorkflowProjectChange() {
     const createBtn = document.getElementById('btn-create-workflow');
     const hint = document.getElementById('workflow-project-hint');
 
-    selectedWorkflowProjectId = select.value ? parseInt(select.value) : null;
-    console.log('[onWorkflowProjectChange] selectedWorkflowProjectId:', selectedWorkflowProjectId);
+    // Handle "all" option for showing all workflows
+    const isShowAll = select.value === 'all';
+    selectedWorkflowProjectId = isShowAll ? null : (select.value ? parseInt(select.value) : null);
+    console.log('[onWorkflowProjectChange] selectedWorkflowProjectId:', selectedWorkflowProjectId, 'isShowAll:', isShowAll);
 
-    if (selectedWorkflowProjectId) {
+    if (isShowAll) {
+        // Show all workflows but disable create (need specific project to create)
+        createBtn.disabled = true;
+        if (hint) hint.style.display = 'none';
+        console.log('[onWorkflowProjectChange] Calling loadWorkflows() for all');
+        await loadWorkflowsAll();
+    } else if (selectedWorkflowProjectId) {
         createBtn.disabled = false;
         if (hint) hint.style.display = 'none';
         console.log('[onWorkflowProjectChange] Calling loadWorkflows()');
@@ -7421,9 +10311,141 @@ async function loadWorkflows() {
 }
 
 /**
+ * Filter workflow list by search query (partial string match)
+ */
+function filterWorkflowList(query) {
+    const list = document.getElementById('workflow-list');
+    if (!list) return;
+
+    const items = list.querySelectorAll('.workflow-item');
+    const lowerQuery = query.toLowerCase().trim();
+
+    items.forEach(item => {
+        const nameEl = item.querySelector('.workflow-name');
+        if (nameEl) {
+            const name = nameEl.textContent.toLowerCase();
+            item.style.display = name.includes(lowerQuery) ? '' : 'none';
+        }
+    });
+}
+
+/**
+ * Load and display ALL workflows (with project name for each)
+ */
+async function loadWorkflowsAll() {
+    try {
+        console.log('[loadWorkflowsAll] Fetching all workflows');
+
+        const response = await fetch('/api/workflows');
+        if (!response.ok) throw new Error('Failed to load workflows');
+        workflows = await response.json();
+        console.log('[loadWorkflowsAll] Received workflows:', workflows.length);
+
+        const list = document.getElementById('workflow-list');
+        if (!list) {
+            console.error('[loadWorkflowsAll] workflow-list element not found!');
+            return;
+        }
+
+        if (workflows.length === 0) {
+            list.innerHTML = '<div class="empty-message">ワークフローがありません<br>No workflows yet</div>';
+            return;
+        }
+
+        // Build project name lookup
+        const projectNameMap = {};
+        if (allProjects) {
+            allProjects.forEach(p => { projectNameMap[p.id] = p.name; });
+        }
+
+        list.innerHTML = workflows.map(w => {
+            const projectName = w.project_id ? (projectNameMap[w.project_id] || `Project #${w.project_id}`) : '(未割当 / Unassigned)';
+            return `
+                <div class="workflow-item ${selectedWorkflow && selectedWorkflow.id === w.id ? 'selected' : ''}"
+                     onclick="selectWorkflow(${w.id})">
+                    <div class="workflow-name">${escapeHtmlGlobal(w.name)}</div>
+                    <div class="workflow-info">${w.steps.length} ステップ / steps</div>
+                    <div class="workflow-project-tag" style="font-size: 0.8em; color: #888;">${escapeHtmlGlobal(projectName)}</div>
+                </div>
+            `;
+        }).join('');
+        console.log('[loadWorkflowsAll] Rendered', workflows.length, 'workflow items');
+
+    } catch (error) {
+        console.error('Error loading all workflows:', error);
+    }
+}
+
+/**
+ * Refresh workflow list (called by refresh button)
+ * Uses the appropriate load function based on selected project filter
+ * Also refreshes the right pane if a workflow is currently selected
+ */
+async function refreshWorkflowList() {
+    console.log('[refreshWorkflowList] Refreshing workflow list, selectedWorkflowProjectId:', selectedWorkflowProjectId);
+    const btn = document.querySelector('.btn-refresh-workflows');
+    if (btn) {
+        btn.style.opacity = '0.5';
+        btn.style.pointerEvents = 'none';
+    }
+
+    try {
+        // Refresh the workflow list (left pane)
+        if (selectedWorkflowProjectId === 'all' || selectedWorkflowProjectId === '') {
+            await loadWorkflowsAll();
+        } else {
+            await loadWorkflows();
+        }
+
+        // Refresh the right pane if a workflow is currently selected
+        if (selectedWorkflow && selectedWorkflow.id) {
+            console.log('[refreshWorkflowList] Refreshing selected workflow:', selectedWorkflow.id);
+            await selectWorkflow(selectedWorkflow.id);
+        }
+
+        console.log('[refreshWorkflowList] Refresh complete');
+    } finally {
+        if (btn) {
+            btn.style.opacity = '1';
+            btn.style.pointerEvents = 'auto';
+        }
+    }
+}
+
+/**
+ * Load project options for workflow editor project selector
+ */
+async function loadWorkflowProjectOptions() {
+    const select = document.getElementById('workflow-project');
+    if (!select) return;
+
+    // Clear and add default option
+    select.innerHTML = '<option value="">-- 未設定 / Not set --</option>';
+
+    // Load all projects if not cached
+    if (!allProjects || allProjects.length === 0) {
+        try {
+            const response = await fetch('/api/projects');
+            allProjects = await response.json();
+        } catch (e) {
+            console.error('Failed to load projects:', e);
+            return;
+        }
+    }
+
+    // Add project options
+    for (const project of allProjects) {
+        const option = document.createElement('option');
+        option.value = project.id;
+        option.textContent = project.name;
+        select.appendChild(option);
+    }
+}
+
+/**
  * Show workflow editor for creating new workflow
  */
-function showCreateWorkflowForm() {
+async function showCreateWorkflowForm() {
     selectedWorkflow = null;
     workflowStepCounter = 0;
 
@@ -7434,6 +10456,10 @@ function showCreateWorkflowForm() {
     document.getElementById('workflow-description').value = '';
     document.getElementById('workflow-auto-context').checked = false;
     document.getElementById('workflow-steps-container').innerHTML = '';
+
+    // Load project options and reset selection
+    await loadWorkflowProjectOptions();
+    document.getElementById('workflow-project').value = '';
 
     document.getElementById('workflow-editor').style.display = 'block';
 
@@ -7452,6 +10478,81 @@ function showCreateWorkflowForm() {
  */
 function hideWorkflowEditor() {
     document.getElementById('workflow-editor').style.display = 'none';
+}
+
+/**
+ * Focus on workflow name input field
+ * Called when clicking on the workflow title
+ */
+function focusWorkflowName() {
+    const nameInput = document.getElementById('workflow-name');
+    if (nameInput) {
+        // Scroll to make the input visible
+        nameInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // Focus the input and select all text
+        nameInput.focus();
+        nameInput.select();
+    }
+}
+
+/**
+ * Focus on step name input field
+ * Called when clicking on the step name in the header
+ * @param {HTMLElement} el - The clicked element (step-summary-name span)
+ */
+function focusStepName(el) {
+    // Find the parent workflow-step div
+    const stepDiv = el.closest('.workflow-step');
+    if (!stepDiv) return;
+
+    // If the step is collapsed, expand it first
+    if (stepDiv.classList.contains('collapsed')) {
+        const toggleBtn = stepDiv.querySelector('.btn-step-toggle');
+        if (toggleBtn) {
+            toggleWorkflowStep(toggleBtn);
+        }
+    }
+
+    // Find and focus the step-name input
+    const stepNameInput = stepDiv.querySelector('input.step-name');
+    if (stepNameInput) {
+        // Small delay to allow the collapse animation to complete
+        setTimeout(() => {
+            stepNameInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            stepNameInput.focus();
+            stepNameInput.select();
+        }, 100);
+    }
+
+    // Prevent the click from bubbling up (to avoid triggering collapse toggle)
+    event.stopPropagation();
+}
+
+/**
+ * Update workflow editor title to show the workflow name
+ * Also syncs the title when the name input changes
+ */
+function updateWorkflowEditorTitle() {
+    const nameInput = document.getElementById('workflow-name');
+    const title = document.getElementById('workflow-editor-title');
+    if (nameInput && title) {
+        const currentName = nameInput.value.trim();
+        if (selectedWorkflow) {
+            // Editing existing workflow
+            if (currentName) {
+                title.textContent = currentName;
+            } else {
+                title.textContent = 'ワークフロー編集 / Edit Workflow';
+            }
+        } else {
+            // Creating new workflow
+            if (currentName) {
+                title.textContent = currentName;
+            } else {
+                title.textContent = 'ワークフロー作成 / Create Workflow';
+            }
+        }
+    }
 }
 
 /**
@@ -7497,13 +10598,15 @@ async function addWorkflowStep(stepData = null) {
         { value: 'foreach', label: 'リスト展開 (FOREACH)', icon: '🔄' },
         { value: 'endforeach', label: 'リスト展開終了 (ENDFOREACH)', icon: '🔄' },
         { value: 'break', label: 'ループ脱出 (BREAK)', icon: '⏹' },
-        { value: 'continue', label: '次のループへ (CONTINUE)', icon: '⏭' }
+        { value: 'continue', label: '次のループへ (CONTINUE)', icon: '⏭' },
+        { value: 'output', label: '出力 (OUTPUT)', icon: '📤' }
     ].map(opt =>
         `<option value="${opt.value}" ${stepType === opt.value ? 'selected' : ''}>${opt.icon} ${opt.label}</option>`
     ).join('');
 
     // Build condition config values for different step types
-    const setAssignments = conditionConfig.assignments || {};
+    // For SET steps, assignments can be in condition_config OR input_mapping (fallback)
+    const setAssignments = conditionConfig.assignments || stepData?.input_mapping?.assignments || {};
     const conditionLeft = conditionConfig.left || '';
     const conditionRight = conditionConfig.right || '';
     const conditionOperator = conditionConfig.operator || '==';
@@ -7563,16 +10666,26 @@ async function addWorkflowStep(stepData = null) {
         'foreach': '🔄 FOREACH',
         'endforeach': '🔄 ENDFOREACH',
         'break': '⏹ BREAK',
-        'continue': '⏭ CONTINUE'
+        'continue': '⏭ CONTINUE',
+        'output': '📤 OUTPUT'
     };
     const stepTypeLabel = stepTypeLabels[stepType] || stepType;
 
+    // Existing steps load collapsed by default, new steps expand
+    const isNewStep = !stepData;
+    const collapsedClass = isNewStep ? '' : 'collapsed';
+    const toggleIcon = isNewStep ? '▼' : '▶';
+    const toggleTitle = isNewStep ? '折りたたむ / Collapse' : '展開する / Expand';
+    if (!isNewStep) {
+        stepDiv.classList.add('collapsed');
+    }
+
     stepDiv.innerHTML = `
         <div class="step-header">
-            <button type="button" class="btn-step-toggle" onclick="toggleWorkflowStep(this)" title="折りたたむ / Collapse">▼</button>
+            <button type="button" class="btn-step-toggle" onclick="toggleWorkflowStep(this)" title="${toggleTitle}">${toggleIcon}</button>
             <span class="step-number">Step ${stepNumber}</span>
             <span class="step-summary">
-                <span class="step-summary-name">${initialStepName}</span>
+                <span class="step-summary-name step-name-clickable" onclick="focusStepName(this)" title="クリックして名前を編集 / Click to edit name">${initialStepName}</span>
                 <span class="step-summary-type">${stepTypeLabel}</span>
             </span>
             <div class="step-controls">
@@ -7722,6 +10835,87 @@ async function addWorkflowStep(stepData = null) {
                 <small style="color: #7f8c8d; font-style: italic;">このステップタイプには追加設定がありません</small>
             </div>
         </div>
+
+        <!-- OUTPUT fields -->
+        <div class="step-type-fields step-type-output" style="display: ${stepType === 'output' ? 'block' : 'none'};">
+            <div class="form-group">
+                <label>出力先 / Output Type:</label>
+                <select class="output-type" onchange="onOutputTypeChange(${stepNumber})">
+                    <option value="screen" ${(conditionConfig.output_type || 'screen') === 'screen' ? 'selected' : ''}>📺 画面 (Screen)</option>
+                    <option value="file" ${conditionConfig.output_type === 'file' ? 'selected' : ''}>📁 ファイル (File)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>フォーマット / Format:</label>
+                <select class="output-format" onchange="onOutputFormatChange(${stepNumber})">
+                    <option value="text" ${(conditionConfig.format || 'text') === 'text' ? 'selected' : ''}>📝 テキスト (Text)</option>
+                    <option value="csv" ${conditionConfig.format === 'csv' ? 'selected' : ''}>📊 CSV</option>
+                    <option value="json" ${conditionConfig.format === 'json' ? 'selected' : ''}>📋 JSON</option>
+                </select>
+            </div>
+
+            <!-- Text format fields -->
+            <div class="output-format-fields output-format-text" style="display: ${(conditionConfig.format || 'text') === 'text' ? 'block' : 'none'};">
+                <div class="form-group">
+                    <label>出力内容 / Content:</label>
+                    <div class="input-with-var-btn" style="display: flex; gap: 4px;">
+                        <input type="text" class="output-content" placeholder="正解={{vars.correct}}件"
+                               value="${escapeHtmlGlobal(conditionConfig.content || '')}" style="flex: 1;">
+                        <button type="button" class="btn-var-insert" onclick="showVariablePicker(this)" title="変数を挿入 / Insert Variable">{...}</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CSV format fields -->
+            <div class="output-format-fields output-format-csv" style="display: ${conditionConfig.format === 'csv' ? 'block' : 'none'};">
+                <div class="form-group">
+                    <label>列名 / Column Names (カンマ区切り):</label>
+                    <input type="text" class="output-columns" placeholder="ID,回答,正解"
+                           value="${escapeHtmlGlobal((conditionConfig.columns || []).join(','))}" style="width: 100%;">
+                </div>
+                <div class="form-group">
+                    <label>値 / Values (カンマ区切り):</label>
+                    <div class="input-with-var-btn" style="display: flex; gap: 4px;">
+                        <input type="text" class="output-values" placeholder="{{vars.ROW.id}},{{step.ANSWER}},{{vars.ROW.answer}}"
+                               value="${escapeHtmlGlobal((conditionConfig.values || []).join(','))}" style="flex: 1;">
+                        <button type="button" class="btn-var-insert" onclick="showVariablePicker(this)" title="変数を挿入 / Insert Variable">{...}</button>
+                    </div>
+                </div>
+                <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
+                    <input type="checkbox" class="output-append" id="output-append-${stepNumber}" ${conditionConfig.append ? 'checked' : ''}>
+                    <label for="output-append-${stepNumber}" style="margin: 0; cursor: pointer;">
+                        追記モード / Append Mode (FOREACHループ内で使用)
+                    </label>
+                </div>
+            </div>
+
+            <!-- JSON format fields -->
+            <div class="output-format-fields output-format-json" style="display: ${conditionConfig.format === 'json' ? 'block' : 'none'};">
+                <div class="form-group">
+                    <label>フィールド / Fields:</label>
+                    <div class="output-json-fields" id="output-json-fields-${stepNumber}">
+                        ${buildOutputJsonFieldsHtml(conditionConfig.fields || {}, stepNumber)}
+                    </div>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="addOutputJsonField(${stepNumber})" style="margin-top: 0.5rem;">+ フィールド追加</button>
+                </div>
+            </div>
+
+            <!-- File output settings (shown when output_type is file) -->
+            <div class="output-file-settings" style="display: ${conditionConfig.output_type === 'file' ? 'block' : 'none'};">
+                <div class="form-group">
+                    <label>ファイル名 / Filename:</label>
+                    <div class="input-with-var-btn" style="display: flex; gap: 4px;">
+                        <input type="text" class="output-filename" placeholder="result.csv または result_{{input.name}}.csv"
+                               value="${escapeHtmlGlobal(conditionConfig.filename || '')}" style="flex: 1;">
+                        <button type="button" class="btn-var-insert" onclick="showVariablePicker(this)" title="変数を挿入 / Insert Variable">{...}</button>
+                    </div>
+                </div>
+            </div>
+
+            <small style="color: #7f8c8d; display: block; margin-top: 0.5rem;">
+                変数参照: {{vars.変数名}}, {{step名.field}}, {{input.param}}
+            </small>
+        </div>
         </div><!-- end step-body -->
     `;
 
@@ -7730,13 +10924,19 @@ async function addWorkflowStep(stepData = null) {
     // Load prompts for the selected project (only for prompt type steps)
     if (stepType === 'prompt') {
         if (stepData && stepData.project_id) {
-            // Editing existing step: load with selected prompt and input mapping
+            // Editing existing step with project: load with selected prompt and input mapping
             await loadPromptsForWorkflowStep(stepNumber, stepData.project_id, stepData.prompt_id, stepData.input_mapping);
         } else if (defaultProjectId) {
-            // New step with default project: load prompts (no pre-selected prompt)
-            await loadPromptsForWorkflowStep(stepNumber, defaultProjectId, null, null);
+            // No project_id but default project available: load prompts with existing mapping if any
+            await loadPromptsForWorkflowStep(stepNumber, defaultProjectId, stepData?.prompt_id || null, stepData?.input_mapping || null);
+        } else if (stepData && stepData.input_mapping) {
+            // No project but has input_mapping: display as custom mappings
+            await loadInputMappingForStep(stepNumber, null, stepData.input_mapping);
         }
     }
+
+    // Update indentation for all steps based on control flow structure
+    updateWorkflowStepIndentation();
 }
 
 /**
@@ -7761,10 +10961,15 @@ function onStepTypeChange(stepNumber, stepType) {
         if (maxIterDiv) maxIterDiv.style.display = stepType === 'loop' ? 'block' : 'none';
     } else if (stepType === 'foreach') {
         stepDiv.querySelector('.step-type-foreach').style.display = 'block';
+    } else if (stepType === 'output') {
+        stepDiv.querySelector('.step-type-output').style.display = 'block';
     } else {
         // else, endif, endloop, endforeach, break, continue
         stepDiv.querySelector('.step-type-noconfig').style.display = 'block';
     }
+
+    // Update indentation for all steps based on control flow structure
+    updateWorkflowStepIndentation();
 }
 
 /**
@@ -7843,9 +11048,176 @@ function buildConditionConfig(stepDiv, stepType) {
         if (source) config.source = source;
         if (itemVar) config.item_var = itemVar;
         if (indexVar) config.index_var = indexVar;
+    } else if (stepType === 'output') {
+        // Collect OUTPUT settings
+        const outputType = stepDiv.querySelector('.output-type')?.value || 'screen';
+        const outputFormat = stepDiv.querySelector('.output-format')?.value || 'text';
+
+        config.output_type = outputType;
+        config.format = outputFormat;
+
+        if (outputFormat === 'text') {
+            const content = stepDiv.querySelector('.output-content')?.value?.trim();
+            if (content) config.content = content;
+        } else if (outputFormat === 'csv') {
+            const columnsStr = stepDiv.querySelector('.output-columns')?.value?.trim();
+            const valuesStr = stepDiv.querySelector('.output-values')?.value?.trim();
+            const appendMode = stepDiv.querySelector('.output-append')?.checked || false;
+
+            if (columnsStr) {
+                config.columns = columnsStr.split(',').map(c => c.trim()).filter(c => c);
+            }
+            if (valuesStr) {
+                // Split by comma but preserve content in {{}}
+                config.values = parseCommaSeparatedWithBraces(valuesStr);
+            }
+            if (appendMode) config.append = true;
+        } else if (outputFormat === 'json') {
+            const fields = {};
+            const rows = stepDiv.querySelectorAll('.output-json-field-row');
+            rows.forEach(row => {
+                const key = row.querySelector('.output-json-key')?.value?.trim();
+                const value = row.querySelector('.output-json-value')?.value?.trim();
+                if (key) fields[key] = value || '';
+            });
+            if (Object.keys(fields).length > 0) config.fields = fields;
+        }
+
+        if (outputType === 'file') {
+            const filename = stepDiv.querySelector('.output-filename')?.value?.trim();
+            if (filename) config.filename = filename;
+        }
     }
 
     return config;
+}
+
+/**
+ * Parse comma-separated string while preserving content in {{}}
+ */
+function parseCommaSeparatedWithBraces(str) {
+    const result = [];
+    let current = '';
+    let braceDepth = 0;
+
+    for (const char of str) {
+        if (char === '{') {
+            braceDepth++;
+            current += char;
+        } else if (char === '}') {
+            braceDepth--;
+            current += char;
+        } else if (char === ',' && braceDepth === 0) {
+            result.push(current.trim());
+            current = '';
+        } else {
+            current += char;
+        }
+    }
+
+    if (current.trim()) {
+        result.push(current.trim());
+    }
+
+    return result;
+}
+
+/**
+ * Build HTML for output JSON fields
+ */
+function buildOutputJsonFieldsHtml(fields, stepNumber) {
+    const entries = Object.entries(fields || {});
+    if (entries.length === 0) {
+        return `
+            <div class="output-json-field-row" style="display: flex; gap: 8px; margin-bottom: 4px;">
+                <input type="text" class="output-json-key" placeholder="キー名" value="" style="flex: 1;">
+                <span>:</span>
+                <div class="input-with-var-btn" style="flex: 2; display: flex; gap: 4px;">
+                    <input type="text" class="output-json-value" placeholder="{{vars.value}}" value="" style="flex: 1;">
+                    <button type="button" class="btn-var-insert" onclick="showVariablePicker(this)" title="変数を挿入">{...}</button>
+                </div>
+                <button type="button" class="btn btn-danger btn-sm" onclick="removeOutputJsonField(this)">✕</button>
+            </div>
+        `;
+    }
+
+    return entries.map(([key, value]) => `
+        <div class="output-json-field-row" style="display: flex; gap: 8px; margin-bottom: 4px;">
+            <input type="text" class="output-json-key" placeholder="キー名" value="${escapeHtmlGlobal(key)}" style="flex: 1;">
+            <span>:</span>
+            <div class="input-with-var-btn" style="flex: 2; display: flex; gap: 4px;">
+                <input type="text" class="output-json-value" placeholder="{{vars.value}}" value="${escapeHtmlGlobal(value)}" style="flex: 1;">
+                <button type="button" class="btn-var-insert" onclick="showVariablePicker(this)" title="変数を挿入">{...}</button>
+            </div>
+            <button type="button" class="btn btn-danger btn-sm" onclick="removeOutputJsonField(this)">✕</button>
+        </div>
+    `).join('');
+}
+
+/**
+ * Add a JSON field row for output step
+ */
+function addOutputJsonField(stepNumber) {
+    const container = document.getElementById(`output-json-fields-${stepNumber}`);
+    if (!container) return;
+
+    const row = document.createElement('div');
+    row.className = 'output-json-field-row';
+    row.style.cssText = 'display: flex; gap: 8px; margin-bottom: 4px;';
+    row.innerHTML = `
+        <input type="text" class="output-json-key" placeholder="キー名" value="" style="flex: 1;">
+        <span>:</span>
+        <div class="input-with-var-btn" style="flex: 2; display: flex; gap: 4px;">
+            <input type="text" class="output-json-value" placeholder="{{vars.value}}" value="" style="flex: 1;">
+            <button type="button" class="btn-var-insert" onclick="showVariablePicker(this)" title="変数を挿入">{...}</button>
+        </div>
+        <button type="button" class="btn btn-danger btn-sm" onclick="removeOutputJsonField(this)">✕</button>
+    `;
+    container.appendChild(row);
+}
+
+/**
+ * Remove a JSON field row from output step
+ */
+function removeOutputJsonField(button) {
+    const row = button.closest('.output-json-field-row');
+    if (row) row.remove();
+}
+
+/**
+ * Handle output type change (screen/file)
+ */
+function onOutputTypeChange(stepNumber) {
+    const stepDiv = document.getElementById(`workflow-step-${stepNumber}`);
+    if (!stepDiv) return;
+
+    const outputType = stepDiv.querySelector('.output-type')?.value || 'screen';
+    const fileSettings = stepDiv.querySelector('.output-file-settings');
+
+    if (fileSettings) {
+        fileSettings.style.display = outputType === 'file' ? 'block' : 'none';
+    }
+}
+
+/**
+ * Handle output format change (text/csv/json)
+ */
+function onOutputFormatChange(stepNumber) {
+    const stepDiv = document.getElementById(`workflow-step-${stepNumber}`);
+    if (!stepDiv) return;
+
+    const outputFormat = stepDiv.querySelector('.output-format')?.value || 'text';
+
+    // Hide all format fields
+    stepDiv.querySelectorAll('.output-format-fields').forEach(el => {
+        el.style.display = 'none';
+    });
+
+    // Show the selected format fields
+    const formatField = stepDiv.querySelector(`.output-format-${outputFormat}`);
+    if (formatField) {
+        formatField.style.display = 'block';
+    }
 }
 
 /**
@@ -7898,8 +11270,21 @@ async function loadPromptsForWorkflowStep(stepNumber, projectId, selectedPromptI
 
         // Add onchange handler to load parameters when prompt changes
         promptSelect.onchange = async () => {
-            // Load input mapping UI when prompt is selected (clear existing mapping for new selection)
-            await loadInputMappingForStep(stepNumber, promptSelect.value);
+            // Capture existing input mapping values before changing prompt
+            const container = document.getElementById(`input-mapping-container-${stepNumber}`);
+            const existingMappingValues = {};
+            if (container) {
+                const rows = container.querySelectorAll('.input-mapping-row');
+                rows.forEach(row => {
+                    const param = row.dataset.param;
+                    const input = row.querySelector('.input-mapping-input');
+                    if (param && input && input.value) {
+                        existingMappingValues[param] = input.value;
+                    }
+                });
+            }
+            // Load input mapping UI, preserving values for matching keys
+            await loadInputMappingForStep(stepNumber, promptSelect.value, existingMappingValues);
         };
 
         // Enable edit button once prompts are loaded (allows creating new prompts even if none selected)
@@ -7907,8 +11292,9 @@ async function loadPromptsForWorkflowStep(stepNumber, projectId, selectedPromptI
             editBtn.disabled = false;
         }
 
-        // Load input mapping UI if prompt was pre-selected (editing existing workflow)
-        if (selectedPromptId) {
+        // Load input mapping UI if prompt was pre-selected OR if there's existing mapping
+        // (handles case where prompt_id is null but input_mapping exists)
+        if (selectedPromptId || existingMapping) {
             await loadInputMappingForStep(stepNumber, selectedPromptId, existingMapping);
         }
     } catch (error) {
@@ -8348,6 +11734,56 @@ function expandAllWorkflowSteps() {
 }
 
 /**
+ * Update indentation levels for all workflow steps based on control flow structure.
+ * Steps inside IF/FOREACH/LOOP blocks are indented visually.
+ */
+function updateWorkflowStepIndentation() {
+    const container = document.getElementById('workflow-steps-container');
+    if (!container) return;
+
+    const steps = container.querySelectorAll('.workflow-step');
+    let indentLevel = 0;
+    const INDENT_PX = 28; // Pixels per indent level
+
+    steps.forEach(stepDiv => {
+        // Find the step type select element (class is 'step-type')
+        const stepTypeSelect = stepDiv.querySelector('select.step-type');
+        const stepType = stepTypeSelect ? stepTypeSelect.value : (stepDiv.dataset.stepType || 'prompt');
+
+        // Determine indent change based on step type
+        // For closing tags (endif, endloop, endforeach), decrement BEFORE setting
+        if (['endif', 'endloop', 'endforeach'].includes(stepType)) {
+            indentLevel = Math.max(0, indentLevel - 1);
+        }
+
+        // For else/elif, keep same level as if
+        // (they're at the same level as the if that opens them)
+        let displayLevel = indentLevel;
+        if (['else', 'elif'].includes(stepType)) {
+            // Temporarily decrement for else/elif to align with IF
+            displayLevel = Math.max(0, indentLevel - 1);
+        }
+
+        // Apply visual indentation via margin-left
+        stepDiv.style.marginLeft = displayLevel > 0 ? `${displayLevel * INDENT_PX}px` : '';
+
+        // Also add a visual indicator via border
+        if (displayLevel > 0) {
+            stepDiv.style.borderLeft = '3px solid #3b82f6';
+            stepDiv.dataset.indentLevel = displayLevel;
+        } else {
+            stepDiv.style.borderLeft = '';
+            stepDiv.removeAttribute('data-indent-level');
+        }
+
+        // For opening tags (if, loop, foreach), increment AFTER setting
+        if (['if', 'loop', 'foreach'].includes(stepType)) {
+            indentLevel++;
+        }
+    });
+}
+
+/**
  * Update step summary name when input changes
  */
 function updateStepSummary(inputEl) {
@@ -8379,7 +11815,8 @@ function updateStepTypeSummary(selectEl) {
         'foreach': '🔄 FOREACH',
         'endforeach': '🔄 ENDFOREACH',
         'break': '⏹ BREAK',
-        'continue': '⏭ CONTINUE'
+        'continue': '⏭ CONTINUE',
+        'output': '📤 OUTPUT'
     };
 
     const summaryType = stepDiv.querySelector('.step-summary-type');
@@ -8494,6 +11931,9 @@ function renumberWorkflowSteps() {
             stepNumberEl.textContent = `Step ${stepNumber}`;
         }
     });
+
+    // Update indentation for all steps based on control flow structure
+    updateWorkflowStepIndentation();
 }
 
 /**
@@ -8504,6 +11944,8 @@ async function saveWorkflow() {
     const name = document.getElementById('workflow-name').value.trim();
     const description = document.getElementById('workflow-description').value.trim();
     const autoContext = document.getElementById('workflow-auto-context').checked;
+    const projectIdValue = document.getElementById('workflow-project').value;
+    const workflowProjectId = projectIdValue ? parseInt(projectIdValue) : null;
 
     if (!name) {
         alert('ワークフロー名を入力してください / Please enter workflow name');
@@ -8603,7 +12045,7 @@ async function saveWorkflow() {
             const response = await fetch(`/api/workflows/${workflowId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, description, auto_context: autoContext })
+                body: JSON.stringify({ name, description, project_id: workflowProjectId, auto_context: autoContext })
             });
 
             if (!response.ok) throw new Error('Failed to update workflow');
@@ -8623,14 +12065,14 @@ async function saveWorkflow() {
 
             savedWorkflowId = workflowId;
         } else {
-            // Create new workflow (include project_id)
+            // Create new workflow (include project_id from dropdown)
             const response = await fetch('/api/workflows', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     name,
                     description,
-                    project_id: selectedWorkflowProjectId,
+                    project_id: workflowProjectId,
                     auto_context: autoContext,
                     steps
                 })
@@ -8710,13 +12152,17 @@ async function selectWorkflow(workflowId) {
         const selectedItem = document.querySelector(`.workflow-item[onclick="selectWorkflow(${workflowId})"]`);
         if (selectedItem) selectedItem.classList.add('selected');
 
-        // Show editor with workflow data
-        document.getElementById('workflow-editor-title').textContent = 'ワークフロー編集 / Edit Workflow';
+        // Show editor with workflow data - display workflow name in title
+        document.getElementById('workflow-editor-title').textContent = selectedWorkflow.name || 'ワークフロー編集 / Edit Workflow';
         document.getElementById('workflow-editor-id-info').textContent = `ID: ${selectedWorkflow.id}`;
         document.getElementById('workflow-id').value = selectedWorkflow.id;
         document.getElementById('workflow-name').value = selectedWorkflow.name;
         document.getElementById('workflow-description').value = selectedWorkflow.description || '';
         document.getElementById('workflow-auto-context').checked = selectedWorkflow.auto_context || false;
+
+        // Load project options and set current project
+        await loadWorkflowProjectOptions();
+        document.getElementById('workflow-project').value = selectedWorkflow.project_id || '';
 
         // Clear and rebuild steps
         document.getElementById('workflow-steps-container').innerHTML = '';
@@ -8872,8 +12318,8 @@ async function openWorkflowJsonEditor() {
         errorDiv.style.display = 'none';
         errorDiv.textContent = '';
 
-        // Show modal
-        document.getElementById('workflow-json-editor-overlay').style.display = 'flex';
+        // Show modal (use classList for proper CSS animation)
+        document.getElementById('workflow-json-editor-overlay').classList.add('active');
 
     } catch (error) {
         console.error('Error opening JSON editor:', error);
@@ -8885,7 +12331,7 @@ async function openWorkflowJsonEditor() {
  * Close workflow JSON editor modal
  */
 function closeWorkflowJsonEditor() {
-    document.getElementById('workflow-json-editor-overlay').style.display = 'none';
+    document.getElementById('workflow-json-editor-overlay').classList.remove('active');
 }
 
 /**
@@ -8950,9 +12396,9 @@ async function saveWorkflowJson() {
         // Close modal
         closeWorkflowJsonEditor();
 
-        // Refresh workflow list and editor
-        await loadWorkflowList();
-        await loadWorkflowForEditing(selectedWorkflow.id);
+        // Refresh workflow list and reload the workflow
+        await loadWorkflows();
+        await selectWorkflow(selectedWorkflow.id);
 
         alert('ワークフローを保存しました / Workflow saved successfully');
 
@@ -9115,7 +12561,379 @@ const WORKFLOW_FUNCTIONS = [
     { name: 'sum', example: 'sum({{a}}, {{b}})', desc: '合計 / Sum' },
     { name: 'calc', example: 'calc({{x}} + 1)', desc: '計算式 / Calculate' },
     { name: 'debug', example: 'debug({{v}})', desc: 'デバッグ出力 / Debug output' },
+    // Data access
+    { name: 'getprompt', example: 'getprompt(プロンプト名, CURRENT, CURRENT)', desc: 'プロンプト内容取得 / Get prompt content' },
+    { name: 'getparser', example: 'getparser(プロンプト名, CURRENT, CURRENT)', desc: 'パーサー設定取得 / Get parser config' },
+    // Date & time
+    { name: 'now', example: 'now(%Y-%m-%d %H:%M:%S)', desc: '現在日時 / Current datetime' },
+    { name: 'today', example: 'today(%Y-%m-%d)', desc: '今日の日付 / Today\'s date' },
+    { name: 'time', example: 'time(%H:%M:%S)', desc: '現在時刻 / Current time' },
 ];
+
+// ======================================
+// Resource Picker for AI Agent
+// ======================================
+
+// Cache for loaded resources
+let resourcePickerData = {
+    datasets: [],
+    workflows: [],
+    prompts: [],
+    projects: []
+};
+let resourcePickerCurrentTab = 'datasets';
+let resourcePickerSelectedDataset = null;
+let resourcePickerProjectId = null; // Current project filter
+
+/**
+ * Open the resource picker modal
+ */
+async function openResourcePicker() {
+    try {
+        console.log('[ResourcePicker] Opening modal...');
+        const overlay = document.getElementById('resource-picker-overlay');
+        if (!overlay) {
+            console.error('[ResourcePicker] Overlay element not found');
+            return;
+        }
+        overlay.classList.add('active');
+
+        const searchEl = document.getElementById('resource-search');
+        if (searchEl) searchEl.value = '';
+
+        // Use current project as default filter
+        resourcePickerProjectId = currentProjectId || null;
+        console.log('[ResourcePicker] Project filter:', resourcePickerProjectId);
+
+        // Load projects for filter dropdown
+        try {
+            await loadProjectsForFilter();
+        } catch (e) {
+            console.error('[ResourcePicker] Failed to load projects for filter:', e);
+        }
+
+        // Show project filter for non-project tabs
+        const filterEl = document.getElementById('resource-project-filter');
+        if (filterEl) {
+            filterEl.style.display = resourcePickerCurrentTab === 'projects' ? 'none' : 'block';
+        }
+
+        // Show column selector for datasets tab
+        const columnSelector = document.getElementById('dataset-column-selector');
+        if (columnSelector) {
+            columnSelector.style.display = resourcePickerCurrentTab === 'datasets' ? 'block' : 'none';
+        }
+
+        console.log('[ResourcePicker] Loading resources for tab:', resourcePickerCurrentTab);
+        await loadResources(resourcePickerCurrentTab);
+        console.log('[ResourcePicker] Resources loaded successfully');
+    } catch (error) {
+        console.error('[ResourcePicker] Error opening resource picker:', error);
+        const listEl = document.getElementById('resource-list');
+        if (listEl) {
+            listEl.innerHTML = `<p style="padding: 1rem; color: #e74c3c;">エラー / Error: ${error.message}</p>`;
+        }
+    }
+}
+
+/**
+ * Load projects for the filter dropdown
+ */
+async function loadProjectsForFilter() {
+    const selectEl = document.getElementById('resource-project-select');
+    if (!selectEl) return;
+
+    try {
+        const resp = await fetch('/api/projects');
+        if (!resp.ok) throw new Error('Failed to load projects');
+
+        const projects = await resp.json();
+
+        selectEl.innerHTML = '<option value="">-- 全プロジェクト / All Projects --</option>';
+        projects.forEach(p => {
+            const selected = p.id === resourcePickerProjectId ? 'selected' : '';
+            selectEl.innerHTML += `<option value="${p.id}" ${selected}>${escapeHtmlGlobal(p.name)}</option>`;
+        });
+    } catch (e) {
+        console.error('Failed to load projects for filter:', e);
+    }
+}
+
+/**
+ * Handle project filter change
+ */
+function onResourceProjectChange() {
+    const selectEl = document.getElementById('resource-project-select');
+    resourcePickerProjectId = selectEl.value ? parseInt(selectEl.value) : null;
+    loadResources(resourcePickerCurrentTab);
+}
+
+/**
+ * Close the resource picker modal
+ */
+function closeResourcePicker() {
+    document.getElementById('resource-picker-overlay').classList.remove('active');
+    resourcePickerSelectedDataset = null;
+}
+
+/**
+ * Switch resource picker tab
+ */
+async function switchResourceTab(tab) {
+    resourcePickerCurrentTab = tab;
+
+    // Update tab styling
+    document.querySelectorAll('.rp-tab').forEach(t => {
+        if (t.dataset.tab === tab) {
+            t.style.background = '#3b82f6';
+            t.style.color = 'white';
+        } else {
+            t.style.background = '#f1f5f9';
+            t.style.color = '#475569';
+        }
+    });
+
+    // Show/hide column selector for datasets
+    const columnSelector = document.getElementById('dataset-column-selector');
+    if (columnSelector) {
+        columnSelector.style.display = tab === 'datasets' ? 'block' : 'none';
+    }
+
+    // Show/hide project filter (hide for projects tab)
+    const filterEl = document.getElementById('resource-project-filter');
+    if (filterEl) {
+        filterEl.style.display = tab === 'projects' ? 'none' : 'block';
+    }
+
+    await loadResources(tab);
+}
+
+/**
+ * Load resources from API
+ */
+async function loadResources(type) {
+    const listEl = document.getElementById('resource-list');
+    if (!listEl) {
+        console.error('[ResourcePicker] resource-list element not found');
+        return;
+    }
+    listEl.innerHTML = '<p style="padding: 1rem; color: #7f8c8d;">読み込み中... / Loading...</p>';
+
+    try {
+        let url;
+        const projectFilter = resourcePickerProjectId ? `project_id=${resourcePickerProjectId}` : '';
+
+        switch (type) {
+            case 'datasets':
+                url = '/api/datasets' + (projectFilter ? `?${projectFilter}` : '');
+                break;
+            case 'workflows':
+                url = '/api/workflows' + (projectFilter ? `?${projectFilter}` : '');
+                break;
+            case 'prompts':
+                url = '/api/prompts' + (projectFilter ? `?${projectFilter}` : '');
+                break;
+            case 'projects':
+                url = '/api/projects';
+                break;
+            default:
+                console.warn('[ResourcePicker] Unknown resource type:', type);
+                return;
+        }
+
+        console.log('[ResourcePicker] Fetching:', url);
+        const response = await fetch(url);
+        console.log('[ResourcePicker] Response status:', response.status);
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: Failed to load resources`);
+        }
+
+        const data = await response.json();
+        console.log('[ResourcePicker] Loaded', data.length, 'items for', type);
+        resourcePickerData[type] = data;
+
+        renderResourceList(type, data);
+
+    } catch (error) {
+        console.error('[ResourcePicker] Error loading resources:', error);
+        listEl.innerHTML = `<p style="padding: 1rem; color: #e74c3c;">エラー / Error: ${error.message}</p>`;
+    }
+}
+
+/**
+ * Render resource list
+ */
+function renderResourceList(type, data) {
+    console.log('[ResourcePicker] renderResourceList called with type:', type, 'data length:', data?.length);
+    const listEl = document.getElementById('resource-list');
+
+    if (!listEl) {
+        console.error('[ResourcePicker] resource-list element not found in renderResourceList');
+        return;
+    }
+
+    if (!data || data.length === 0) {
+        listEl.innerHTML = `<p style="padding: 1rem; color: #7f8c8d;">データがありません / No data</p>`;
+        return;
+    }
+
+    let html = '';
+    data.forEach(item => {
+        const name = item.name || item.title || `ID: ${item.id}`;
+        const id = item.id;
+        let info = '';
+
+        switch (type) {
+            case 'datasets':
+                info = item.row_count ? `${item.row_count} 行` : '';
+                break;
+            case 'workflows':
+                info = item.steps ? `${item.steps.length} ステップ` : '';
+                break;
+            case 'prompts':
+                info = item.revisions_count ? `Rev: ${item.revisions_count}` : '';
+                break;
+            case 'projects':
+                info = item.prompts_count ? `${item.prompts_count} プロンプト` : '';
+                break;
+        }
+
+        html += `
+            <div class="resource-item" data-id="${id}" data-name="${escapeHtmlGlobal(name)}" data-type="${type}"
+                 style="padding: 0.75rem 1rem; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: background 0.15s;"
+                 onmouseover="this.style.background='#f1f5f9';"
+                 onmouseout="this.style.background='';"
+                 onclick="selectResourceItem(this, '${type}', ${id}, '${escapeHtmlGlobal(name).replace(/'/g, "\\'")}')">
+                <div>
+                    <div style="font-weight: 500; color: #334155;">${escapeHtmlGlobal(name)}</div>
+                    <div style="font-size: 0.8rem; color: #94a3b8;">ID: ${id} ${info ? '/ ' + info : ''}</div>
+                </div>
+                <button type="button" class="btn btn-primary" style="padding: 0.25rem 0.75rem; font-size: 0.8rem;"
+                        onclick="event.stopPropagation(); insertResource('${type}', ${id}, '${escapeHtmlGlobal(name).replace(/'/g, "\\'")}')">
+                    挿入
+                </button>
+            </div>
+        `;
+    });
+
+    listEl.innerHTML = html;
+}
+
+/**
+ * Select a resource item (for datasets, show columns)
+ */
+async function selectResourceItem(el, type, id, name) {
+    // Highlight selection
+    document.querySelectorAll('.resource-item').forEach(item => {
+        item.style.background = '';
+        item.style.outline = '';
+    });
+    el.style.background = '#dbeafe';
+    el.style.outline = '2px solid #3b82f6';
+
+    if (type === 'datasets') {
+        resourcePickerSelectedDataset = { id, name };
+        await loadDatasetColumns(id);
+    }
+}
+
+/**
+ * Load dataset columns for the selector
+ */
+async function loadDatasetColumns(datasetId) {
+    const selectEl = document.getElementById('dataset-column-select');
+    selectEl.innerHTML = '<option value="">-- 全カラム / All columns --</option>';
+
+    try {
+        const response = await fetch(`/api/datasets/${datasetId}/columns`);
+        if (response.ok) {
+            const columns = await response.json();
+            if (Array.isArray(columns)) {
+                columns.forEach(col => {
+                    selectEl.innerHTML += `<option value="${escapeHtmlGlobal(col)}">${escapeHtmlGlobal(col)}</option>`;
+                });
+            }
+        }
+    } catch (error) {
+        console.error('Error loading columns:', error);
+    }
+}
+
+/**
+ * Filter resources by search query
+ */
+function filterResources(query) {
+    const listEl = document.getElementById('resource-list');
+    const items = listEl.querySelectorAll('.resource-item');
+    const lowerQuery = query.toLowerCase().trim();
+
+    items.forEach(item => {
+        const name = item.dataset.name.toLowerCase();
+        const id = item.dataset.id;
+        item.style.display = (name.includes(lowerQuery) || id.includes(lowerQuery)) ? '' : 'none';
+    });
+}
+
+/**
+ * Insert resource reference into agent input
+ */
+function insertResource(type, id, name) {
+    const agentInput = document.getElementById('agent-input');
+    if (!agentInput) return;
+
+    let reference;
+    const columnSelect = document.getElementById('dataset-column-select');
+    const selectedColumn = columnSelect ? columnSelect.value : '';
+
+    switch (type) {
+        case 'datasets':
+            reference = selectedColumn
+                ? `dataset:${id}:${selectedColumn} # ${name}`
+                : `dataset:${id} # ${name}`;
+            break;
+        case 'workflows':
+            reference = `workflow:${id} # ${name}`;
+            break;
+        case 'prompts':
+            reference = `prompt:${id} # ${name}`;
+            break;
+        case 'projects':
+            reference = `project:${id} # ${name}`;
+            break;
+        default:
+            reference = `${type}:${id} # ${name}`;
+    }
+
+    // Insert at cursor position or append
+    const start = agentInput.selectionStart;
+    const end = agentInput.selectionEnd;
+    const text = agentInput.value;
+
+    // Add space before if not at start and not already space
+    const prefix = (start > 0 && text[start - 1] !== ' ' && text[start - 1] !== '\n') ? ' ' : '';
+
+    agentInput.value = text.substring(0, start) + prefix + reference + text.substring(end);
+    agentInput.focus();
+
+    // Move cursor to end of inserted text
+    const newPos = start + prefix.length + reference.length;
+    agentInput.setSelectionRange(newPos, newPos);
+
+    closeResourcePicker();
+}
+
+// Close resource picker when clicking overlay
+document.addEventListener('DOMContentLoaded', () => {
+    const overlay = document.getElementById('resource-picker-overlay');
+    if (overlay) {
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) {
+                closeResourcePicker();
+            }
+        });
+    }
+});
 
 /**
  * Open the variable picker dialog
@@ -9432,6 +13250,7 @@ function getCurrentWorkflowSteps() {
         const stepNameInput = stepDiv.querySelector('input.step-name');
         const projectSelect = stepDiv.querySelector('.step-project');
         const promptSelect = stepDiv.querySelector('.step-prompt');
+        const stepTypeSelect = stepDiv.querySelector('.step-type');
 
         // Safely get step name - input elements have .value, spans don't
         let stepName = `step${stepNumber}`;
@@ -9439,14 +13258,41 @@ function getCurrentWorkflowSteps() {
             stepName = stepNameInput.value.trim() || stepName;
         }
 
+        // Get step type (prompt, set, if, etc.)
+        const stepType = stepTypeSelect ? stepTypeSelect.value : 'prompt';
+
+        // For SET steps, collect defined variable names
+        const setVariables = [];
+        if (stepType === 'set') {
+            const setAssignmentRows = stepDiv.querySelectorAll('.set-assignment-row');
+            setAssignmentRows.forEach(row => {
+                const varNameInput = row.querySelector('.set-var-name');
+                if (varNameInput && varNameInput.value.trim()) {
+                    setVariables.push(varNameInput.value.trim());
+                }
+            });
+        }
+
+        // For FOREACH steps, collect the loop variable name
+        let foreachVariable = null;
+        if (stepType === 'foreach') {
+            const foreachVarInput = stepDiv.querySelector('.foreach-var-name');
+            if (foreachVarInput && foreachVarInput.value.trim()) {
+                foreachVariable = foreachVarInput.value.trim();
+            }
+        }
+
         steps.push({
             stepNumber: stepNumber,
             stepName: stepName,
+            stepType: stepType,
             projectId: projectSelect ? parseInt(projectSelect.value) || null : null,
             promptId: promptSelect ? parseInt(promptSelect.value) || null : null,
             promptName: promptSelect && promptSelect.selectedIndex >= 0
                 ? promptSelect.options[promptSelect.selectedIndex].text
-                : ''
+                : '',
+            setVariables: setVariables,
+            foreachVariable: foreachVariable
         });
     });
 
@@ -9522,12 +13368,52 @@ function buildFilteredCategories(currentStepNumber, workflowSteps) {
         });
     }
 
-    // Category 2+: Previous steps' outputs (for steps before currentStepNumber)
+    // Category 2: Workflow-defined variables (from SET and FOREACH steps before current step)
+    if (currentStepNumber && workflowSteps.length > 0) {
+        const wfDefinedVars = [];
+        for (const step of workflowSteps) {
+            // Only show steps before the current one
+            if (step.stepNumber >= currentStepNumber) continue;
+
+            // Collect SET step variables
+            if (step.stepType === 'set' && step.setVariables && step.setVariables.length > 0) {
+                for (const varName of step.setVariables) {
+                    wfDefinedVars.push({
+                        name: varName,
+                        variable: `{{vars.${varName}}}`,
+                        type: "wf_var",
+                        source: `Step ${step.stepNumber}: ${step.stepName} (SET)`
+                    });
+                }
+            }
+
+            // Collect FOREACH iterator variable
+            if (step.stepType === 'foreach' && step.foreachVariable) {
+                wfDefinedVars.push({
+                    name: step.foreachVariable,
+                    variable: `{{vars.${step.foreachVariable}}}`,
+                    type: "wf_var",
+                    source: `Step ${step.stepNumber}: ${step.stepName} (FOREACH)`
+                });
+            }
+        }
+
+        if (wfDefinedVars.length > 0) {
+            categories.push({
+                category_id: "wf_variables",
+                category_name: "🏷️ ワークフロー変数 / WF Variables",
+                variables: wfDefinedVars
+            });
+        }
+    }
+
+    // Category 3+: Previous steps' outputs (for steps before currentStepNumber)
     if (currentStepNumber && workflowSteps.length > 0) {
         for (const step of workflowSteps) {
             // Only show steps before the current one
             if (step.stepNumber >= currentStepNumber) continue;
-            if (!step.promptId) continue;
+            // Only prompt steps have outputs
+            if (step.stepType !== 'prompt' || !step.promptId) continue;
 
             const stepVars = [];
 
@@ -9596,8 +13482,44 @@ function buildFilteredCategories(currentStepNumber, workflowSteps) {
     // When no workflow context (stepNumber is null), show outputs from all steps in workflow
     // This is used when variable picker is opened without a specific step context
     if (!currentStepNumber && workflowSteps.length > 0) {
+        // First, collect all WF-defined variables from SET/FOREACH steps
+        const wfDefinedVars = [];
         for (const step of workflowSteps) {
-            if (!step.promptId) continue;
+            // Collect SET step variables
+            if (step.stepType === 'set' && step.setVariables && step.setVariables.length > 0) {
+                for (const varName of step.setVariables) {
+                    wfDefinedVars.push({
+                        name: varName,
+                        variable: `{{vars.${varName}}}`,
+                        type: "wf_var",
+                        source: `Step ${step.stepNumber}: ${step.stepName} (SET)`
+                    });
+                }
+            }
+
+            // Collect FOREACH iterator variable
+            if (step.stepType === 'foreach' && step.foreachVariable) {
+                wfDefinedVars.push({
+                    name: step.foreachVariable,
+                    variable: `{{vars.${step.foreachVariable}}}`,
+                    type: "wf_var",
+                    source: `Step ${step.stepNumber}: ${step.stepName} (FOREACH)`
+                });
+            }
+        }
+
+        if (wfDefinedVars.length > 0) {
+            categories.push({
+                category_id: "wf_variables",
+                category_name: "🏷️ ワークフロー変数 / WF Variables",
+                variables: wfDefinedVars
+            });
+        }
+
+        // Then process prompt steps for their outputs
+        for (const step of workflowSteps) {
+            // Only prompt steps have outputs
+            if (step.stepType !== 'prompt' || !step.promptId) continue;
 
             const stepVars = [];
 
@@ -9658,6 +13580,48 @@ function buildFilteredCategories(currentStepNumber, workflowSteps) {
                 });
             }
         }
+    }
+
+    // Add constants category (for getprompt/getparser functions)
+    const constantVars = [
+        {
+            name: 'CURRENT',
+            variable: 'CURRENT',
+            source: 'カレントプロジェクト/最新リビジョン / Current project or latest revision'
+        }
+    ];
+    categories.push({
+        category_id: 'constants',
+        category_name: '📌 定数 / Constants',
+        variables: constantVars
+    });
+
+    // Add project names category (for getprompt/getparser functions)
+    if (allProjects && allProjects.length > 0) {
+        const projectVars = allProjects.map(p => ({
+            name: p.name,
+            variable: p.name,
+            source: `プロジェクト ID: ${p.id}`
+        }));
+        categories.push({
+            category_id: 'projects',
+            category_name: '📁 プロジェクト名 / Project Names',
+            variables: projectVars
+        });
+    }
+
+    // Add datasets category (for FOREACH source)
+    if (allDatasets && allDatasets.length > 0) {
+        const datasetVars = allDatasets.map(ds => ({
+            name: `${ds.name} (ID: ${ds.id})`,
+            variable: `dataset:${ds.id}`,
+            source: `行数: ${ds.row_count} | ${ds.source_file_name}`
+        }));
+        categories.push({
+            category_id: 'datasets',
+            category_name: '📊 データセット / Datasets',
+            variables: datasetVars
+        });
     }
 
     // Add functions category (searchable)
@@ -10058,7 +14022,21 @@ async function onPromptEditorPromptChange(promptIdStr) {
             if (stepDiv) {
                 const projectSelect = stepDiv.querySelector('.step-project');
                 if (projectSelect && projectSelect.value) {
-                    await loadPromptsForWorkflowStep(parseInt(stepNumber), parseInt(projectSelect.value), promptId, null);
+                    // Capture existing input mapping values before updating
+                    const container = document.getElementById(`input-mapping-container-${stepNumber}`);
+                    const existingMappingValues = {};
+                    if (container) {
+                        const rows = container.querySelectorAll('.input-mapping-row');
+                        rows.forEach(row => {
+                            const param = row.dataset.param;
+                            const input = row.querySelector('.input-mapping-input');
+                            if (param && input && input.value) {
+                                existingMappingValues[param] = input.value;
+                            }
+                        });
+                    }
+                    // Pass existing mapping values to preserve them for matching keys
+                    await loadPromptsForWorkflowStep(parseInt(stepNumber), parseInt(projectSelect.value), promptId, existingMappingValues);
                 }
             }
         }
@@ -10177,6 +14155,91 @@ async function deletePromptFromEditor() {
         console.error('Error deleting prompt:', error);
         const statusEl = document.getElementById('prompt-editor-status');
         statusEl.textContent = `エラー: ${error.message}`;
+        statusEl.style.color = '#e74c3c';
+    }
+}
+
+/**
+ * Duplicate current prompt in the editor
+ * Creates a new prompt with name + "複製" and copies ALL revisions
+ */
+async function duplicatePromptFromEditor() {
+    const projectId = document.getElementById('prompt-editor-project-id').value;
+    const currentPromptId = document.getElementById('prompt-editor-prompt-id').value;
+    const currentName = document.getElementById('prompt-editor-name').value;
+    const currentDescription = document.getElementById('prompt-editor-description').value;
+    const statusEl = document.getElementById('prompt-editor-status');
+
+    if (!projectId || !currentPromptId) {
+        alert('複製するプロンプトが選択されていません / No prompt selected to duplicate');
+        return;
+    }
+
+    statusEl.textContent = '複製中...';
+    statusEl.style.color = '#7f8c8d';
+
+    try {
+        // 1. Fetch all revisions from source prompt
+        const revisionsRes = await fetch(`/api/prompts/${currentPromptId}/revisions`);
+        if (!revisionsRes.ok) throw new Error('Failed to fetch revisions');
+        const revisions = await revisionsRes.json();
+
+        // Sort by revision number ascending (API returns descending)
+        revisions.sort((a, b) => a.revision - b.revision);
+
+        // 2. Create new prompt with name + "複製"
+        const createRes = await fetch(`/api/projects/${projectId}/prompts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: currentName + '複製',
+                description: currentDescription
+            })
+        });
+        if (!createRes.ok) throw new Error('Failed to create prompt');
+        const newPrompt = await createRes.json();
+
+        // 3. Copy all revisions in order
+        for (const rev of revisions) {
+            const revisionRes = await fetch(`/api/prompts/${newPrompt.id}/revisions`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    prompt_template: rev.prompt_template,
+                    parser_config: rev.parser_config
+                })
+            });
+            if (!revisionRes.ok) {
+                console.warn(`Failed to copy revision ${rev.revision}`);
+            }
+        }
+
+        // 4. Refresh selector and load new prompt
+        const targetsRes = await fetch(`/api/projects/${projectId}/execution-targets?include_deleted=true`);
+        if (targetsRes.ok) {
+            const targets = await targetsRes.json();
+            const prompts = targets.prompts || [];
+            const selector = document.getElementById('prompt-editor-prompt-selector');
+            selector.innerHTML = prompts.map(p => {
+                const deletedLabel = p.is_deleted ? '（削除済み）' : '';
+                const disabled = p.is_deleted ? 'disabled' : '';
+                return `<option value="${p.id}" ${p.id === newPrompt.id ? 'selected' : ''} ${disabled}>${deletedLabel}${p.name}</option>`;
+            }).join('');
+            await loadPromptIntoEditor(newPrompt.id);
+
+            // Update workflow step selector if in workflow mode
+            const stepNumber = document.getElementById('prompt-editor-step-number').value;
+            if (stepNumber) {
+                await loadPromptsForWorkflowStep(parseInt(stepNumber), parseInt(projectId), newPrompt.id, null);
+            }
+        }
+
+        statusEl.textContent = `✓ プロンプト「${newPrompt.name}」を作成しました（${revisions.length}件のリビジョンをコピー）`;
+        statusEl.style.color = '#27ae60';
+        setTimeout(() => { statusEl.textContent = ''; statusEl.style.color = '#7f8c8d'; }, 3000);
+    } catch (error) {
+        console.error('Error duplicating prompt:', error);
+        statusEl.textContent = 'エラー: プロンプトの複製に失敗しました';
         statusEl.style.color = '#e74c3c';
     }
 }
@@ -10362,8 +14425,36 @@ async function savePromptFromEditor() {
         // Refresh workflow variables cache since prompt changed
         refreshWorkflowVariables();
 
-        // Refresh input mapping for the current workflow step if parameters changed
+        // Refresh right pane if this prompt is currently selected in single execution mode
+        if (currentSelectionType === 'prompt' && currentPromptId && parseInt(currentPromptId) === parseInt(promptId)) {
+            try {
+                const updatedPromptResponse = await fetch(`/api/prompts/${promptId}`);
+                if (updatedPromptResponse.ok) {
+                    const updatedPrompt = await updatedPromptResponse.json();
+                    await loadPromptConfig(updatedPrompt);
+                }
+            } catch (e) {
+                console.warn('Failed to refresh right pane:', e);
+            }
+        }
+
+        // Deselect history after saving prompt (user should start fresh)
+        deselectSingleHistory();
+
+        // Update workflow step's prompt dropdown to show updated name
         const stepNumber = document.getElementById('prompt-editor-step-number').value;
+        if (stepNumber) {
+            // Update the prompt name in the step's dropdown without full reload
+            const stepPromptSelect = document.getElementById(`step-prompt-${stepNumber}`);
+            if (stepPromptSelect) {
+                const option = stepPromptSelect.querySelector(`option[value="${promptId}"]`);
+                if (option) {
+                    option.textContent = promptName;
+                }
+            }
+        }
+
+        // Refresh input mapping for the current workflow step if parameters changed
         if (stepNumber && result.is_new) {
             // Parameters may have changed, refresh input mapping
             await refreshWorkflowStepInputMapping(parseInt(stepNumber), promptId);
@@ -10678,13 +14769,8 @@ function renderPromptRevisions(revisions) {
 function formatRevisionDate(isoDate) {
     if (!isoDate) return '';
     try {
-        const date = new Date(isoDate);
-        return date.toLocaleString('ja-JP', {
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit'
-        });
+        // Use formatJST for consistent JST timezone handling
+        return formatJST(isoDate);
     } catch (e) {
         return isoDate.substring(0, 16).replace('T', ' ');
     }
@@ -11732,4 +15818,1657 @@ function closeVariablePickerOnClickOutside(event) {
  */
 function createVarInsertButton() {
     return `<button type="button" class="btn-var-insert" onclick="showVariablePicker(this)" title="変数を挿入 / Insert Variable">{...}</button>`;
+}
+
+// ========================================
+// AI Agent Functions
+// ========================================
+
+let currentAgentSessionId = null;
+let agentIsLoading = false;
+let currentAgentTaskId = null;
+let agentPollingInterval = null;
+let agentEventSource = null;  // SSE connection for real-time streaming
+let currentSessionTerminated = false;  // Track if current session is terminated by security guardrail
+const AGENT_POLL_INTERVAL = 2000; // 2 seconds (fallback)
+
+/**
+ * Update the session ID display in the UI
+ */
+function updateAgentSessionDisplay() {
+    const display = document.getElementById('agent-session-id-display');
+    if (display && currentAgentSessionId) {
+        // Show last 13 characters (e.g., "1767123456789" from "session_1767123456789")
+        const shortId = currentAgentSessionId.slice(-13);
+        display.textContent = `[${shortId}]`;
+        display.title = `Session: ${currentAgentSessionId}`;
+    } else if (display) {
+        display.textContent = '';
+        display.title = '';
+    }
+}
+
+/**
+ * Send a message to the AI agent (using background task)
+ */
+async function sendAgentMessage() {
+    const input = document.getElementById('agent-input');
+    const message = input.value.trim();
+
+    if (!message || agentIsLoading) return;
+
+    // Block messages to terminated sessions
+    if (currentSessionTerminated) {
+        alert('このセッションはセキュリティ上の理由により終了しています。「新規チャット」ボタンで新しいセッションを開始してください。');
+        return;
+    }
+
+    const messagesContainer = document.getElementById('agent-messages');
+    const modelSelect = document.getElementById('agent-model-select');
+    const modelName = modelSelect ? modelSelect.value : null;
+    const iterationsSelect = document.getElementById('agent-iterations-select');
+    const maxIterations = iterationsSelect ? parseInt(iterationsSelect.value, 10) : 30;
+
+    // Hide welcome message when conversation starts
+    const welcomeDiv = messagesContainer.querySelector('.agent-welcome');
+    if (welcomeDiv) {
+        welcomeDiv.remove();
+    }
+
+    // Show user message (preserve newlines)
+    const userMsgDiv = document.createElement('div');
+    userMsgDiv.className = 'agent-message user-message';
+    const formattedUserMessage = escapeHtmlGlobal(message).replace(/\n/g, '<br>');
+
+    // Store raw content for copy
+    userMsgDiv.dataset.rawContent = message;
+
+    // Add copy button SVG
+    const copyBtnSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+
+    userMsgDiv.innerHTML = `
+        <button class="agent-msg-copy-btn" onclick="copyAgentMessage(this)" title="コピー / Copy">${copyBtnSvg}</button>
+        <strong>You:</strong> ${formattedUserMessage}
+    `;
+    messagesContainer.appendChild(userMsgDiv);
+
+    // Add to session history
+    addToAgentSessionHistory('user', message);
+
+    // Clear input and scroll
+    input.value = '';
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+
+    // Show loading indicator
+    agentIsLoading = true;
+    const loadingDiv = document.createElement('div');
+    loadingDiv.id = 'agent-loading-indicator';
+    loadingDiv.className = 'agent-message assistant-message loading';
+    loadingDiv.innerHTML = '<em>思考中... / Thinking... (バックグラウンドで実行中 - ブラウザを閉じても継続します)</em>';
+    messagesContainer.appendChild(loadingDiv);
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+
+    try {
+        // Generate session ID if not exists
+        if (!currentAgentSessionId) {
+            currentAgentSessionId = 'agent_' + Date.now();
+            updateAgentSessionDisplay();
+        }
+
+        const requestBody = {
+            message: message,
+            session_id: currentAgentSessionId,
+            max_iterations: maxIterations
+        };
+
+        if (modelName) {
+            requestBody.model_name = modelName;
+        }
+
+        // Start background task
+        const response = await fetch('/api/agent/tasks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to start task');
+        }
+
+        const task = await response.json();
+        currentAgentTaskId = task.id;
+        currentAgentSessionId = task.session_id;
+        updateAgentSessionDisplay();
+
+        // Save task info to localStorage for recovery
+        saveCurrentTask(task);
+
+        // Start polling for task completion
+        startAgentPolling(loadingDiv);
+
+    } catch (error) {
+        // Remove loading indicator
+        loadingDiv.remove();
+
+        const errorDiv = document.createElement('div');
+        errorDiv.className = 'agent-message error-message';
+        errorDiv.innerHTML = `<strong>Error:</strong> ${escapeHtmlGlobal(error.message)}`;
+        messagesContainer.appendChild(errorDiv);
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        agentIsLoading = false;
+    }
+}
+
+/**
+ * Save current task info for recovery
+ */
+function saveCurrentTask(task) {
+    try {
+        localStorage.setItem('currentAgentTask', JSON.stringify({
+            id: task.id,
+            session_id: task.session_id,
+            user_message: task.user_message,
+            started_at: new Date().toISOString()
+        }));
+    } catch (e) {
+        console.error('Failed to save task info:', e);
+    }
+}
+
+/**
+ * Clear saved task info
+ */
+function clearCurrentTask() {
+    try {
+        localStorage.removeItem('currentAgentTask');
+    } catch (e) {
+        console.error('Failed to clear task info:', e);
+    }
+}
+
+/**
+ * Check for pending tasks on page load
+ */
+async function checkPendingAgentTasks() {
+    try {
+        const savedTask = localStorage.getItem('currentAgentTask');
+        if (!savedTask) return;
+
+        const taskInfo = JSON.parse(savedTask);
+        const response = await fetch(`/api/agent/tasks/${taskInfo.id}`);
+        if (!response.ok) {
+            clearCurrentTask();
+            return;
+        }
+
+        const task = await response.json();
+
+        if (task.status === 'pending' || task.status === 'running') {
+            // Task is still running - resume polling
+            currentAgentTaskId = task.id;
+            currentAgentSessionId = task.session_id;
+            updateAgentSessionDisplay();
+
+            const messagesContainer = document.getElementById('agent-messages');
+
+            // Show the original user message (preserve newlines)
+            const userMsgDiv = document.createElement('div');
+            userMsgDiv.className = 'agent-message user-message';
+            const formattedTaskUserMessage = escapeHtmlGlobal(task.user_message).replace(/\n/g, '<br>');
+            userMsgDiv.innerHTML = `<strong>You:</strong> ${formattedTaskUserMessage}`;
+            messagesContainer.appendChild(userMsgDiv);
+
+            // Show loading indicator
+            agentIsLoading = true;
+            const loadingDiv = document.createElement('div');
+            loadingDiv.id = 'agent-loading-indicator';
+            loadingDiv.className = 'agent-message assistant-message loading';
+            loadingDiv.innerHTML = '<em>継続中... / Resuming... (前回のタスクを確認しています)</em>';
+            messagesContainer.appendChild(loadingDiv);
+
+            // Resume polling
+            startAgentPolling(loadingDiv);
+        } else if (task.status === 'completed') {
+            // Task completed while away - show result
+            displayAgentTaskResult(task);
+            clearCurrentTask();
+        } else if (task.status === 'error') {
+            // Task failed while away
+            const messagesContainer = document.getElementById('agent-messages');
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'agent-message error-message';
+            errorDiv.innerHTML = `<strong>Error (from previous task):</strong> ${escapeHtmlGlobal(task.error_message || 'Unknown error')}`;
+            messagesContainer.appendChild(errorDiv);
+            clearCurrentTask();
+        } else {
+            clearCurrentTask();
+        }
+    } catch (e) {
+        console.error('Failed to check pending tasks:', e);
+        clearCurrentTask();
+    }
+}
+
+/**
+ * Start polling for agent task completion (with SSE for real-time updates)
+ */
+function startAgentPolling(loadingDiv) {
+    // Clear any existing polling/streaming
+    stopAgentPolling();
+
+    // Create status div structure in loading indicator
+    if (loadingDiv && loadingDiv.parentNode) {
+        loadingDiv.innerHTML = `
+            <div class="agent-status-header"><em>処理中... / Processing...</em></div>
+            <div class="agent-events-log" style="font-size: 0.85em; color: #666; margin-top: 8px; max-height: 150px; overflow-y: auto;"></div>
+        `;
+    }
+
+    const eventsLogDiv = loadingDiv ? loadingDiv.querySelector('.agent-events-log') : null;
+    const statusHeader = loadingDiv ? loadingDiv.querySelector('.agent-status-header') : null;
+
+    // Try SSE first for real-time updates
+    try {
+        if (typeof EventSource !== 'undefined') {
+            agentEventSource = new EventSource(`/api/agent/tasks/${currentAgentTaskId}/stream`);
+
+            agentEventSource.onmessage = function(event) {
+                try {
+                    const eventData = JSON.parse(event.data);
+                    handleAgentEvent(eventData, loadingDiv, eventsLogDiv, statusHeader);
+                } catch (e) {
+                    console.error('Failed to parse SSE event:', e);
+                }
+            };
+
+            agentEventSource.onerror = function(error) {
+                console.warn('SSE connection error, falling back to polling:', error);
+                if (agentEventSource) {
+                    agentEventSource.close();
+                    agentEventSource = null;
+                }
+                // Fall back to polling if SSE fails
+                startAgentPollingFallback(loadingDiv);
+            };
+
+            return; // SSE is working, don't start polling
+        }
+    } catch (e) {
+        console.warn('SSE not supported, using polling:', e);
+    }
+
+    // Fall back to polling if SSE is not supported
+    startAgentPollingFallback(loadingDiv);
+}
+
+/**
+ * Handle incoming SSE event
+ */
+function handleAgentEvent(eventData, loadingDiv, eventsLogDiv, statusHeader) {
+    const messagesContainer = document.getElementById('agent-messages');
+
+    // Add event to log display
+    if (eventsLogDiv) {
+        const eventLine = document.createElement('div');
+        eventLine.className = `agent-event-${eventData.type}`;
+
+        // Format event based on type
+        let icon = '⏳';
+        if (eventData.type === 'tool_start') icon = '🔧';
+        else if (eventData.type === 'tool_end') icon = '✓';
+        else if (eventData.type === 'llm_call') icon = '🤖';
+        else if (eventData.type === 'llm_response') icon = '💬';
+        else if (eventData.type === 'iteration') icon = '🔄';
+        else if (eventData.type === 'error') icon = '❌';
+        else if (eventData.type === 'complete') icon = '✅';
+        else if (eventData.type === 'status') icon = '📋';
+        else if (eventData.type === 'thinking') icon = '💭';
+
+        eventLine.innerHTML = `${icon} ${escapeHtmlGlobal(eventData.message)}`;
+        eventsLogDiv.appendChild(eventLine);
+        eventsLogDiv.scrollTop = eventsLogDiv.scrollHeight;
+    }
+
+    // Update status header
+    if (statusHeader && eventData.message) {
+        statusHeader.innerHTML = `<em>${escapeHtmlGlobal(eventData.message)}</em>`;
+    }
+
+    // Handle task completion events
+    if (eventData.type === 'task_complete') {
+        stopAgentPolling();
+        if (loadingDiv && loadingDiv.parentNode) {
+            loadingDiv.remove();
+        }
+
+        const status = eventData.data?.status || 'completed';
+
+        if (status === 'completed') {
+            // Fetch full task result for display
+            fetchAndDisplayTaskResult();
+        } else if (status === 'error') {
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'agent-message error-message';
+            errorDiv.innerHTML = `<strong>Error:</strong> ${escapeHtmlGlobal(eventData.data?.error || 'Unknown error')}`;
+            messagesContainer.appendChild(errorDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        } else if (status === 'cancelled') {
+            const cancelDiv = document.createElement('div');
+            cancelDiv.className = 'agent-message system-message';
+            cancelDiv.innerHTML = '<em>タスクがキャンセルされました / Task was cancelled</em>';
+            messagesContainer.appendChild(cancelDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        clearCurrentTask();
+        agentIsLoading = false;
+    }
+}
+
+/**
+ * Fetch and display the final task result
+ */
+async function fetchAndDisplayTaskResult() {
+    try {
+        const response = await fetch(`/api/agent/tasks/${currentAgentTaskId}`);
+        if (response.ok) {
+            const task = await response.json();
+            displayAgentTaskResult(task);
+        }
+    } catch (e) {
+        console.error('Failed to fetch task result:', e);
+    }
+}
+
+/**
+ * Fallback polling when SSE is not available
+ */
+function startAgentPollingFallback(loadingDiv) {
+    agentPollingInterval = setInterval(async () => {
+        try {
+            const response = await fetch(`/api/agent/tasks/${currentAgentTaskId}`);
+            if (!response.ok) {
+                throw new Error('Failed to get task status');
+            }
+
+            const task = await response.json();
+
+            // Update loading indicator
+            if (loadingDiv && loadingDiv.parentNode) {
+                if (task.status === 'running') {
+                    const statusHeader = loadingDiv.querySelector('.agent-status-header');
+                    if (statusHeader) {
+                        statusHeader.innerHTML = '<em>実行中... / Running... (バックグラウンドで実行中)</em>';
+                    }
+                }
+            }
+
+            if (task.status === 'completed') {
+                stopAgentPolling();
+                if (loadingDiv && loadingDiv.parentNode) {
+                    loadingDiv.remove();
+                }
+                displayAgentTaskResult(task);
+                clearCurrentTask();
+                agentIsLoading = false;
+            } else if (task.status === 'error') {
+                stopAgentPolling();
+                if (loadingDiv && loadingDiv.parentNode) {
+                    loadingDiv.remove();
+                }
+                const messagesContainer = document.getElementById('agent-messages');
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'agent-message error-message';
+                errorDiv.innerHTML = `<strong>Error:</strong> ${escapeHtmlGlobal(task.error_message || 'Unknown error')}`;
+                messagesContainer.appendChild(errorDiv);
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                clearCurrentTask();
+                agentIsLoading = false;
+            } else if (task.status === 'cancelled') {
+                stopAgentPolling();
+                if (loadingDiv && loadingDiv.parentNode) {
+                    loadingDiv.remove();
+                }
+                const messagesContainer = document.getElementById('agent-messages');
+                const cancelDiv = document.createElement('div');
+                cancelDiv.className = 'agent-message system-message';
+                cancelDiv.innerHTML = '<em>タスクがキャンセルされました / Task was cancelled</em>';
+                messagesContainer.appendChild(cancelDiv);
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                clearCurrentTask();
+                agentIsLoading = false;
+            }
+        } catch (error) {
+            console.error('Polling error:', error);
+            // Don't stop polling on error - might be temporary
+        }
+    }, AGENT_POLL_INTERVAL);
+}
+
+/**
+ * Stop agent task polling and SSE streaming
+ */
+function stopAgentPolling() {
+    // Stop SSE connection
+    if (agentEventSource) {
+        agentEventSource.close();
+        agentEventSource = null;
+    }
+    // Stop polling fallback
+    if (agentPollingInterval) {
+        clearInterval(agentPollingInterval);
+        agentPollingInterval = null;
+    }
+}
+
+/**
+ * Format elapsed time for display (e.g., "1m 23s" or "45s")
+ */
+function formatElapsedTime(startedAt, finishedAt) {
+    if (!startedAt || !finishedAt) return null;
+
+    try {
+        const start = new Date(startedAt);
+        const end = new Date(finishedAt);
+        const elapsedMs = end - start;
+
+        if (elapsedMs < 0) return null;
+
+        const totalSeconds = Math.floor(elapsedMs / 1000);
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+
+        if (minutes > 0) {
+            return `${minutes}m ${seconds}s`;
+        } else {
+            return `${seconds}s`;
+        }
+    } catch (e) {
+        console.error('Error calculating elapsed time:', e);
+        return null;
+    }
+}
+
+/**
+ * Display agent task result
+ */
+function displayAgentTaskResult(task) {
+    const messagesContainer = document.getElementById('agent-messages');
+
+    // Check if session is terminated
+    if (task.session_terminated) {
+        currentSessionTerminated = true;
+        disableAgentInput('セッションは終了されました。新規チャットを開始してください。');
+    }
+
+    // Calculate elapsed time
+    const elapsedTime = formatElapsedTime(task.started_at, task.finished_at);
+    const elapsedTimeHtml = elapsedTime
+        ? `<span class="agent-elapsed-time" style="font-size: 0.75em; color: #888; margin-left: 8px;">(${elapsedTime})</span>`
+        : '';
+
+    // Show assistant response
+    const assistantMsgDiv = document.createElement('div');
+    assistantMsgDiv.className = 'agent-message assistant-message';
+    if (task.session_terminated) {
+        assistantMsgDiv.className += ' terminated-message';  // Add visual indicator
+    }
+
+    // Format the response with markdown-like formatting and hyperlinks
+    let formattedResponse = formatAgentMessage(task.assistant_response || '');
+
+    // Store raw content for copy
+    assistantMsgDiv.dataset.rawContent = task.assistant_response || '';
+
+    // Add copy button SVG
+    const copyBtnSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+
+    assistantMsgDiv.innerHTML = `
+        <button class="agent-msg-copy-btn" onclick="copyAgentMessage(this)" title="コピー / Copy">${copyBtnSvg}</button>
+        <strong>Agent:</strong>${elapsedTimeHtml}<br>${formattedResponse}
+    `;
+    messagesContainer.appendChild(assistantMsgDiv);
+
+    // Add to session history
+    addToAgentSessionHistory('assistant', task.assistant_response || '');
+
+    // Show tool calls if any and save them to history
+    if (task.tool_calls && task.tool_calls.length > 0) {
+        for (const tc of task.tool_calls) {
+            const toolDiv = document.createElement('div');
+            toolDiv.className = 'agent-tool-call';
+
+            // Store raw content for copy
+            const toolContent = `Tool: ${tc.name}\nArguments: ${JSON.stringify(tc.arguments, null, 2)}${tc.result ? '\nResult: ' + JSON.stringify(tc.result, null, 2) : ''}`;
+            toolDiv.dataset.rawContent = toolContent;
+
+            toolDiv.innerHTML = `
+                <button class="agent-tool-copy-btn" onclick="copyAgentToolCall(this)" title="コピー / Copy">${copyBtnSvg}</button>
+                <details>
+                    <summary>Tool: ${escapeHtmlGlobal(tc.name)}</summary>
+                    <pre>${escapeHtmlGlobal(JSON.stringify(tc.arguments, null, 2))}</pre>
+                    ${tc.result ? `<pre class="tool-result">${escapeHtmlGlobal(JSON.stringify(tc.result, null, 2))}</pre>` : ''}
+                </details>
+            `;
+            messagesContainer.appendChild(toolDiv);
+        }
+
+        // Save tool calls to history (use 'tool_info' to avoid conflict with OpenAI API 'tool' role)
+        addToAgentSessionHistory('tool_info', JSON.stringify(task.tool_calls));
+    }
+
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+}
+
+/**
+ * Disable agent input when session is terminated
+ */
+function disableAgentInput(message) {
+    const input = document.getElementById('agent-input');
+    const sendBtn = document.querySelector('.agent-send-btn');
+
+    if (input) {
+        input.disabled = true;
+        input.placeholder = message;
+    }
+    if (sendBtn) {
+        sendBtn.disabled = true;
+        sendBtn.style.opacity = '0.5';
+    }
+}
+
+/**
+ * Enable agent input (when starting new session)
+ */
+function enableAgentInput() {
+    const input = document.getElementById('agent-input');
+    const sendBtn = document.querySelector('.agent-send-btn');
+
+    if (input) {
+        input.disabled = false;
+        input.placeholder = 'エージェントにメッセージを送信... / Send message to agent...';
+    }
+    if (sendBtn) {
+        sendBtn.disabled = false;
+        sendBtn.style.opacity = '1';
+    }
+}
+
+/**
+ * Cancel current agent task
+ */
+async function cancelAgentTask() {
+    if (!currentAgentTaskId) return;
+
+    try {
+        const response = await fetch(`/api/agent/tasks/${currentAgentTaskId}/cancel`, {
+            method: 'POST'
+        });
+
+        if (response.ok) {
+            stopAgentPolling();
+            const loadingDiv = document.getElementById('agent-loading-indicator');
+            if (loadingDiv) {
+                loadingDiv.remove();
+            }
+
+            const messagesContainer = document.getElementById('agent-messages');
+            const cancelDiv = document.createElement('div');
+            cancelDiv.className = 'agent-message system-message';
+            cancelDiv.innerHTML = '<em>タスクのキャンセルをリクエストしました / Task cancellation requested</em>';
+            messagesContainer.appendChild(cancelDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+
+            clearCurrentTask();
+            agentIsLoading = false;
+        }
+    } catch (error) {
+        console.error('Failed to cancel task:', error);
+    }
+}
+
+/**
+ * Clear the agent chat history
+ */
+function clearAgentChat() {
+    // Stop any ongoing polling
+    stopAgentPolling();
+    clearCurrentTask();
+
+    const messagesContainer = document.getElementById('agent-messages');
+    messagesContainer.innerHTML = `
+        <div class="agent-message system-message">
+            <em>AIエージェントへようこそ。プロジェクト、プロンプト、ワークフローの操作をお手伝いします。</em><br>
+            <em>Welcome to the AI Agent. I can help you manage projects, prompts, and workflows.</em>
+        </div>
+    `;
+
+    // Reset state
+    currentAgentTaskId = null;
+    agentIsLoading = false;
+    currentSessionTerminated = false;  // Reset terminated flag
+
+    // Re-enable input (in case it was disabled)
+    enableAgentInput();
+
+    // Delete session if exists (both in-memory and from database history)
+    if (currentAgentSessionId) {
+        const sessionIdToDelete = currentAgentSessionId;
+
+        // Delete from in-memory sessions
+        fetch(`/api/agent/sessions/${sessionIdToDelete}`, { method: 'DELETE' })
+            .catch(err => console.error('Failed to delete in-memory session:', err));
+
+        // Delete from database history (this removes the session from the history list)
+        fetch(`/api/agent/history/${sessionIdToDelete}`, { method: 'DELETE' })
+            .catch(err => console.error('Failed to delete session from history:', err));
+
+        // Remove from local agentSessions array
+        agentSessions = agentSessions.filter(s => s.id !== sessionIdToDelete);
+
+        // Re-render history list
+        renderAgentSessionHistory();
+
+        currentAgentSessionId = null;
+    }
+}
+
+/**
+ * Load and display available agent tools
+ */
+async function loadAgentTools() {
+    const toolsList = document.getElementById('agent-tools-list');
+    if (!toolsList) return;
+
+    toolsList.innerHTML = '<p style="padding: 2rem; color: #64748b; text-align: center;"><em>読み込み中... / Loading...</em></p>';
+
+    try {
+        const response = await fetch('/api/agent/tools');
+        if (!response.ok) throw new Error('Failed to load tools');
+
+        const data = await response.json();
+
+        if (data.tools && data.tools.length > 0) {
+            toolsList.innerHTML = `
+                <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.75rem;">
+                    ${data.tools.map(tool => `
+                        <div class="agent-tool-item" style="padding: 0.875rem; background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); border: 1px solid #e2e8f0; border-radius: 10px; cursor: default; transition: all 0.15s ease;"
+                             onmouseover="this.style.borderColor='#3b82f6'; this.style.boxShadow='0 2px 8px rgba(59,130,246,0.15)';"
+                             onmouseout="this.style.borderColor='#e2e8f0'; this.style.boxShadow='none';">
+                            <div style="font-weight: 600; color: #1e293b; font-size: 0.9rem; margin-bottom: 0.375rem;">${escapeHtmlGlobal(tool.name)}</div>
+                            <div style="font-size: 0.8rem; color: #64748b; line-height: 1.4;">${escapeHtmlGlobal(tool.description)}</div>
+                        </div>
+                    `).join('')}
+                </div>
+                <p style="margin-top: 1rem; padding: 0.75rem; background: #eff6ff; border-radius: 8px; color: #3b82f6; font-size: 0.85rem; text-align: center;">
+                    ${data.count} 件のツールが利用可能です / ${data.count} tools available
+                </p>
+            `;
+        } else {
+            toolsList.innerHTML = '<p style="padding: 2rem; color: #64748b; text-align: center;"><em>ツールがありません / No tools available</em></p>';
+        }
+    } catch (error) {
+        toolsList.innerHTML = `<p style="padding: 2rem; color: #ef4444; text-align: center;"><em>エラー: ${escapeHtmlGlobal(error.message)}</em></p>`;
+    }
+}
+
+/**
+ * Show the agent tools modal
+ */
+function showAgentToolsModal() {
+    const overlay = document.getElementById('agent-tools-overlay');
+    if (overlay) {
+        overlay.classList.add('show');
+        // Load tools if not already loaded
+        loadAgentTools();
+    }
+}
+
+/**
+ * Hide the agent tools modal
+ */
+function hideAgentToolsModal() {
+    const overlay = document.getElementById('agent-tools-overlay');
+    if (overlay) {
+        overlay.classList.remove('show');
+    }
+}
+
+// Close modal when clicking overlay
+document.addEventListener('DOMContentLoaded', function() {
+    const overlay = document.getElementById('agent-tools-overlay');
+    if (overlay) {
+        overlay.addEventListener('click', function(e) {
+            if (e.target === overlay) {
+                hideAgentToolsModal();
+            }
+        });
+    }
+});
+
+/**
+ * Handle Enter key in agent input
+ */
+function handleAgentInputKeydown(event) {
+    if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        sendAgentMessage();
+    }
+}
+
+/**
+ * Initialize agent tab
+ */
+function initAgentTab() {
+    // Load tools when tab is first opened
+    loadAgentTools();
+
+    // Load available models from settings
+    loadAgentModels();
+
+    // Load default iterations from settings
+    loadAgentIterations();
+
+    // Load session history
+    loadAgentSessionHistory();
+
+    // Check for pending tasks from previous session
+    checkPendingAgentTasks();
+
+    // Set up Enter key handler
+    const input = document.getElementById('agent-input');
+    if (input) {
+        input.addEventListener('keydown', handleAgentInputKeydown);
+    }
+}
+
+/**
+ * Load available models for agent from system settings
+ */
+async function loadAgentModels() {
+    const modelSelect = document.getElementById('agent-model-select');
+    if (!modelSelect) return;
+
+    try {
+        // Fetch available models and default model in parallel
+        const [modelsResponse, defaultResponse] = await Promise.all([
+            fetch('/api/settings/models/available'),
+            fetch('/api/settings/models/default')
+        ]);
+
+        if (!modelsResponse.ok) throw new Error('Failed to load models');
+
+        const models = await modelsResponse.json();
+        let defaultModel = '';
+
+        if (defaultResponse.ok) {
+            const defaultData = await defaultResponse.json();
+            defaultModel = defaultData.default_model || '';
+        }
+
+        // Clear existing options
+        modelSelect.innerHTML = '';
+
+        // Add model options
+        models.forEach(model => {
+            const option = document.createElement('option');
+            option.value = model.name;
+            option.textContent = model.display_name || model.name;
+            if (model.name === defaultModel) {
+                option.selected = true;
+            }
+            modelSelect.appendChild(option);
+        });
+
+        // If no models loaded, add a fallback
+        if (models.length === 0) {
+            modelSelect.innerHTML = '<option value="azure-gpt-4.1">Azure GPT-4.1</option>';
+        }
+    } catch (error) {
+        console.error('Error loading agent models:', error);
+        // Keep existing options as fallback
+    }
+}
+
+/**
+ * Load default iterations for agent from system settings
+ */
+async function loadAgentIterations() {
+    const iterationsSelect = document.getElementById('agent-iterations-select');
+    if (!iterationsSelect) return;
+
+    try {
+        const response = await fetch('/api/settings/agent-max-iterations');
+        if (response.ok) {
+            const data = await response.json();
+            const defaultIterations = data.max_iterations || 30;
+            // Select the matching option or closest available
+            const options = iterationsSelect.options;
+            let found = false;
+            for (let i = 0; i < options.length; i++) {
+                if (parseInt(options[i].value, 10) === defaultIterations) {
+                    iterationsSelect.selectedIndex = i;
+                    found = true;
+                    break;
+                }
+            }
+            // If exact value not found, default to 30
+            if (!found) {
+                for (let i = 0; i < options.length; i++) {
+                    if (options[i].value === '30') {
+                        iterationsSelect.selectedIndex = i;
+                        break;
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Error loading agent iterations:', error);
+        // Default to 30 iterations
+    }
+}
+
+// Store agent session history (loaded from SQLite via API)
+let agentSessions = [];
+
+/**
+ * Load agent session history from SQLite via API
+ */
+async function loadAgentSessionHistory() {
+    try {
+        const response = await fetch('/api/agent/history?limit=50');
+        if (response.ok) {
+            const data = await response.json();
+            // Convert API format to local format
+            agentSessions = data.sessions.map(s => ({
+                id: s.id,
+                timestamp: s.updated_at,
+                firstMessage: s.title,
+                title: s.title,
+                messages: []  // Messages loaded on demand
+            }));
+        }
+    } catch (e) {
+        console.error('Error loading session history from API:', e);
+        agentSessions = [];
+    }
+    renderAgentSessionHistory();
+}
+
+/**
+ * Save agent session history (no-op, saved via API on each message)
+ * @deprecated Use saveMessageToHistory instead
+ */
+function saveAgentSessionHistory() {
+    // History is now saved via API on each message
+    // This function is kept for backward compatibility
+}
+
+/**
+ * Render agent session history in the sidebar
+ * @param {string} filterText - Optional filter text to search sessions
+ */
+function renderAgentSessionHistory(filterText = '') {
+    const historyList = document.getElementById('agent-history-list');
+    if (!historyList) return;
+
+    if (agentSessions.length === 0) {
+        historyList.innerHTML = '<p style="padding: 1rem; color: #64748b; font-size: 0.85rem;">履歴がありません / No history</p>';
+        return;
+    }
+
+    // Sort by timestamp descending (newest first)
+    let sortedSessions = [...agentSessions].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+    // Apply filter if provided
+    if (filterText.trim()) {
+        const searchLower = filterText.toLowerCase();
+        sortedSessions = sortedSessions.filter(session => {
+            const title = (session.title || '').toLowerCase();
+            const firstMessage = (session.firstMessage || '').toLowerCase();
+            return title.includes(searchLower) || firstMessage.includes(searchLower);
+        });
+    }
+
+    if (sortedSessions.length === 0) {
+        historyList.innerHTML = '<p style="padding: 1rem; color: #64748b; font-size: 0.85rem;">検索結果なし / No results</p>';
+        return;
+    }
+
+    historyList.innerHTML = sortedSessions.map(session => `
+        <div class="agent-history-item ${session.id === currentAgentSessionId ? 'active' : ''}"
+             title="${escapeHtmlGlobal(session.firstMessage || 'New session')}"
+             style="position: relative;">
+            <div onclick="loadAgentSession('${session.id}')" style="cursor: pointer; padding-right: 20px;">
+                <div class="agent-history-title">${escapeHtmlGlobal(session.title || session.firstMessage?.substring(0, 30) || 'New session')}</div>
+                <div class="agent-history-time">${formatRelativeTime(session.timestamp)}</div>
+            </div>
+            <button class="agent-history-delete-btn"
+                    onclick="event.stopPropagation(); deleteAgentSession('${session.id}')"
+                    title="この履歴を削除">×</button>
+        </div>
+    `).join('');
+}
+
+/**
+ * Filter agent session history based on search input
+ */
+function filterAgentSessionHistory() {
+    const searchInput = document.getElementById('agent-history-search');
+    const filterText = searchInput ? searchInput.value : '';
+    renderAgentSessionHistory(filterText);
+}
+
+/**
+ * Delete a single agent session from history (via API)
+ */
+async function deleteAgentSession(sessionId) {
+    if (!confirm('この履歴を削除しますか？')) return;
+
+    try {
+        // Delete from SQLite via API
+        const response = await fetch(`/api/agent/history/${sessionId}`, { method: 'DELETE' });
+        if (!response.ok) {
+            console.error('Failed to delete session:', await response.text());
+        }
+    } catch (err) {
+        console.error('Failed to delete session from backend:', err);
+    }
+
+    // Remove from local array
+    agentSessions = agentSessions.filter(s => s.id !== sessionId);
+
+    // If deleting current session, clear the chat
+    if (sessionId === currentAgentSessionId) {
+        currentAgentSessionId = null;
+        clearAgentChat();
+    }
+
+    // Re-render history
+    renderAgentSessionHistory();
+}
+
+/**
+ * Clear all agent session history (via API)
+ */
+async function clearAllAgentHistory() {
+    if (agentSessions.length === 0) {
+        alert('履歴がありません。');
+        return;
+    }
+
+    if (!confirm('すべての履歴を削除しますか？この操作は取り消せません。')) return;
+
+    try {
+        // Delete all sessions from SQLite via API
+        const response = await fetch('/api/agent/history', { method: 'DELETE' });
+        if (!response.ok) {
+            console.error('Failed to delete all sessions:', await response.text());
+        }
+    } catch (err) {
+        console.error('Failed to delete all sessions:', err);
+    }
+
+    // Clear local array
+    agentSessions = [];
+
+    // Clear current chat
+    currentAgentSessionId = null;
+    clearAgentChat();
+
+    // Re-render history
+    renderAgentSessionHistory();
+}
+
+/**
+ * Format relative time (e.g., "5分前", "1時間前")
+ * Handles both UTC timestamps with 'Z' suffix and legacy timestamps without timezone
+ */
+function formatRelativeTime(timestamp) {
+    const now = new Date();
+
+    // If timestamp doesn't have timezone info, assume it's UTC and append 'Z'
+    let normalizedTimestamp = timestamp;
+    if (timestamp && !timestamp.endsWith('Z') && !timestamp.includes('+') && !timestamp.includes('-', 10)) {
+        normalizedTimestamp = timestamp + 'Z';
+    }
+
+    const then = new Date(normalizedTimestamp);
+    const diffMs = now - then;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 1) return 'たった今';
+    if (diffMins < 60) return `${diffMins}分前`;
+    if (diffHours < 24) return `${diffHours}時間前`;
+    if (diffDays < 7) return `${diffDays}日前`;
+    return then.toLocaleDateString('ja-JP');
+}
+
+/**
+ * Start a new agent session
+ */
+function startNewAgentSession() {
+    currentAgentSessionId = null;
+    updateAgentSessionDisplay();
+    clearAgentChat();
+    renderAgentSessionHistory();
+}
+
+/**
+ * Load a previous agent session (from API)
+ */
+async function loadAgentSession(sessionId) {
+    currentAgentSessionId = sessionId;
+    updateAgentSessionDisplay();
+
+    // Copy button SVG
+    const copyBtnSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+
+    try {
+        // Fetch session with messages from API
+        const response = await fetch(`/api/agent/history/${sessionId}`);
+        if (!response.ok) {
+            console.error('Failed to load session:', await response.text());
+            return;
+        }
+
+        const sessionData = await response.json();
+
+        // Update local session with messages
+        const localSession = agentSessions.find(s => s.id === sessionId);
+        if (localSession) {
+            localSession.messages = sessionData.messages.map(m => ({
+                role: m.role,
+                content: m.content,
+                timestamp: m.created_at
+            }));
+        }
+
+        // Restore messages to chat
+        const messagesContainer = document.getElementById('agent-messages');
+        if (messagesContainer && sessionData.messages.length > 0) {
+            messagesContainer.innerHTML = sessionData.messages.map(msg => {
+                if (msg.role === 'user') {
+                    // Format user message with newlines preserved
+                    const formattedContent = escapeHtmlGlobal(msg.content).replace(/\n/g, '<br>');
+                    const escapedRaw = escapeHtmlGlobal(msg.content).replace(/"/g, '&quot;');
+                    return `<div class="agent-message user-message" data-raw-content="${escapedRaw}">
+                        <button class="agent-msg-copy-btn" onclick="copyAgentMessage(this)" title="コピー / Copy">${copyBtnSvg}</button>
+                        <strong>You:</strong> ${formattedContent}
+                    </div>`;
+                } else if (msg.role === 'tool_info') {
+                    // Restore tool calls (using 'tool_info' to avoid conflict with OpenAI API 'tool' role)
+                    try {
+                        const toolCalls = JSON.parse(msg.content);
+                        return toolCalls.map(tc => {
+                            const toolContent = `Tool: ${tc.name}\nArguments: ${JSON.stringify(tc.arguments, null, 2)}${tc.result ? '\nResult: ' + JSON.stringify(tc.result, null, 2) : ''}`;
+                            const escapedRaw = escapeHtmlGlobal(toolContent).replace(/"/g, '&quot;');
+                            return `<div class="agent-tool-call" data-raw-content="${escapedRaw}">
+                                <button class="agent-tool-copy-btn" onclick="copyAgentToolCall(this)" title="コピー / Copy">${copyBtnSvg}</button>
+                                <details>
+                                    <summary>Tool: ${escapeHtmlGlobal(tc.name)}</summary>
+                                    <pre>${escapeHtmlGlobal(JSON.stringify(tc.arguments, null, 2))}</pre>
+                                    ${tc.result ? `<pre class="tool-result">${escapeHtmlGlobal(JSON.stringify(tc.result, null, 2))}</pre>` : ''}
+                                </details>
+                            </div>`;
+                        }).join('');
+                    } catch (e) {
+                        console.error('Failed to parse tool calls:', e);
+                        return '';
+                    }
+                } else {
+                    // Format assistant message with hyperlinks
+                    const formattedContent = formatAgentMessage(msg.content);
+                    const escapedRaw = escapeHtmlGlobal(msg.content).replace(/"/g, '&quot;');
+                    return `<div class="agent-message assistant-message" data-raw-content="${escapedRaw}">
+                        <button class="agent-msg-copy-btn" onclick="copyAgentMessage(this)" title="コピー / Copy">${copyBtnSvg}</button>
+                        <strong>Agent:</strong><br>${formattedContent}
+                    </div>`;
+                }
+            }).join('');
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+    } catch (err) {
+        console.error('Error loading session:', err);
+    }
+
+    renderAgentSessionHistory();
+}
+
+/**
+ * Add message to current session history (saves to SQLite via API)
+ */
+async function addToAgentSessionHistory(role, content) {
+    if (!currentAgentSessionId) {
+        // Create new session ID
+        currentAgentSessionId = `session_${Date.now()}`;
+    }
+
+    // Save message to SQLite via API
+    try {
+        const response = await fetch(`/api/agent/history/${currentAgentSessionId}/messages`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ role, content })
+        });
+
+        if (!response.ok) {
+            console.error('Failed to save message:', await response.text());
+        }
+    } catch (err) {
+        console.error('Error saving message to history:', err);
+    }
+
+    // Update local array for immediate UI update
+    let session = agentSessions.find(s => s.id === currentAgentSessionId);
+    if (!session) {
+        session = {
+            id: currentAgentSessionId,
+            timestamp: new Date().toISOString(),
+            firstMessage: content.substring(0, 100),
+            title: content.substring(0, 30) + (content.length > 30 ? '...' : ''),
+            messages: []
+        };
+        agentSessions.unshift(session);  // Add at beginning (newest first)
+    }
+
+    session.messages.push({ role, content, timestamp: new Date().toISOString() });
+    session.timestamp = new Date().toISOString();
+
+    renderAgentSessionHistory();
+}
+
+/**
+ * Copy individual agent message to clipboard
+ */
+function copyAgentMessage(btn) {
+    const messageDiv = btn.closest('.agent-message');
+    if (!messageDiv) return;
+
+    const rawContent = messageDiv.dataset.rawContent || messageDiv.innerText;
+
+    navigator.clipboard.writeText(rawContent).then(() => {
+        btn.classList.add('copied');
+        setTimeout(() => btn.classList.remove('copied'), 1500);
+    }).catch(err => {
+        console.error('Failed to copy:', err);
+    });
+}
+
+/**
+ * Copy tool call to clipboard
+ */
+function copyAgentToolCall(btn) {
+    const toolDiv = btn.closest('.agent-tool-call');
+    if (!toolDiv) return;
+
+    const rawContent = toolDiv.dataset.rawContent || toolDiv.innerText;
+
+    navigator.clipboard.writeText(rawContent).then(() => {
+        btn.classList.add('copied');
+        setTimeout(() => btn.classList.remove('copied'), 1500);
+    }).catch(err => {
+        console.error('Failed to copy:', err);
+    });
+}
+
+/**
+ * Copy response box content to clipboard (sent prompt / raw response)
+ */
+function copyResponseBox(btn) {
+    // Get raw content from data attribute (unescaped)
+    let rawContent = btn.dataset.rawContent || '';
+
+    // Unescape HTML entities for clipboard
+    const textarea = document.createElement('textarea');
+    textarea.innerHTML = rawContent;
+    rawContent = textarea.value;
+
+    navigator.clipboard.writeText(rawContent).then(() => {
+        btn.classList.add('copied');
+        setTimeout(() => btn.classList.remove('copied'), 1500);
+    }).catch(err => {
+        console.error('Failed to copy:', err);
+    });
+}
+
+/**
+ * Copy prompt template to clipboard
+ */
+function copyPromptTemplate() {
+    const templateEl = document.getElementById('prompt-template');
+    if (!templateEl) return;
+
+    const content = templateEl.textContent || '';
+
+    navigator.clipboard.writeText(content).then(() => {
+        const btn = templateEl.parentElement.querySelector('.response-box-copy-btn');
+        if (btn) {
+            btn.classList.add('copied');
+            setTimeout(() => btn.classList.remove('copied'), 1500);
+        }
+    }).catch(err => {
+        console.error('Failed to copy:', err);
+    });
+}
+
+/**
+ * Copy editor content to clipboard (prompt editor, parser config)
+ */
+function copyEditorContent(textareaId) {
+    const textarea = document.getElementById(textareaId);
+    if (!textarea) return;
+
+    navigator.clipboard.writeText(textarea.value).then(() => {
+        // Find the copy button in the same container
+        const container = textarea.closest('.response-box-container');
+        const btn = container?.querySelector('.response-box-copy-btn');
+        if (btn) {
+            btn.classList.add('copied');
+            setTimeout(() => btn.classList.remove('copied'), 1500);
+        }
+    }).catch(err => {
+        console.error('Failed to copy:', err);
+    });
+}
+
+/**
+ * Copy workflow step content to clipboard
+ */
+function copyWorkflowStepContent(btn) {
+    // Get raw content from data attribute
+    let rawContent = btn.dataset.rawContent || '';
+
+    // Unescape HTML entities
+    const textarea = document.createElement('textarea');
+    textarea.innerHTML = rawContent;
+    rawContent = textarea.value;
+
+    navigator.clipboard.writeText(rawContent).then(() => {
+        btn.classList.add('copied');
+        setTimeout(() => btn.classList.remove('copied'), 1500);
+    }).catch(err => {
+        console.error('Failed to copy:', err);
+    });
+}
+
+/**
+ * Copy entire agent conversation to clipboard
+ */
+function copyAgentConversation() {
+    const messagesContainer = document.getElementById('agent-messages');
+    if (!messagesContainer) return;
+
+    const messages = [];
+    const elements = messagesContainer.querySelectorAll('.agent-message, .agent-tool-call');
+
+    elements.forEach(el => {
+        if (el.classList.contains('agent-welcome')) return;
+
+        if (el.classList.contains('user-message')) {
+            const content = el.dataset.rawContent || el.innerText.replace(/^You:\s*/, '');
+            messages.push(`You: ${content}`);
+        } else if (el.classList.contains('assistant-message')) {
+            const content = el.dataset.rawContent || el.innerText.replace(/^Agent:\s*/, '');
+            messages.push(`Agent: ${content}`);
+        } else if (el.classList.contains('agent-tool-call')) {
+            const content = el.dataset.rawContent || el.innerText;
+            messages.push(`[${content}]`);
+        }
+    });
+
+    const fullConversation = messages.join('\n\n---\n\n');
+
+    const btn = document.getElementById('btn-agent-copy-all');
+    navigator.clipboard.writeText(fullConversation).then(() => {
+        if (btn) {
+            btn.classList.add('copied');
+            setTimeout(() => btn.classList.remove('copied'), 1500);
+        }
+    }).catch(err => {
+        console.error('Failed to copy conversation:', err);
+    });
+}
+
+/* ===================================
+   UTILITY FUNCTIONS (Scroll to Top/Bottom)
+   =================================== */
+
+/**
+ * Scroll to the top of the right-pane within the specified tab
+ * @param {string} tabId - The ID of the tab container
+ */
+function scrollToTop(tabId) {
+    const tab = document.getElementById(tabId);
+    if (tab) {
+        // Find the right-pane within the tab and scroll it
+        const rightPane = tab.querySelector('.right-pane');
+        if (rightPane) {
+            rightPane.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+    }
+}
+
+/**
+ * Scroll to the bottom of the right-pane within the specified tab
+ * @param {string} tabId - The ID of the tab container
+ */
+function scrollToBottom(tabId) {
+    const tab = document.getElementById(tabId);
+    if (tab) {
+        // Find the right-pane within the tab and scroll it
+        const rightPane = tab.querySelector('.right-pane');
+        if (rightPane) {
+            rightPane.scrollTo({ top: rightPane.scrollHeight, behavior: 'smooth' });
+        }
+    }
+}
+
+/* ===================================
+   FUNCTION REFERENCE MODAL
+   =================================== */
+
+// Cache for loaded functions from API
+let functionReferenceData = null;
+
+/**
+ * Show the function reference modal
+ */
+async function showFunctionReference() {
+    const overlay = document.getElementById('function-reference-overlay');
+    if (!overlay) {
+        console.error('[FunctionReference] Overlay element not found');
+        return;
+    }
+
+    overlay.classList.add('active');
+
+    // Load functions if not cached
+    if (!functionReferenceData) {
+        await loadFunctionReference();
+    } else {
+        renderFunctionReference(functionReferenceData);
+    }
+
+    // Focus on search input
+    const searchInput = document.getElementById('function-reference-search');
+    if (searchInput) {
+        searchInput.value = '';
+        searchInput.focus();
+    }
+}
+
+/**
+ * Close the function reference modal
+ */
+function closeFunctionReference() {
+    const overlay = document.getElementById('function-reference-overlay');
+    if (overlay) {
+        overlay.classList.remove('active');
+    }
+}
+
+/**
+ * Load function reference data from API
+ */
+async function loadFunctionReference() {
+    const content = document.getElementById('function-reference-content');
+    const countEl = document.getElementById('function-reference-count');
+
+    if (content) {
+        content.innerHTML = '<div style="text-align: center; padding: 2rem; color: #888;">読み込み中... / Loading...</div>';
+    }
+
+    try {
+        const resp = await fetch('/api/workflows/functions');
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+
+        functionReferenceData = await resp.json();
+        renderFunctionReference(functionReferenceData);
+
+        // Update WORKFLOW_FUNCTIONS from API data
+        updateWorkflowFunctionsFromAPI(functionReferenceData);
+
+    } catch (error) {
+        console.error('[FunctionReference] Failed to load functions:', error);
+        if (content) {
+            content.innerHTML = `<div style="text-align: center; padding: 2rem; color: #e74c3c;">エラー: ${error.message}</div>`;
+        }
+    }
+}
+
+/**
+ * Update the global WORKFLOW_FUNCTIONS array from API data
+ */
+function updateWorkflowFunctionsFromAPI(data) {
+    if (!data || !data.categories) return;
+
+    // Clear and rebuild WORKFLOW_FUNCTIONS
+    WORKFLOW_FUNCTIONS.length = 0;
+
+    for (const categoryName in data.categories) {
+        const categoryData = data.categories[categoryName];
+        const funcs = categoryData.functions || [];
+        for (const fn of funcs) {
+            WORKFLOW_FUNCTIONS.push({
+                name: fn.name,
+                example: fn.example || `${fn.name}({{v}})`,
+                desc: fn.desc || ''
+            });
+        }
+    }
+
+    console.log(`[FunctionReference] Updated WORKFLOW_FUNCTIONS with ${WORKFLOW_FUNCTIONS.length} functions`);
+}
+
+/**
+ * Render function reference content
+ */
+function renderFunctionReference(data, searchQuery = '') {
+    const content = document.getElementById('function-reference-content');
+    const countEl = document.getElementById('function-reference-count');
+
+    if (!content || !data || !data.categories) {
+        return;
+    }
+
+    const query = searchQuery.toLowerCase().trim();
+    let html = '';
+    let totalCount = 0;
+    let visibleCount = 0;
+
+    // Category display names with icons
+    const categoryNames = {
+        'text': '📝 文字列操作 / Text Operations',
+        'search': '🔍 検索・判定 / Search & Check',
+        'math': '🔢 計算 / Math',
+        'json': '📋 JSON処理 / JSON',
+        'dataset': '📊 データセット / Dataset',
+        'datetime': '📅 日時 / Date & Time',
+        'array': '📦 配列 / Array',
+        'utility': '🔧 ユーティリティ / Utility'
+    };
+
+    for (const categoryKey in data.categories) {
+        const categoryData = data.categories[categoryKey];
+        const funcs = categoryData.functions || [];
+        totalCount += funcs.length;
+
+        // Filter functions by query
+        const filteredFuncs = funcs.filter(fn => {
+            if (!query) return true;
+            return fn.name.toLowerCase().includes(query) ||
+                   (fn.desc && fn.desc.toLowerCase().includes(query)) ||
+                   (fn.example && fn.example.toLowerCase().includes(query));
+        });
+
+        if (filteredFuncs.length === 0) continue;
+        visibleCount += filteredFuncs.length;
+
+        const categoryLabel = categoryNames[categoryKey] || categoryKey;
+        const isExpanded = !query; // Expand all when not searching
+
+        html += `
+            <div class="function-category" data-category="${escapeHtmlGlobal(categoryKey)}">
+                <div class="function-category-header" onclick="toggleFunctionCategory(this)">
+                    <span class="toggle-icon">${isExpanded ? '▼' : '▶'}</span>
+                    <span>${escapeHtmlGlobal(categoryLabel)}</span>
+                    <span style="margin-left: auto; font-size: 0.75rem; color: #9e9e9e;">(${filteredFuncs.length})</span>
+                </div>
+                <ul class="function-list" style="display: ${isExpanded ? 'block' : 'none'};">
+        `;
+
+        for (const fn of filteredFuncs) {
+            const example = fn.example || `${fn.name}()`;
+            const desc = fn.desc || '';
+            const usageList = fn.usage || [];
+
+            // Build usage examples HTML
+            let usageHtml = '';
+            if (usageList.length > 0) {
+                usageHtml = `
+                    <div class="fn-usage">
+                        <div class="fn-usage-label">利用例 / Examples:</div>
+                        <ul class="fn-usage-list">
+                            ${usageList.map(u => `<li><code>${escapeHtmlGlobal(u)}</code></li>`).join('')}
+                        </ul>
+                    </div>
+                `;
+            }
+
+            html += `
+                <li class="function-item" onclick="insertFunctionFromReference('${escapeForJsInHtml(example)}')">
+                    <div class="fn-header">
+                        <span class="fn-name">${escapeHtmlGlobal(fn.name)}</span>
+                        <span class="fn-args">${fn.args !== undefined ? `(${fn.args} args)` : ''}</span>
+                    </div>
+                    <div class="fn-example"><code>${escapeHtmlGlobal(example)}</code></div>
+                    <div class="fn-desc">${escapeHtmlGlobal(desc)}</div>
+                    ${usageHtml}
+                </li>
+            `;
+        }
+
+        html += `
+                </ul>
+            </div>
+        `;
+    }
+
+    if (!html) {
+        html = '<div style="text-align: center; padding: 2rem; color: #888;">該当する関数がありません / No matching functions</div>';
+    }
+
+    content.innerHTML = html;
+
+    if (countEl) {
+        if (query) {
+            countEl.textContent = `${visibleCount} / ${totalCount} 関数`;
+        } else {
+            countEl.textContent = `${totalCount} 関数`;
+        }
+    }
+}
+
+/**
+ * Toggle function category expansion
+ */
+function toggleFunctionCategory(headerEl) {
+    const list = headerEl.nextElementSibling;
+    const icon = headerEl.querySelector('.toggle-icon');
+
+    if (list.style.display === 'none') {
+        list.style.display = 'block';
+        if (icon) icon.textContent = '▼';
+    } else {
+        list.style.display = 'none';
+        if (icon) icon.textContent = '▶';
+    }
+}
+
+/**
+ * Filter function reference by search query
+ */
+function filterFunctionReference(query) {
+    if (functionReferenceData) {
+        renderFunctionReference(functionReferenceData, query);
+    }
+}
+
+/**
+ * Insert function from reference modal into current context
+ */
+function insertFunctionFromReference(example) {
+    // Close the function reference modal
+    closeFunctionReference();
+
+    // Check if variable picker is open
+    const variablePickerOverlay = document.getElementById('variable-picker-overlay');
+    if (variablePickerOverlay && variablePickerOverlay.classList.contains('active')) {
+        // Insert into variable picker context
+        insertVariable(example);
+    } else {
+        // Try to find an active textarea in the workflow editor
+        const activeTextarea = document.querySelector('.workflow-section textarea:focus, .step-config textarea:focus');
+        if (activeTextarea) {
+            const start = activeTextarea.selectionStart;
+            const end = activeTextarea.selectionEnd;
+            const text = activeTextarea.value;
+            activeTextarea.value = text.substring(0, start) + example + text.substring(end);
+            activeTextarea.selectionStart = activeTextarea.selectionEnd = start + example.length;
+            activeTextarea.focus();
+        } else {
+            // Copy to clipboard as fallback
+            navigator.clipboard.writeText(example).then(() => {
+                console.log('[FunctionReference] Copied to clipboard:', example);
+            });
+        }
+    }
+}
+
+/**
+ * Initialize function reference on page load
+ * Preload functions from API to update WORKFLOW_FUNCTIONS
+ */
+async function initFunctionReference() {
+    try {
+        const resp = await fetch('/api/workflows/functions');
+        if (resp.ok) {
+            functionReferenceData = await resp.json();
+            updateWorkflowFunctionsFromAPI(functionReferenceData);
+        }
+    } catch (error) {
+        console.warn('[FunctionReference] Failed to preload functions:', error);
+    }
+
+    // Add overlay click-to-close handler
+    const overlay = document.getElementById('function-reference-overlay');
+    const modal = document.getElementById('function-reference-modal');
+
+    if (overlay && modal) {
+        // Close modal when clicking overlay (outside modal)
+        overlay.addEventListener('click', function(e) {
+            if (e.target === overlay) {
+                closeFunctionReference();
+            }
+        });
+
+        // Prevent clicks inside modal from closing it
+        modal.addEventListener('click', function(e) {
+            e.stopPropagation();
+        });
+    }
+}
+
+// Auto-initialize function reference when DOM is ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initFunctionReference);
+} else {
+    initFunctionReference();
 }
