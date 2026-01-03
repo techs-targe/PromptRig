@@ -3,13 +3,16 @@
 Based on Azure OpenAI API specification.
 """
 
+import logging
 import os
 import time
 from typing import Optional, List
 from openai import AzureOpenAI, Timeout
 from dotenv import load_dotenv
 
-from .base import LLMClient, LLMResponse, Message
+logger = logging.getLogger(__name__)
+
+from .base import LLMClient, LLMResponse, Message, EnvVarConfig
 
 # Load environment variables
 load_dotenv()
@@ -19,31 +22,32 @@ class AzureGPT5NanoClient(LLMClient):
     """Azure OpenAI GPT-5-nano client.
 
     Configuration from environment variables:
-    - AZURE_OPENAI_ENDPOINT
-    - AZURE_OPENAI_API_KEY
-    - AZURE_OPENAI_GPT5_NANO_DEPLOYMENT_NAME (defaults to AZURE_OPENAI_DEPLOYMENT_NAME)
-    - AZURE_OPENAI_API_VERSION
+    - AZURE_GPT5_NANO_ENDPOINT or AZURE_OPENAI_ENDPOINT
+    - AZURE_GPT5_NANO_API_KEY or AZURE_OPENAI_API_KEY
+    - AZURE_GPT5_NANO_DEPLOYMENT_NAME or AZURE_OPENAI_DEPLOYMENT_NAME
+    - AZURE_GPT5_NANO_API_VERSION or AZURE_OPENAI_API_VERSION
     """
+
+    # Model identifier for auto-discovery
+    DISPLAY_NAME = "azure-gpt-5-nano"
+
+    # Environment variable configuration
+    ENV_VARS = [
+        EnvVarConfig("endpoint", "AZURE_GPT5_NANO_ENDPOINT", "AZURE_OPENAI_ENDPOINT"),
+        EnvVarConfig("api_key", "AZURE_GPT5_NANO_API_KEY", "AZURE_OPENAI_API_KEY"),
+        EnvVarConfig("deployment", "AZURE_GPT5_NANO_DEPLOYMENT_NAME", "AZURE_OPENAI_DEPLOYMENT_NAME"),
+        EnvVarConfig("api_version", "AZURE_GPT5_NANO_API_VERSION", "AZURE_OPENAI_API_VERSION",
+                     required=False, default="2025-01-01-preview"),
+    ]
 
     def __init__(self):
         """Initialize Azure OpenAI GPT-5-nano client with environment configuration."""
-        self.endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-        self.api_key = os.getenv("AZURE_OPENAI_API_KEY")
-        # Use GPT-5-nano specific deployment name, or fall back to default
-        self.deployment_name = os.getenv(
-            "AZURE_OPENAI_GPT5_NANO_DEPLOYMENT_NAME",
-            os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
-        )
-        # GPT-5 requires API version 2025-01-01-preview or later
-        self.api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
+        self._validate_env_vars()
 
-        # Validate configuration
-        if not all([self.endpoint, self.api_key, self.deployment_name]):
-            raise ValueError(
-                "Azure OpenAI configuration incomplete. "
-                "Please set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, "
-                "and AZURE_OPENAI_GPT5_NANO_DEPLOYMENT_NAME (or AZURE_OPENAI_DEPLOYMENT_NAME) in .env file."
-            )
+        self.endpoint = self._get_env_var("endpoint")
+        self.api_key = self._get_env_var("api_key")
+        self.deployment_name = self._get_env_var("deployment")
+        self.api_version = self._get_env_var("api_version")
 
         # Initialize client with detailed timeout configuration
         # Heavy processing can take up to 10 minutes, so set 15 minutes timeout
@@ -135,13 +139,13 @@ class AzureGPT5NanoClient(LLMClient):
                             # Extract MIME type for logging
                             mime_type = img_data_uri.split(';')[0].replace('data:', '') if img_data_uri.startswith('data:') else 'unknown'
                             base64_len = len(img_data_uri.split(',')[1]) if ',' in img_data_uri else 0
-                            print(f"🖼️  [GPT-5-nano] Image #{idx}: {mime_type}, Base64: {base64_len} chars")
+                            logger.debug(f"[GPT-5-nano] Image #{idx}: {mime_type}, Base64: {base64_len} chars")
 
                             api_content.append({
                                 "type": "image_url",
                                 "image_url": {"url": img_data_uri}
                             })
-                        print(f"📤 [GPT-5-nano] Sending {len(msg_images)} image(s) to Vision API")
+                        logger.debug(f"[GPT-5-nano] Sending {len(msg_images)} image(s) to Vision API")
                         api_messages.append({"role": role, "content": api_content})
                     else:
                         # Text-only content
@@ -171,15 +175,15 @@ class AzureGPT5NanoClient(LLMClient):
                 if output_text is None:
                     if attempt < max_retries - 1:
                         delay = retry_delays[attempt]
-                        print(f"⚠️ GPT-5-nano: API returned None response (attempt {attempt + 1}/{max_retries}, turnaround: {attempt_ms}ms)")
-                        print(f"   Completion ID: {completion.id if hasattr(completion, 'id') else 'N/A'}")
-                        print(f"   Retrying in {delay} seconds...")
+                        logger.warning(f"GPT-5-nano: API returned None response (attempt {attempt + 1}/{max_retries}, turnaround: {attempt_ms}ms)")
+                        logger.warning(f"   Completion ID: {completion.id if hasattr(completion, 'id') else 'N/A'}")
+                        logger.warning(f"   Retrying in {delay} seconds...")
                         time.sleep(delay)
                         continue
                     else:
                         # Last attempt failed
                         total_ms = int((time.time() - start_time) * 1000)
-                        print(f"❌ GPT-5-nano: API returned None response after {max_retries} attempts (total: {total_ms}ms)")
+                        logger.error(f"GPT-5-nano: API returned None response after {max_retries} attempts (total: {total_ms}ms)")
                         return LLMResponse(
                             success=False,
                             response_text=None,
@@ -192,17 +196,17 @@ class AzureGPT5NanoClient(LLMClient):
                     if attempt < max_retries - 1:
                         delay = retry_delays[attempt]
                         finish_reason = completion.choices[0].finish_reason if completion.choices else 'N/A'
-                        print(f"⚠️ GPT-5-nano: API returned empty response (attempt {attempt + 1}/{max_retries}, turnaround: {attempt_ms}ms)")
-                        print(f"   Completion ID: {completion.id if hasattr(completion, 'id') else 'N/A'}")
-                        print(f"   Finish reason: {finish_reason}")
-                        print(f"   Retrying in {delay} seconds...")
+                        logger.warning(f"GPT-5-nano: API returned empty response (attempt {attempt + 1}/{max_retries}, turnaround: {attempt_ms}ms)")
+                        logger.warning(f"   Completion ID: {completion.id if hasattr(completion, 'id') else 'N/A'}")
+                        logger.warning(f"   Finish reason: {finish_reason}")
+                        logger.warning(f"   Retrying in {delay} seconds...")
                         time.sleep(delay)
                         continue
                     else:
                         # Last attempt failed
                         total_ms = int((time.time() - start_time) * 1000)
                         finish_reason = completion.choices[0].finish_reason if completion.choices else 'unknown'
-                        print(f"❌ GPT-5-nano: API returned empty response after {max_retries} attempts (total: {total_ms}ms)")
+                        logger.error(f"GPT-5-nano: API returned empty response after {max_retries} attempts (total: {total_ms}ms)")
                         return LLMResponse(
                             success=False,
                             response_text=None,
@@ -213,7 +217,7 @@ class AzureGPT5NanoClient(LLMClient):
                 # Success!
                 total_ms = int((time.time() - start_time) * 1000)
                 if attempt > 0:
-                    print(f"✅ GPT-5-nano: Success on attempt {attempt + 1}/{max_retries} (total: {total_ms}ms)")
+                    logger.info(f"GPT-5-nano: Success on attempt {attempt + 1}/{max_retries} (total: {total_ms}ms)")
 
                 return LLMResponse(
                     success=True,
@@ -244,18 +248,18 @@ class AzureGPT5NanoClient(LLMClient):
 
                 if should_retry and attempt < max_retries - 1:
                     delay = retry_delays[attempt]
-                    print(f"⚠️ GPT-5-nano {error_tag}: {error_type} (attempt {attempt + 1}/{max_retries}, turnaround: {attempt_ms}ms)")
-                    print(f"   Error: {error_msg}")
-                    print(f"   Retrying in {delay} seconds...")
+                    logger.warning(f"GPT-5-nano {error_tag}: {error_type} (attempt {attempt + 1}/{max_retries}, turnaround: {attempt_ms}ms)")
+                    logger.warning(f"   Error: {error_msg}")
+                    logger.warning(f"   Retrying in {delay} seconds...")
                     time.sleep(delay)
                     continue
                 else:
                     # Last attempt or non-retryable error
                     total_ms = int((time.time() - start_time) * 1000)
                     if should_retry:
-                        print(f"❌ GPT-5-nano {error_tag}: Failed after {max_retries} attempts (total: {total_ms}ms)")
+                        logger.error(f"GPT-5-nano {error_tag}: Failed after {max_retries} attempts (total: {total_ms}ms)")
                     else:
-                        print(f"❌ GPT-5-nano {error_tag}: Non-retryable error [{error_type}]: {error_msg}")
+                        logger.error(f"GPT-5-nano {error_tag}: Non-retryable error [{error_type}]: {error_msg}")
 
                     return LLMResponse(
                         success=False,

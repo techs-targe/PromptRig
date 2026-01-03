@@ -31,7 +31,9 @@ class DatasetImporter:
         project_id: int,
         file_path: str,
         dataset_name: str,
-        range_name: str = "DSRange"
+        range_name: str = "DSRange",
+        add_row_id: bool = False,
+        replace_dataset_id: Optional[int] = None
     ) -> Dataset:
         """Import dataset from Excel file.
 
@@ -40,6 +42,8 @@ class DatasetImporter:
             file_path: Path to Excel file
             dataset_name: Name for the dataset
             range_name: Named range in Excel (default: "DSRange")
+            add_row_id: If True, add a RowID column as the first column (starting from 1)
+            replace_dataset_id: If provided, replace the existing dataset (keep same ID)
 
         Returns:
             Created Dataset object
@@ -75,25 +79,35 @@ class DatasetImporter:
         header = data_rows[0]
         data_rows = data_rows[1:]
 
-        # Create unique table name
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        table_name = f"Dataset_PJ{project_id}_{timestamp}"
+        # Add RowID column if requested
+        if add_row_id:
+            header = ["RowID"] + header
+            for i, row in enumerate(data_rows, start=1):
+                row.insert(0, str(i))
 
-        # Create dataset record
-        dataset = Dataset(
-            project_id=project_id,
-            name=dataset_name,
-            source_file_name=os.path.basename(file_path),
-            sqlite_table_name=table_name
-        )
-        self.db.add(dataset)
-        self.db.flush()
+        # Handle replace mode
+        if replace_dataset_id:
+            dataset = self.replace_dataset(replace_dataset_id, header, data_rows, os.path.basename(file_path))
+        else:
+            # Create unique table name
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            table_name = f"Dataset_PJ{project_id}_{timestamp}"
 
-        # Create table and insert data
-        self._create_and_populate_table(table_name, header, data_rows)
+            # Create dataset record
+            dataset = Dataset(
+                project_id=project_id,
+                name=dataset_name,
+                source_file_name=os.path.basename(file_path),
+                sqlite_table_name=table_name
+            )
+            self.db.add(dataset)
+            self.db.flush()
 
-        self.db.commit()
-        self.db.refresh(dataset)
+            # Create table and insert data
+            self._create_and_populate_table(table_name, header, data_rows)
+
+            self.db.commit()
+            self.db.refresh(dataset)
 
         return dataset
 
@@ -200,6 +214,248 @@ class DatasetImporter:
         if sanitized and sanitized[0].isdigit():
             sanitized = f"col_{sanitized}"
         return sanitized or "column"
+
+    def replace_dataset(
+        self,
+        dataset_id: int,
+        header: List[str],
+        data_rows: List[List[Any]],
+        source_file_name: Optional[str] = None
+    ) -> Dataset:
+        """Replace an existing dataset's data while keeping the same ID.
+
+        Args:
+            dataset_id: ID of the dataset to replace
+            header: Column names for the new data
+            data_rows: Data rows to insert
+            source_file_name: Optional new source file name
+
+        Returns:
+            Updated Dataset object
+
+        Raises:
+            ValueError: If dataset not found
+        """
+        dataset = self.db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        if not dataset:
+            raise ValueError(f"Dataset {dataset_id} not found")
+
+        table_name = dataset.sqlite_table_name
+
+        # Drop existing table
+        drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
+        self.db.execute(text(drop_sql))
+
+        # Recreate table with new data
+        self._create_and_populate_table(table_name, header, data_rows)
+
+        # Update source file name if provided
+        if source_file_name:
+            dataset.source_file_name = source_file_name
+
+        self.db.commit()
+        self.db.refresh(dataset)
+
+        return dataset
+
+    def rename_columns(
+        self,
+        dataset_id: int,
+        column_mapping: Dict[str, str]
+    ) -> List[str]:
+        """Rename columns in a dataset.
+
+        Since SQLite doesn't support ALTER COLUMN RENAME, we need to:
+        1. Get current table structure
+        2. Create temporary table with new column names
+        3. Copy data from old table
+        4. Drop old table
+        5. Rename temporary table
+
+        Args:
+            dataset_id: Dataset ID
+            column_mapping: Dict mapping old column names to new names
+                           e.g., {"old_name": "new_name", ...}
+
+        Returns:
+            List of new column names
+
+        Raises:
+            ValueError: If dataset not found or invalid column names
+        """
+        import re
+
+        dataset = self.db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        if not dataset:
+            raise ValueError(f"Dataset {dataset_id} not found")
+
+        table_name = dataset.sqlite_table_name
+
+        # 1. Get current columns
+        pragma_sql = f'PRAGMA table_info("{table_name}")'
+        result = self.db.execute(text(pragma_sql))
+        current_columns = [row[1] for row in result if row[1] != "id"]
+
+        if not current_columns:
+            raise ValueError("No columns found in dataset")
+
+        # 2. Build new column list
+        new_columns = []
+        for old_col in current_columns:
+            if old_col in column_mapping:
+                new_name = column_mapping[old_col]
+                # Validate and sanitize new name
+                new_name = self._sanitize_column_name(new_name)
+                if not new_name:
+                    raise ValueError(f"Invalid column name for '{old_col}'")
+                new_columns.append((old_col, new_name))
+            else:
+                new_columns.append((old_col, old_col))
+
+        # Check for duplicate new names
+        new_names = [new for old, new in new_columns]
+        if len(new_names) != len(set(new_names)):
+            raise ValueError("Duplicate column names are not allowed")
+
+        # 3. Create temporary table with new column names
+        temp_table = f"{table_name}_rename_temp"
+
+        # Drop temp table if exists (cleanup from previous failed attempt)
+        self.db.execute(text(f'DROP TABLE IF EXISTS "{temp_table}"'))
+
+        col_defs = ", ".join([f'"{new}" TEXT' for old, new in new_columns])
+        create_sql = f'CREATE TABLE "{temp_table}" (id INTEGER PRIMARY KEY, {col_defs})'
+        self.db.execute(text(create_sql))
+
+        # 4. Copy data
+        old_cols = ", ".join([f'"{old}"' for old, new in new_columns])
+        new_cols = ", ".join([f'"{new}"' for old, new in new_columns])
+        insert_sql = f'''
+            INSERT INTO "{temp_table}" (id, {new_cols})
+            SELECT id, {old_cols} FROM "{table_name}"
+        '''
+        self.db.execute(text(insert_sql))
+
+        # 5. Swap tables
+        self.db.execute(text(f'DROP TABLE "{table_name}"'))
+        self.db.execute(text(f'ALTER TABLE "{temp_table}" RENAME TO "{table_name}"'))
+
+        self.db.commit()
+
+        return new_names
+
+    def restructure_columns(
+        self,
+        dataset_id: int,
+        new_column_list: List[str],
+        column_renames: Dict[str, str] = None
+    ) -> List[str]:
+        """Restructure columns: add, delete, reorder, and rename in one operation.
+
+        Since SQLite doesn't support full column operations, we need to:
+        1. Get current table structure
+        2. Build new column definitions based on new_column_list
+        3. Create temporary table with new structure
+        4. Copy data from old table (only columns that exist in both)
+        5. Drop old table and rename temp table
+
+        Args:
+            dataset_id: Dataset ID
+            new_column_list: Ordered list of final column names
+                - Columns in this list but not in original: will be added (empty values)
+                - Columns in original but not in this list: will be deleted
+                - Order = order of this list
+            column_renames: Optional dict mapping old names to new names
+                e.g., {"old_name": "new_name"}
+
+        Returns:
+            List of new column names
+
+        Raises:
+            ValueError: If dataset not found or invalid column names
+        """
+        dataset = self.db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        if not dataset:
+            raise ValueError(f"Dataset {dataset_id} not found")
+
+        table_name = dataset.sqlite_table_name
+        column_renames = column_renames or {}
+
+        # 1. Get current columns
+        pragma_sql = f'PRAGMA table_info("{table_name}")'
+        result = self.db.execute(text(pragma_sql))
+        current_columns = [row[1] for row in result if row[1] != "id"]
+
+        if not new_column_list:
+            raise ValueError("At least one column is required")
+
+        # 2. Sanitize new column names
+        sanitized_columns = []
+        for col in new_column_list:
+            sanitized = self._sanitize_column_name(col)
+            if not sanitized:
+                raise ValueError(f"Invalid column name: '{col}'")
+            sanitized_columns.append(sanitized)
+
+        # Check for duplicate names
+        if len(sanitized_columns) != len(set(sanitized_columns)):
+            raise ValueError("Duplicate column names are not allowed")
+
+        # 3. Build column mapping: new_col -> old_col (for data copying)
+        # Apply renames: old_name -> new_name
+        reverse_renames = {v: k for k, v in column_renames.items()}
+
+        # For each new column, find the source column
+        column_sources = []  # [(new_col, old_col or None)]
+        for new_col in sanitized_columns:
+            # Check if this is a renamed column
+            if new_col in reverse_renames:
+                old_col = reverse_renames[new_col]
+                if old_col in current_columns:
+                    column_sources.append((new_col, old_col))
+                else:
+                    column_sources.append((new_col, None))  # Source doesn't exist
+            elif new_col in current_columns:
+                column_sources.append((new_col, new_col))
+            else:
+                column_sources.append((new_col, None))  # New column
+
+        # 4. Create temporary table with new column definitions
+        temp_table = f"{table_name}_restructure_temp"
+
+        # Drop temp table if exists (cleanup from previous failed attempt)
+        self.db.execute(text(f'DROP TABLE IF EXISTS "{temp_table}"'))
+
+        col_defs = ", ".join([f'"{new_col}" TEXT' for new_col, _ in column_sources])
+        create_sql = f'CREATE TABLE "{temp_table}" (id INTEGER PRIMARY KEY, {col_defs})'
+        self.db.execute(text(create_sql))
+
+        # 5. Copy data
+        # Build INSERT INTO ... SELECT query
+        # For new columns (no source), use empty string
+        select_parts = []
+        for new_col, old_col in column_sources:
+            if old_col:
+                select_parts.append(f'"{old_col}"')
+            else:
+                select_parts.append("''")  # Empty string for new columns
+
+        new_cols = ", ".join([f'"{new_col}"' for new_col, _ in column_sources])
+        select_cols = ", ".join(select_parts)
+
+        insert_sql = f'''
+            INSERT INTO "{temp_table}" (id, {new_cols})
+            SELECT id, {select_cols} FROM "{table_name}"
+        '''
+        self.db.execute(text(insert_sql))
+
+        # 6. Swap tables
+        self.db.execute(text(f'DROP TABLE "{table_name}"'))
+        self.db.execute(text(f'ALTER TABLE "{temp_table}" RENAME TO "{table_name}"'))
+
+        self.db.commit()
+
+        return sanitized_columns
 
     def get_dataset_preview(
         self,

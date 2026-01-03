@@ -47,6 +47,12 @@ class PromptRevisionUpdate(BaseModel):
     parser_config: str = ""
 
 
+class PromptCloneRequest(BaseModel):
+    """Request to clone a prompt."""
+    new_name: str
+    copy_revisions: bool = True  # If True, copy all revisions; if False, only copy latest
+
+
 class PromptRevisionResponse(BaseModel):
     """Prompt revision response model."""
     id: int
@@ -252,8 +258,12 @@ def list_prompts_and_workflows(
     """List prompts and workflows, optionally filtered by project_id."""
     result = []
 
-    # Get prompts
-    prompt_query = db.query(Prompt).filter(Prompt.is_deleted == False)
+    from sqlalchemy import or_
+
+    # Get prompts (filter deleted prompts and prompts from deleted projects)
+    prompt_query = db.query(Prompt).filter(Prompt.is_deleted == 0)
+    prompt_query = prompt_query.outerjoin(Project, Prompt.project_id == Project.id)
+    prompt_query = prompt_query.filter(Project.is_deleted == 0)
     if project_id:
         prompt_query = prompt_query.filter(Prompt.project_id == project_id)
     prompts = prompt_query.order_by(Prompt.name).all()
@@ -265,8 +275,12 @@ def list_prompts_and_workflows(
             type="prompt"
         ))
 
-    # Get workflows (Workflow model doesn't have is_deleted)
-    workflow_query = db.query(Workflow)
+    # Get workflows (filter deleted workflows and workflows with deleted parent project)
+    workflow_query = db.query(Workflow).filter(Workflow.is_deleted == 0)
+    workflow_query = workflow_query.outerjoin(Project, Workflow.project_id == Project.id)
+    workflow_query = workflow_query.filter(
+        or_(Workflow.project_id == None, Project.is_deleted == 0)
+    )
     if project_id:
         workflow_query = workflow_query.filter(Workflow.project_id == project_id)
     workflows = workflow_query.order_by(Workflow.name).all()
@@ -356,6 +370,71 @@ def check_prompt_usage(prompt_id: int, db: Session = Depends(get_db)):
         workflow_count=len(workflows),
         workflows=workflow_list
     )
+
+
+@router.post("/api/prompts/{prompt_id}/clone", response_model=PromptResponse)
+def clone_prompt(
+    prompt_id: int,
+    request: PromptCloneRequest,
+    db: Session = Depends(get_db)
+):
+    """Clone a prompt with all its revisions (including parser config).
+
+    Creates a new prompt with the same content as the source prompt.
+    """
+    source = db.query(Prompt).filter(Prompt.id == prompt_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+
+    if source.is_deleted:
+        raise HTTPException(status_code=400, detail="Cannot clone a deleted prompt")
+
+    now = datetime.utcnow().isoformat()
+
+    # Create new prompt
+    new_prompt = Prompt(
+        project_id=source.project_id,
+        name=request.new_name,
+        description=source.description,
+        created_at=now,
+        updated_at=now
+    )
+    db.add(new_prompt)
+    db.flush()  # Get the ID
+
+    # Copy revisions
+    source_revisions = db.query(PromptRevision).filter(
+        PromptRevision.prompt_id == prompt_id
+    ).order_by(PromptRevision.revision).all()
+
+    if source_revisions:
+        if request.copy_revisions:
+            # Copy all revisions, resetting revision numbers from 1
+            for i, rev in enumerate(source_revisions, start=1):
+                new_rev = PromptRevision(
+                    prompt_id=new_prompt.id,
+                    revision=i,
+                    prompt_template=rev.prompt_template,
+                    parser_config=rev.parser_config,
+                    created_at=now
+                )
+                db.add(new_rev)
+        else:
+            # Copy only the latest revision as revision 1
+            latest = source_revisions[-1]
+            new_rev = PromptRevision(
+                prompt_id=new_prompt.id,
+                revision=1,
+                prompt_template=latest.prompt_template,
+                parser_config=latest.parser_config,
+                created_at=now
+            )
+            db.add(new_rev)
+
+    db.commit()
+    db.refresh(new_prompt)
+
+    return _prompt_to_response(new_prompt, db, include_parameters=True)
 
 
 @router.delete("/api/prompts/{prompt_id}")

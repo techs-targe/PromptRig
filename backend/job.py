@@ -455,14 +455,14 @@ class JobManager:
         - Images are automatically resized if > 2048px
         - Only JPEG, PNG, GIF, WebP formats supported
         """
-        print(f"🔍 Processing image parameters from input_params: {list(input_params.keys())}")
+        logger.debug(f"Processing image parameters from input_params: {list(input_params.keys())}")
 
         # Parse template to identify FILE and FILEPATH parameters
         param_defs = self.parser.parse_template(prompt_template)
 
         images = []
         allowed_dirs = self._get_allowed_image_directories()
-        print(f"📁 Allowed image directories: {allowed_dirs}")
+        logger.debug(f"Allowed image directories: {allowed_dirs}")
 
         for param_def in param_defs:
             param_name = param_def.name
@@ -472,19 +472,19 @@ class JobManager:
             if param_type not in ["FILE", "FILEPATH"]:
                 continue
 
-            print(f"🖼️  Found image parameter: {param_name} (type={param_type})")
+            logger.debug(f"Found image parameter: {param_name} (type={param_type})")
 
             # Get parameter value
             param_value = input_params.get(param_name)
             if not param_value:
-                print(f"⚠️  Parameter '{param_name}' has no value, skipping")
+                logger.debug(f"Parameter '{param_name}' has no value, skipping")
                 continue
 
             try:
                 if param_type == "FILE":
                     # FILE type: Keep original data URI with MIME type
                     # Expected format: "data:image/jpeg;base64,/9j/4AAQ..."
-                    print(f"📤 Processing FILE parameter '{param_name}' (data length: {len(param_value)} chars)")
+                    logger.debug(f"Processing FILE parameter '{param_name}' (data length: {len(param_value)} chars)")
 
                     # Extract MIME type from data URI
                     mime_type = self._extract_mime_type_from_data_uri(param_value)
@@ -492,23 +492,22 @@ class JobManager:
 
                     # Reconstruct data URI with correct MIME type
                     data_uri = f"data:{mime_type};base64,{base64_data}"
-                    print(f"✅ FILE '{param_name}' → {mime_type}, Base64: {len(base64_data)} chars")
+                    logger.debug(f"FILE '{param_name}' processed: {mime_type}, Base64: {len(base64_data)} chars")
                     images.append(data_uri)
 
                 elif param_type == "FILEPATH":
                     # FILEPATH type: Load file and create data URI with correct MIME type
-                    print(f"📂 Processing FILEPATH parameter '{param_name}': {param_value}")
+                    logger.debug(f"Processing FILEPATH parameter '{param_name}': {param_value}")
                     data_uri = self._load_image_from_filepath(param_value, allowed_dirs)
-                    print(f"✅ FILEPATH '{param_name}' → {len(data_uri)} chars")
+                    logger.debug(f"FILEPATH '{param_name}' processed: {len(data_uri)} chars")
                     images.append(data_uri)
 
             except Exception as e:
                 logger.error(f"Error processing image parameter '{param_name}': {e}")
-                print(f"❌ Error processing '{param_name}': {e}")
                 # Continue processing other images, but log the error
                 # The LLM call may fail if image is critical, but that's expected
 
-        print(f"📊 Total images processed: {len(images)}")
+        logger.debug(f"Total images processed: {len(images)}")
         return images
 
     def _get_allowed_image_directories(self) -> List[str]:
@@ -762,12 +761,14 @@ class JobManager:
                     )
                 else:
                     # GPT-4 and other models: Pass temperature
+                    # Remove temperature from model_params to avoid duplicate keyword argument
+                    call_params = {k: v for k, v in model_params.items() if k != 'temperature'}
                     response = llm_client.call(
                         prompt=prompt_arg,
                         messages=messages,
                         images=images if images else None,
                         temperature=temperature,
-                        **model_params
+                        **call_params
                     )
 
                 if response.success:
@@ -929,12 +930,14 @@ class JobManager:
                         )
                     else:
                         # GPT-4 and other models: Pass temperature
+                        # Remove temperature from model_params to avoid duplicate keyword argument
+                        call_params = {k: v for k, v in model_params.items() if k != 'temperature'}
                         response = llm_client.call(
                             prompt=prompt_arg,
                             messages=messages,
                             images=images if images else None,
                             temperature=temperature,
-                            **model_params
+                            **call_params
                         )
 
                     if response.success:
@@ -1041,9 +1044,14 @@ class JobManager:
                 if parser_config_str:
                     try:
                         parser_config = json.loads(parser_config_str)
-                        # Handle double-encoded JSON
-                        if isinstance(parser_config, str):
+                        # Handle multiple levels of JSON encoding (up to 3 levels)
+                        decode_attempts = 0
+                        while isinstance(parser_config, str) and decode_attempts < 3:
                             parser_config = json.loads(parser_config)
+                            decode_attempts += 1
+                        if not isinstance(parser_config, dict):
+                            logger.warning(f"CSV merge: parser_config is not a dict after decoding: {type(parser_config)}")
+                            parser_config = {}
                         csv_template = parser_config.get("csv_template", "")
                         if csv_template:
                             csv_template_field_order = extract_csv_template_field_order(csv_template)

@@ -62,6 +62,7 @@ env/
 *.log
 logs/
 /tmp/
+tmp/
 
 # Testing
 .pytest_cache/

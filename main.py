@@ -1,4 +1,4 @@
-"""Main entry point for Prompt Evaluation System.
+"""Main entry point for the application.
 
 Based on specification in docs/req.txt section 2.3 (起動方法)
 
@@ -23,6 +23,9 @@ if str(project_root) not in sys.path:
 # Load environment variables
 load_dotenv()
 
+# Get app name from environment
+from backend.utils import get_app_name
+
 if __name__ == "__main__":
     # Get server configuration
     # Default to localhost only (127.0.0.1) for security
@@ -30,8 +33,9 @@ if __name__ == "__main__":
     host = os.getenv("SERVER_HOST", "127.0.0.1")
     port = int(os.getenv("SERVER_PORT", "9200"))
 
+    app_name = get_app_name()
     print("=" * 60)
-    print("Prompt Evaluation System - Phase 2 COMPLETE")
+    print(f"{app_name} - Phase 2 COMPLETE")
     print("=" * 60)
     print(f"Starting server on http://{host}:{port}")
     print("Press Ctrl+C to stop")

@@ -189,25 +189,47 @@ The system uses `{{}}` syntax for dynamic parameters in prompt templates:
 - `GET /api/jobs/{job_id}` - Job progress/status polling
 - Project/dataset/settings management endpoints
 
-## LLM Plugin System (Phase 2)
+## LLM Plugin System (Auto-Discovery)
 
-Plugins are Python modules in `config/llm/` with a `ModelConfig` class:
+The system uses an auto-discovery plugin architecture. New LLM models are automatically discovered at startup.
+
+### Adding a New LLM Model
+
+1. Create a new Python file in `backend/llm/` (or `backend/llm/private/` for private models)
+2. Define a class that extends `LLMClient` with `DISPLAY_NAME` attribute:
 
 ```python
-class ModelConfig:
-    name = "azure-gpt-4.1"
-    provider = "azure_openai"
-    parameters = {
-        "temperature": {"type": "float", "default": 0.2, "min": 0.0, "max": 2.0},
-        "top_p": {"type": "float", "default": 1.0},
-    }
+from backend.llm.base import LLMClient, LLMResponse
 
-    def call(self, prompt: str, **kwargs) -> str:
+class MyNewClient(LLMClient):
+    MODEL_NAME = "my-model-v1"        # API model identifier
+    DISPLAY_NAME = "my-new-model"     # Used as model ID in the system
+
+    def __init__(self):
+        # Load API keys from environment
+        self.api_key = os.getenv("MY_MODEL_API_KEY")
+        if not self.api_key:
+            raise ValueError("MY_MODEL_API_KEY not set")
+
+    def call(self, prompt: str, messages=None, images=None, **kwargs) -> LLMResponse:
         # Implementation
         pass
+
+    def get_default_parameters(self) -> dict:
+        return {"temperature": 0.7, "max_tokens": 4096}
+
+    def get_model_name(self) -> str:
+        return self.DISPLAY_NAME
 ```
 
-The application scans this directory at startup to discover available models.
+3. **No factory.py modification needed** - the model is auto-discovered
+
+### Current Available Models
+
+- **Azure**: azure-gpt-4.1, azure-gpt-4o, azure-gpt-4o-mini, azure-gpt-5-mini, azure-gpt-5-nano
+- **OpenAI**: openai-gpt-4.1-nano, openai-gpt-5-nano, openai-o4-mini
+- **Claude**: claude-sonnet-4, claude-3.5-sonnet, claude-3.5-haiku, claude-3-opus
+- **Private**: Models in `backend/llm/private/` (not tracked by git)
 
 ## Job Execution and Parallelism
 
@@ -276,6 +298,125 @@ Users can stop running jobs using the stop button (⏹ 停止). This cancels all
 - **Limitation**: Only pending items can be cancelled. Items currently executing (LLM API calls in progress) cannot be interrupted.
 
 **API**: `POST /api/jobs/{job_id}/cancel` - Cancels all pending items, returns count of cancelled items.
+
+## Workflow System (AIエージェント向け重要知識)
+
+**詳細ガイド**: `docs/agent_workflow_guide.md` を参照
+
+### ワークフロー作成の鉄則
+
+1. **Import API を使用する** - `POST /api/workflows` ではなく `POST /api/workflows/import` を使用。通常のAPIは `step_type` と `condition_config` を正しく処理しない。
+
+2. **プロンプトのリビジョン確認** - プロンプト作成後、`/api/prompts/{id}/revisions` でリビジョンが存在するか確認。なければ作成が必要。
+
+3. **制御フローのペア確認** - IF/ENDIF, FOREACH/ENDFOREACH は必ずペアで作成。
+
+### 主要なステップタイプ
+
+| タイプ | 用途 | condition_config例 |
+|--------|------|---------------------|
+| `set` | 変数設定 | `{"assignments": {"counter": "0"}}` |
+| `foreach` | ループ | `{"item_var": "ROW", "list_ref": "dataset:6:limit:10"}` |
+| `if` | 条件分岐 | `{"left": "{{ask.ANSWER}}", "operator": "==", "right": "{{vars.ROW.answerKey}}"}` |
+| `prompt` | LLM呼び出し | なし（input_mappingを使用） |
+| `output` | 出力（画面/ファイル） | `{"output_type": "file", "format": "csv", "columns": [...], "values": [...]}` |
+
+### 変数参照構文
+
+```
+{{input.param}}      - 初期入力パラメータ
+{{vars.name}}        - ワークフロー変数
+{{step.field}}       - ステップ出力
+{{vars.ROW.column}}  - FOREACHの現在行カラム
+```
+
+### 主要な関数
+
+```
+calc({{vars.x}} + 1)           - 算術計算
+format_choices({{vars.ROW.choices}}) - 選択肢JSON→テキスト変換
+upper(), lower(), trim()       - 文字列操作
+json_parse(), json_zip()       - JSON処理
+```
+
+### データセット参照
+
+```
+dataset:ID                - 全行
+dataset:ID:column         - 特定カラム
+dataset:ID:limit:10       - 10行に制限
+dataset:ID:col1,col2      - 複数カラム
+```
+
+### 典型的なワークフローパターン（データセット評価）
+
+```json
+{
+  "steps": [
+    {"step_order": 0, "step_name": "init", "step_type": "set",
+     "condition_config": {"assignments": {"correct": "0", "incorrect": "0"}}},
+    {"step_order": 1, "step_name": "loop", "step_type": "foreach",
+     "condition_config": {"item_var": "ROW", "list_ref": "dataset:6:limit:10"}},
+    {"step_order": 2, "step_name": "ask", "step_type": "prompt",
+     "prompt_name": "質問プロンプト", "input_mapping": {"Q": "{{vars.ROW.question}}"}},
+    {"step_order": 3, "step_name": "check", "step_type": "if",
+     "condition_config": {"left": "{{ask.ANSWER}}", "operator": "==", "right": "{{vars.ROW.answer}}"}},
+    {"step_order": 4, "step_name": "inc_correct", "step_type": "set",
+     "condition_config": {"assignments": {"correct": "calc({{vars.correct}} + 1)"}}},
+    {"step_order": 5, "step_name": "else_branch", "step_type": "else"},
+    {"step_order": 6, "step_name": "inc_incorrect", "step_type": "set",
+     "condition_config": {"assignments": {"incorrect": "calc({{vars.incorrect}} + 1)"}}},
+    {"step_order": 7, "step_name": "endif", "step_type": "endif"},
+    {"step_order": 8, "step_name": "endloop", "step_type": "endforeach"},
+    {"step_order": 9, "step_name": "result", "step_type": "set",
+     "condition_config": {"assignments": {"summary": "正解={{vars.correct}}, 不正解={{vars.incorrect}}"}}}
+  ]
+}
+```
+
+### 新規関数の追加方法
+
+1. `backend/workflow.py` の `FORMULA_PATTERN` に関数名追加
+2. `STRING_FUNCTIONS` にドキュメント追加
+3. `_evaluate_formula` に実装追加
+4. **サーバー再起動必須**
+
+## Comprehensive Testing
+
+### Test Location
+
+Comprehensive tests are located in `tests/` directory:
+
+```
+tests/
+├── test_llm_plugin_architecture.py  # LLM auto-discovery tests
+├── test_workflow_comprehensive.py   # Workflow system tests
+├── test_agent_comprehensive.py      # Agent/MCP tools tests
+├── test_workflow_validator.py       # Control flow validation tests
+└── test_workflow_functions.py       # String/formula functions tests
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+python -m pytest tests/ -v
+
+# Run specific test file
+python -m pytest tests/test_llm_plugin_architecture.py -v
+
+# Run with coverage
+python -m pytest tests/ --cov=backend
+```
+
+### Key Test Categories
+
+| Category | Test File | Description |
+|----------|-----------|-------------|
+| LLM Plugin | test_llm_plugin_architecture.py | Auto-discovery, schema, model info |
+| Workflow | test_workflow_comprehensive.py | Control flow, variables, functions |
+| Agent/MCP | test_agent_comprehensive.py | MCP tools, workflow execution |
+| Validation | test_workflow_validator.py | IF/ENDIF pairs, syntax errors |
 
 ## Important Notes
 

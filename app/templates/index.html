@@ -1,17 +1,18 @@
 {% extends "base.html" %}
 
-{% block title %}プロンプト評価システム - Prompt Evaluation System{% endblock %}
+{% block title %}{{ app_name | default('PromptRig') }}{% endblock %}
 
 {% block content %}
 <div class="container">
     <!-- Tab Navigation -->
     <div class="tab-navigation">
-        <button class="tab-button active" data-tab="single">単発実行 / Single Execution</button>
-        <button class="tab-button" data-tab="batch">バッチ実行 / Batch Execution</button>
-        <button class="tab-button" data-tab="workflows">ワークフロー / Workflows</button>
-        <button class="tab-button" data-tab="projects">プロジェクト設定 / Projects</button>
-        <button class="tab-button" data-tab="settings">システム設定 / System Settings</button>
-        <button class="tab-button" data-tab="datasets">データセット / Datasets</button>
+        <button class="tab-button active" data-tab="single">単発実行</button>
+        <button class="tab-button" data-tab="batch">バッチ実行</button>
+        <button class="tab-button" data-tab="workflows">ワークフロー</button>
+        <button class="tab-button" data-tab="projects">プロジェクト設定</button>
+        <button class="tab-button" data-tab="settings">システム設定</button>
+        <button class="tab-button" data-tab="datasets">データセット</button>
+        <button class="tab-button" data-tab="agent">AIエージェント</button>
     </div>
 
     <!-- Tab Content Areas -->
@@ -71,13 +72,35 @@
 
             <!-- Main Content Area -->
             <div class="right-pane">
+                <!-- Current Project/Prompt Info -->
+                <div id="current-context-info" class="current-context-bar">
+                    <div class="context-info-left">
+                        <span class="context-item">📁 <span id="current-project-name">-</span></span>
+                        <span class="context-separator">/</span>
+                        <span class="context-item">🎯 <span id="current-prompt-name">-</span></span>
+                        <span id="current-history-info" class="context-history-info" style="display: none;">
+                            <span class="context-separator">/</span>
+                            <span class="context-item">📋 <span id="current-job-info">-</span></span>
+                        </span>
+                    </div>
+                    <button id="btn-new-input" class="btn btn-new-input" title="新規入力 / New Input">
+                        ✨ 新規入力
+                    </button>
+                    <button id="btn-context-execute" class="btn btn-primary btn-context-execute" title="送信 / Execute" style="display: none;">
+                        🚀 送信
+                    </button>
+                </div>
+
                 <!-- Prompt Template Card -->
                 <div class="exec-card">
                     <div class="exec-card-header">
                         <h3><span class="exec-control-icon">📝</span> プロンプトテンプレート / Prompt Template</h3>
                     </div>
                     <div class="exec-card-body">
-                        <div class="prompt-template-box">
+                        <div class="prompt-template-box response-box-container">
+                            <button class="response-box-copy-btn" onclick="copyPromptTemplate()" title="コピー / Copy">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                            </button>
                             <pre id="prompt-template">Loading...</pre>
                         </div>
                     </div>
@@ -136,6 +159,12 @@
                             <p class="info">実行結果がここに表示されます / Results will be displayed here</p>
                         </div>
                     </div>
+                </div>
+
+                <!-- Utility Buttons -->
+                <div class="utility-buttons" id="single-utility-buttons">
+                    <button type="button" class="utility-btn" onclick="scrollToTop('tab-single')" title="ページトップへ">⬆</button>
+                    <button type="button" class="utility-btn" onclick="scrollToBottom('tab-single')" title="ページボトムへ">⬇</button>
                 </div>
             </div>
         </div>
@@ -219,6 +248,17 @@
 
             <!-- Main Content Area -->
             <div class="right-pane">
+                <!-- Current Project/Prompt Info -->
+                <div id="batch-context-info" class="current-context-bar">
+                    <span class="context-item">📁 <span id="batch-project-name">-</span></span>
+                    <span class="context-separator">/</span>
+                    <span class="context-item">🎯 <span id="batch-prompt-name">-</span></span>
+                    <span id="batch-history-info" class="context-history-info" style="display: none;">
+                        <span class="context-separator">/</span>
+                        <span class="context-item">📋 <span id="batch-job-info">-</span></span>
+                    </span>
+                </div>
+
                 <!-- Results Card -->
                 <div class="exec-card">
                     <div class="exec-card-header">
@@ -230,6 +270,12 @@
                             <p class="info">バッチジョブを選択すると結果が表示されます / Select a batch job to view results</p>
                         </div>
                     </div>
+                </div>
+
+                <!-- Utility Buttons -->
+                <div class="utility-buttons" id="batch-utility-buttons">
+                    <button type="button" class="utility-btn" onclick="scrollToTop('tab-batch')" title="ページトップへ">⬆</button>
+                    <button type="button" class="utility-btn" onclick="scrollToBottom('tab-batch')" title="ページボトムへ">⬇</button>
                 </div>
             </div>
         </div>
@@ -245,14 +291,29 @@
                     <p class="workflow-header-desc">複数のプロンプトを連結して実行</p>
                 </div>
                 <div class="workflow-header-actions">
-                    <button id="btn-create-workflow" class="btn btn-primary btn-create-workflow" onclick="showCreateWorkflowForm()" disabled>
-                        <span class="btn-icon">+</span> 新規作成
+                    <button id="btn-create-workflow" class="workflow-action-btn workflow-action-btn-primary" onclick="showCreateWorkflowForm()" disabled>
+                        <svg class="workflow-action-icon" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clip-rule="evenodd"/>
+                        </svg>
+                        <span>新規作成</span>
                     </button>
-                    <button id="btn-import-workflow" class="btn btn-secondary" onclick="showImportWorkflowDialog()">
-                        <span class="btn-icon">📥</span> JSONインポート
+                    <button id="btn-import-workflow" class="workflow-action-btn" onclick="showImportWorkflowDialog()">
+                        <svg class="workflow-action-icon" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd"/>
+                        </svg>
+                        <span>インポート</span>
                     </button>
-                    <button id="btn-workflow-reference" class="btn btn-secondary" onclick="showWorkflowReference()">
-                        <span class="btn-icon">📖</span> リファレンス
+                    <button id="btn-workflow-reference" class="workflow-action-btn" onclick="showWorkflowReference()">
+                        <svg class="workflow-action-icon" viewBox="0 0 20 20" fill="currentColor">
+                            <path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z"/>
+                        </svg>
+                        <span>リファレンス</span>
+                    </button>
+                    <button id="btn-function-reference" class="workflow-action-btn" onclick="showFunctionReference()">
+                        <svg class="workflow-action-icon" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd"/>
+                        </svg>
+                        <span>関数</span>
                     </button>
                 </div>
             </div>
@@ -272,7 +333,14 @@
 
         <div class="main-content">
             <div class="left-pane">
-                <h3 class="workflow-list-title">一覧</h3>
+                <div class="workflow-list-header">
+                    <h3 class="workflow-list-title">一覧</h3>
+                    <button type="button" class="btn-refresh-workflows" onclick="refreshWorkflowList()" title="リストを更新 / Refresh list">
+                        🔄
+                    </button>
+                </div>
+                <input type="text" id="workflow-search" class="workflow-search-input"
+                       placeholder="🔍 検索..." oninput="filterWorkflowList(this.value)">
                 <div id="workflow-list" class="history-list">
                     <!-- Workflow list will be rendered here -->
                 </div>
@@ -282,7 +350,7 @@
                 <!-- Workflow Editor (hidden by default) -->
                 <div id="workflow-editor" class="workflow-editor-panel" style="display: none;">
                     <div class="workflow-editor-header">
-                        <h3 id="workflow-editor-title">ワークフロー作成</h3>
+                        <h3 id="workflow-editor-title" class="workflow-title-clickable" onclick="focusWorkflowName()" title="クリックして名前を編集 / Click to edit name">ワークフロー作成</h3>
                         <span id="workflow-editor-id-info" style="color: #aaa; font-size: 0.75rem; margin-left: 0.5rem;"></span>
                         <button class="btn-close-editor" onclick="hideWorkflowEditor()" title="閉じる">×</button>
                     </div>
@@ -291,6 +359,12 @@
                             <div class="form-group">
                                 <label>名前</label>
                                 <input type="text" id="workflow-name" required placeholder="ワークフロー名を入力">
+                            </div>
+                            <div class="form-group">
+                                <label>📁 プロジェクト <span class="optional-label">(任意)</span></label>
+                                <select id="workflow-project" class="workflow-project-select">
+                                    <option value="">-- 未設定 / Not set --</option>
+                                </select>
                             </div>
                             <div class="form-group">
                                 <label>説明 <span class="optional-label">(任意)</span></label>
@@ -309,6 +383,10 @@
                             <div class="steps-section-header">
                                 <h4>ステップ構成</h4>
                                 <span class="steps-hint">前のステップの出力: <code>{% raw %}{{step1.field}}{% endraw %}</code></span>
+                            </div>
+                            <div class="workflow-collapse-controls">
+                                <button type="button" class="btn-expand-all" onclick="expandAllWorkflowSteps()">全て展開</button>
+                                <button type="button" class="btn-collapse-all" onclick="collapseAllWorkflowSteps()">全て折りたたむ</button>
                             </div>
                             <div id="workflow-steps-container">
                                 <!-- Dynamic step forms will be added here -->
@@ -336,15 +414,21 @@
 
     <!-- Projects Tab -->
     <div id="tab-projects" class="tab-content">
-        <div class="section">
-            <h2>プロジェクト設定 / Project Management</h2>
-            <button id="btn-create-project" class="btn btn-primary">新規プロジェクト作成 / Create Project</button>
-        </div>
+        <div class="projects-page">
+            <!-- Page Header -->
+            <div class="projects-header">
+                <div class="projects-header-content">
+                    <h2>📁 プロジェクト設定</h2>
+                    <p class="projects-subtitle">プロンプトとパーサーを管理するプロジェクトを作成・編集します</p>
+                    <button id="btn-create-project" class="btn btn-sm btn-outline" style="margin-top: 0.75rem;">
+                        ＋ 新規プロジェクト作成
+                    </button>
+                </div>
+            </div>
 
-        <div class="section">
-            <h3>プロジェクト一覧 / Projects</h3>
-            <div id="projects-list">
-                <p class="loading">Loading...</p>
+            <!-- Projects Grid -->
+            <div id="projects-list" class="projects-grid">
+                <p class="loading">読み込み中...</p>
             </div>
         </div>
     </div>
@@ -354,8 +438,8 @@
         <div class="settings-page">
             <!-- Page Header -->
             <div class="settings-header">
-                <h2>システム設定 / System Settings</h2>
-                <p class="settings-subtitle">アプリケーションの動作をカスタマイズします / Customize application behavior</p>
+                <h2>システム設定</h2>
+                <p class="settings-subtitle">アプリケーションの動作をカスタマイズします</p>
             </div>
 
             <!-- Settings Grid Layout -->
@@ -364,40 +448,23 @@
                 <div class="settings-card">
                     <div class="settings-card-header">
                         <span class="settings-card-icon">⚙️</span>
-                        <h3>デフォルト設定 / Defaults</h3>
+                        <h3>デフォルト設定</h3>
                     </div>
                     <div class="settings-card-body">
                         <!-- Default Model -->
                         <div class="settings-row">
                             <div class="settings-row-label">
                                 <span class="settings-label">デフォルトLLMモデル</span>
-                                <span class="settings-label-sub">Default LLM Model</span>
                             </div>
                             <div class="settings-row-control">
                                 <select id="default-model-select" class="settings-select">
-                                    <option value="">Loading...</option>
+                                    <option value="">読み込み中...</option>
                                 </select>
                                 <button id="btn-save-default-model" class="btn btn-primary btn-sm">保存</button>
                             </div>
                         </div>
                         <p class="settings-hint">単発実行・バッチ実行のデフォルトモデル</p>
 
-                        <div class="settings-divider"></div>
-
-                        <!-- Default Project -->
-                        <div class="settings-row">
-                            <div class="settings-row-label">
-                                <span class="settings-label">デフォルトプロジェクト</span>
-                                <span class="settings-label-sub">Default Project</span>
-                            </div>
-                            <div class="settings-row-control">
-                                <select id="default-project-select" class="settings-select">
-                                    <option value="">Loading...</option>
-                                </select>
-                                <button id="btn-save-default-project" class="btn btn-primary btn-sm">保存</button>
-                            </div>
-                        </div>
-                        <p class="settings-hint">単発実行画面のデフォルトプロジェクト</p>
                     </div>
                 </div>
 
@@ -405,13 +472,12 @@
                 <div class="settings-card">
                     <div class="settings-card-header">
                         <span class="settings-card-icon">🚀</span>
-                        <h3>ジョブ実行 / Execution</h3>
+                        <h3>ジョブ実行</h3>
                     </div>
                     <div class="settings-card-body">
                         <div class="settings-row">
                             <div class="settings-row-label">
-                                <span class="settings-label">並列実行数</span>
-                                <span class="settings-label-sub">Job Parallelism (1-99)</span>
+                                <span class="settings-label">並列実行数（1〜99）</span>
                             </div>
                             <div class="settings-row-control">
                                 <input type="number" id="job-parallelism" min="1" max="99" value="1" class="settings-input-number">
@@ -420,6 +486,71 @@
                             </div>
                         </div>
                         <p class="settings-hint">同時に実行するジョブアイテムの数（1 = 直列実行）</p>
+
+                        <!-- Agent Max Iterations -->
+                        <div class="settings-row" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #eee;">
+                            <div class="settings-row-label">
+                                <span class="settings-label">Agentデフォルトイテレーション</span>
+                            </div>
+                            <div class="settings-row-control">
+                                <select id="agent-max-iterations" class="settings-select">
+                                    <option value="10">10回</option>
+                                    <option value="20">20回</option>
+                                    <option value="30" selected>30回</option>
+                                    <option value="50">50回</option>
+                                    <option value="70">70回</option>
+                                    <option value="99">99回</option>
+                                </select>
+                                <button id="btn-save-agent-iterations" class="btn btn-primary btn-sm">保存</button>
+                                <span id="agent-iterations-status" class="settings-status"></span>
+                            </div>
+                        </div>
+                        <p class="settings-hint">Agentタブで使用するデフォルトのイテレーション数（チャット画面で個別に変更可能）</p>
+                    </div>
+                </div>
+
+                <!-- Agent Settings Card -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <span class="settings-card-icon">🤖</span>
+                        <h3>エージェント設定</h3>
+                    </div>
+                    <div class="settings-card-body">
+                        <div class="settings-row">
+                            <div class="settings-row-label">
+                                <span class="settings-label">ガードレールモデル</span>
+                            </div>
+                            <div class="settings-row-control">
+                                <select id="guardrail-model-select" class="settings-select">
+                                    <option value="">読み込み中...</option>
+                                </select>
+                                <button id="btn-save-guardrail-model" class="btn btn-primary btn-sm">保存</button>
+                                <span id="guardrail-model-status" class="settings-status"></span>
+                            </div>
+                        </div>
+                        <p class="settings-hint">エージェントのセキュリティチェックに使用する軽量モデル</p>
+
+                        <!-- Agent Stream Timeout -->
+                        <div class="settings-row" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #eee;">
+                            <div class="settings-row-label">
+                                <span class="settings-label">ストリームタイムアウト（1〜30分）</span>
+                            </div>
+                            <div class="settings-row-control">
+                                <select id="agent-stream-timeout" class="settings-select">
+                                    <option value="60">1分</option>
+                                    <option value="120">2分</option>
+                                    <option value="180">3分</option>
+                                    <option value="300" selected>5分（デフォルト）</option>
+                                    <option value="600">10分</option>
+                                    <option value="900">15分</option>
+                                    <option value="1200">20分</option>
+                                    <option value="1800">30分</option>
+                                </select>
+                                <button id="btn-save-agent-stream-timeout" class="btn btn-primary btn-sm">保存</button>
+                                <span id="agent-stream-timeout-status" class="settings-status"></span>
+                            </div>
+                        </div>
+                        <p class="settings-hint">エージェントの進捗表示の最大時間。タイムアウト後もタスクは継続します</p>
                     </div>
                 </div>
 
@@ -427,13 +558,12 @@
                 <div class="settings-card">
                     <div class="settings-card-header">
                         <span class="settings-card-icon">📄</span>
-                        <h3>ファイル処理 / File Processing</h3>
+                        <h3>ファイル処理</h3>
                     </div>
                     <div class="settings-card-body">
                         <div class="settings-row">
                             <div class="settings-row-label">
                                 <span class="settings-label">テキスト拡張子</span>
-                                <span class="settings-label-sub">Text File Extensions</span>
                             </div>
                             <div class="settings-row-control" style="flex-direction: column; align-items: flex-start; gap: 0.5rem;">
                                 <div style="display: flex; gap: 0.5rem; width: 100%;">
@@ -452,19 +582,24 @@
                 <div class="settings-card settings-card-wide">
                     <div class="settings-card-header">
                         <span class="settings-card-icon">🎛️</span>
-                        <h3>モデルパラメータ / Model Parameters</h3>
+                        <h3>モデルパラメータ</h3>
                     </div>
                     <div class="settings-card-body">
                         <div class="settings-row">
                             <div class="settings-row-label">
                                 <span class="settings-label">モデル選択</span>
-                                <span class="settings-label-sub">Select Model</span>
                             </div>
                             <div class="settings-row-control">
                                 <select id="param-model-select" class="settings-select">
-                                    <option value="">Loading...</option>
+                                    <option value="">読み込み中...</option>
                                 </select>
                             </div>
+                        </div>
+
+                        <!-- 環境変数設定状態 -->
+                        <div id="model-env-status" class="model-env-status-section" style="display: none;">
+                            <div class="env-status-header">環境変数設定</div>
+                            <div id="model-env-vars-list" class="env-vars-compact-list"></div>
                         </div>
 
                         <div id="model-parameters-form" class="model-params-form" style="display: none;">
@@ -526,8 +661,8 @@
                                 </div>
                             </div>
                             <div class="params-actions">
-                                <button id="btn-save-model-params" class="btn btn-primary">パラメータ保存 / Save</button>
-                                <button id="btn-reset-model-params" class="btn btn-secondary">デフォルトに戻す / Reset</button>
+                                <button id="btn-save-model-params" class="btn btn-primary">パラメータ保存</button>
+                                <button id="btn-reset-model-params" class="btn btn-secondary">デフォルトに戻す</button>
                             </div>
                         </div>
                     </div>
@@ -537,11 +672,11 @@
                 <div class="settings-card">
                     <div class="settings-card-header">
                         <span class="settings-card-icon">🤖</span>
-                        <h3>利用可能なモデル / Available Models</h3>
+                        <h3>利用可能なモデル</h3>
                     </div>
                     <div class="settings-card-body">
-                        <div id="available-models" class="models-list">
-                            <p class="loading">Loading...</p>
+                        <div id="available-models" class="models-button-grid">
+                            <p class="loading">読み込み中...</p>
                         </div>
                     </div>
                 </div>
@@ -550,12 +685,12 @@
                 <div class="settings-card">
                     <div class="settings-card-header">
                         <span class="settings-card-icon">🔧</span>
-                        <h3>モデル設定 / Model Configuration</h3>
+                        <h3>モデル設定</h3>
                     </div>
                     <div class="settings-card-body">
                         <p class="settings-hint" style="margin-bottom: 1rem;">各モデルの有効/無効とパラメータを設定</p>
                         <div id="model-configuration-settings" class="model-config-list">
-                            <p class="loading">Loading...</p>
+                            <p class="loading">読み込み中...</p>
                         </div>
                     </div>
                 </div>
@@ -564,7 +699,7 @@
                 <div class="settings-card">
                     <div class="settings-card-header">
                         <span class="settings-card-icon">🔑</span>
-                        <h3>API設定 / API Configuration</h3>
+                        <h3>API設定</h3>
                     </div>
                     <div class="settings-card-body">
                         <div class="api-info-box">
@@ -573,23 +708,23 @@
                         <div class="api-keys-list">
                             <div class="api-key-item">
                                 <span class="api-key-name">AZURE_OPENAI_ENDPOINT</span>
-                                <span class="api-key-badge required">Required</span>
+                                <span class="api-key-badge required">必須</span>
                             </div>
                             <div class="api-key-item">
                                 <span class="api-key-name">AZURE_OPENAI_API_KEY</span>
-                                <span class="api-key-badge required">Required</span>
+                                <span class="api-key-badge required">必須</span>
                             </div>
                             <div class="api-key-item">
                                 <span class="api-key-name">OPENAI_API_KEY</span>
-                                <span class="api-key-badge optional">Optional</span>
+                                <span class="api-key-badge optional">任意</span>
                             </div>
                             <div class="api-key-item">
                                 <span class="api-key-name">AZURE_OPENAI_GPT5_MINI_DEPLOYMENT_NAME</span>
-                                <span class="api-key-badge optional">Optional</span>
+                                <span class="api-key-badge optional">任意</span>
                             </div>
                             <div class="api-key-item">
                                 <span class="api-key-name">AZURE_OPENAI_GPT5_NANO_DEPLOYMENT_NAME</span>
-                                <span class="api-key-badge optional">Optional</span>
+                                <span class="api-key-badge optional">任意</span>
                             </div>
                         </div>
                     </div>
@@ -599,7 +734,7 @@
                 <div class="settings-card settings-card-wide">
                     <div class="settings-card-header">
                         <span class="settings-card-icon">🏷️</span>
-                        <h3>タグ管理 / Tag Management</h3>
+                        <h3>タグ管理</h3>
                     </div>
                     <div class="settings-card-body">
                         <p class="settings-hint" style="margin-bottom: 1rem;">
@@ -615,7 +750,7 @@
                                 </button>
                             </div>
                             <div id="tags-list" class="tags-list">
-                                <p class="loading">Loading...</p>
+                                <p class="loading">読み込み中...</p>
                             </div>
                         </div>
 
@@ -630,7 +765,7 @@
                                 各モデルで実行可能なプロンプトのタグを設定します。設定されていないモデルはALLタグのみ許可されます。
                             </p>
                             <div id="model-tags-config" class="model-tags-config">
-                                <p class="loading">Loading...</p>
+                                <p class="loading">読み込み中...</p>
                             </div>
                         </div>
                     </div>
@@ -640,7 +775,7 @@
                 <div class="settings-card settings-card-compact">
                     <div class="settings-card-header">
                         <span class="settings-card-icon">💾</span>
-                        <h3>データベース / Database</h3>
+                        <h3>データベース</h3>
                     </div>
                     <div class="settings-card-body">
                         <div class="settings-row">
@@ -672,6 +807,97 @@
             </div>
         </div>
     </div>
+
+    <!-- Agent Tab -->
+    <div id="tab-agent" class="tab-content">
+        <div class="section">
+            <h2>AIエージェント / AI Agent</h2>
+            <p style="color: #64748b; margin-bottom: 1rem;">
+                自然言語でシステムを操作できます。プロジェクト管理、プロンプト実行、ワークフロー操作などをAIエージェントに依頼できます。
+            </p>
+        </div>
+
+        <div class="agent-container" style="display: flex; gap: 1rem; height: calc(100vh - 280px); min-height: 500px;">
+            <!-- History Panel (Left) -->
+            <div class="agent-history-panel" style="width: 220px; min-width: 200px; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                <div class="agent-history-header" style="padding: 0.875rem 1rem; background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-weight: 600; color: #334155;">📜 履歴</span>
+                    <div style="display: flex; gap: 0.25rem;">
+                        <button class="btn btn-sm" style="padding: 0.25rem 0.5rem; font-size: 0.7rem; background: #ef4444; color: white; border: none; border-radius: 4px; cursor: pointer;" onclick="clearAllAgentHistory()" title="全履歴削除">🗑️</button>
+                        <button class="btn btn-sm" style="padding: 0.25rem 0.625rem; font-size: 0.75rem; background: #3b82f6; color: white; border: none; border-radius: 6px; cursor: pointer;" onclick="startNewAgentSession()">+ 新規</button>
+                    </div>
+                </div>
+                <!-- Search Box -->
+                <div style="padding: 0.5rem 0.625rem; border-bottom: 1px solid #e2e8f0;">
+                    <input type="text" id="agent-history-search"
+                           placeholder="🔍 履歴を検索..."
+                           oninput="filterAgentSessionHistory()"
+                           style="width: 100%; padding: 0.375rem 0.5rem; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.8rem; outline: none; transition: border-color 0.2s;"
+                           onfocus="this.style.borderColor='#3b82f6'" onblur="this.style.borderColor='#e2e8f0'">
+                </div>
+                <div id="agent-history-list" class="agent-history-list" style="flex: 1; overflow-y: auto; padding: 0.625rem;">
+                    <p style="padding: 1rem; color: #94a3b8; font-size: 0.85rem; text-align: center;">履歴がありません</p>
+                </div>
+            </div>
+
+            <!-- Chat Area (Expanded) -->
+            <div class="agent-chat-area" style="flex: 1; display: flex; flex-direction: column; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                <div class="agent-chat-header" style="padding: 0.875rem 1rem; background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-weight: 600; color: #334155;">💬 チャット</span>
+                    <span id="agent-session-id-display" style="font-size: 0.7rem; color: #94a3b8; margin-left: 0.5rem; font-family: monospace; cursor: help;" title="Session ID (デバッグ用)"></span>
+                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                        <select id="agent-model-select" style="padding: 0.375rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.8rem; background: white; color: #475569; cursor: pointer;">
+                            <option value="claude-3.5-sonnet">Claude 3.5 Sonnet</option>
+                            <option value="claude-sonnet-4">Claude Sonnet 4</option>
+                            <option value="azure-gpt-4.1">Azure GPT-4.1</option>
+                        </select>
+                        <select id="agent-iterations-select" style="padding: 0.375rem 0.5rem; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.8rem; background: white; color: #475569; cursor: pointer; min-width: 70px;" title="最大イテレーション数 / Max iterations">
+                            <option value="10">10回</option>
+                            <option value="20">20回</option>
+                            <option value="30">30回</option>
+                            <option value="50">50回</option>
+                            <option value="70">70回</option>
+                            <option value="99">99回</option>
+                        </select>
+                        <button id="btn-agent-copy-all" class="btn btn-sm btn-outline agent-copy-all-btn" onclick="copyAgentConversation()" title="会話全体をコピー / Copy all">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        </button>
+                        <button id="btn-agent-tools" class="btn btn-sm btn-outline" style="padding: 0.375rem 0.75rem; font-size: 0.8rem; border-radius: 6px; border: 1px solid #cbd5e1; background: white; color: #475569; cursor: pointer;" onclick="showAgentToolsModal()">
+                            🔧 ツール
+                        </button>
+                        <button id="btn-agent-clear" class="btn btn-sm btn-outline" style="padding: 0.375rem 0.75rem; font-size: 0.8rem; border-radius: 6px; border: 1px solid #cbd5e1; background: white; color: #475569; cursor: pointer;" onclick="clearAgentChat()">
+                            🗑️ クリア
+                        </button>
+                    </div>
+                </div>
+                <div id="agent-messages" class="agent-messages" style="flex: 1; overflow-y: auto; padding: 1.25rem; background: linear-gradient(180deg, #fafbfc 0%, #f8fafc 100%);">
+                    <div class="agent-welcome" style="text-align: center; padding: 3rem 2rem; color: #64748b;">
+                        <div style="font-size: 4rem; margin-bottom: 1.5rem; filter: drop-shadow(0 4px 6px rgba(0,0,0,0.1));">🤖</div>
+                        <p style="font-size: 1.1rem; font-weight: 500; color: #475569; margin-bottom: 0.75rem;">こんにちは！何をお手伝いしましょうか？</p>
+                        <p style="font-size: 0.9rem; color: #94a3b8;">例: 「プロジェクト一覧を表示して」「ワークフローを実行して」</p>
+                    </div>
+                </div>
+                <div class="agent-input-area" style="padding: 0.5rem; border-top: 1px solid #e2e8f0; background: white;">
+                    <div style="position: relative; width: 100%;">
+                        <textarea id="agent-input" class="agent-input" rows="3"
+                                  placeholder="メッセージを入力... (Shift+Enterで改行、Enterで送信)"
+                                  style="display: block; width: 100%; box-sizing: border-box; padding: 0.75rem 8rem 0.75rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; resize: vertical; font-size: 0.95rem; line-height: 1.5; background: #f8fafc; transition: border-color 0.2s, box-shadow 0.2s; min-height: 70px;"
+                                  onfocus="this.style.borderColor='#3b82f6'; this.style.boxShadow='0 0 0 3px rgba(59,130,246,0.1)';"
+                                  onblur="this.style.borderColor='#e2e8f0'; this.style.boxShadow='none';"
+                                  onkeydown="if(event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendAgentMessage(); }"></textarea>
+                        <button id="btn-resource-picker" class="btn btn-secondary" onclick="openResourcePicker()" title="リソース参照 / Resource Picker" style="position: absolute; right: 5rem; bottom: 0.375rem; padding: 0.4rem 0.5rem; border-radius: 6px; font-size: 1rem; background: #f1f5f9; border: 1px solid #e2e8f0; cursor: pointer; transition: background 0.2s;">
+                            📋
+                        </button>
+                        <button id="btn-agent-send" class="btn btn-primary" onclick="sendAgentMessage()" style="position: absolute; right: 0.375rem; bottom: 0.375rem; padding: 0.4rem 0.875rem; border-radius: 6px; font-weight: 500; font-size: 0.85rem; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); border: none; color: white; cursor: pointer; box-shadow: 0 2px 4px rgba(59,130,246,0.3); transition: transform 0.1s, box-shadow 0.1s;"
+                            onmousedown="this.style.transform='scale(0.98)';"
+                            onmouseup="this.style.transform='scale(1)';">
+                            送信
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 
 <!-- Modals -->
@@ -688,86 +914,200 @@
     </div>
 </div>
 
+<!-- Agent Tools Modal -->
+<div id="agent-tools-overlay" class="modal-overlay" style="z-index: 1050;">
+    <div id="agent-tools-modal" class="modal-content" style="max-width: 700px; max-height: 80vh; display: flex; flex-direction: column; border-radius: 16px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25);">
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding: 1.25rem 1.5rem; border-bottom: 1px solid #e2e8f0; background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); border-radius: 16px 16px 0 0;">
+            <h3 style="margin: 0; font-size: 1.25rem; font-weight: 600; color: #1e293b; display: flex; align-items: center; gap: 0.5rem;">
+                <span style="font-size: 1.5rem;">🔧</span> 利用可能なツール / Available Tools
+            </h3>
+            <button class="btn btn-secondary" onclick="hideAgentToolsModal()" style="padding: 0.5rem 0.75rem; border: none; background: #e2e8f0; color: #475569; border-radius: 8px; cursor: pointer; font-size: 1rem; line-height: 1;">✕</button>
+        </div>
+        <div id="agent-tools-list" class="agent-tools-list" style="flex: 1; overflow-y: auto; padding: 1rem 1.5rem; background: white;">
+            <p class="loading" style="padding: 2rem; color: #64748b; text-align: center;">Loading tools...</p>
+        </div>
+        <div class="modal-footer" style="padding: 1rem 1.5rem; border-top: 1px solid #e2e8f0; background: #f8fafc; border-radius: 0 0 16px 16px; text-align: right;">
+            <button class="btn btn-primary" onclick="hideAgentToolsModal()" style="padding: 0.625rem 1.25rem; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 500;">閉じる / Close</button>
+        </div>
+    </div>
+</div>
+
 <!-- Variable Picker Modal -->
 <div id="variable-picker-overlay" class="modal-overlay" style="z-index: 1100;">
-    <div id="variable-picker-modal" class="modal-content" style="max-width: 650px; max-height: 85vh; display: flex; flex-direction: column;">
-        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 1rem; border-bottom: 1px solid #ddd;">
-            <h3 style="margin: 0;">🔧 変数・数式を挿入 / Insert Variable or Formula</h3>
-            <button class="btn btn-secondary" onclick="closeVariablePicker()">✕</button>
+    <div id="variable-picker-modal" class="vp-modal">
+        <!-- Modal Header -->
+        <div class="vp-modal-header">
+            <div class="vp-modal-title">
+                <span class="vp-modal-icon">🔧</span>
+                <h3>変数・数式を挿入</h3>
+            </div>
+            <button class="vp-close-btn" onclick="closeVariablePicker()" title="閉じる">✕</button>
         </div>
 
         <!-- Composition Area (shared across tabs) -->
         <div class="vp-composition-area">
-            <label class="vp-composition-label">📝 作成エリア / Composition Area:</label>
+            <label class="vp-composition-label">
+                <span class="vp-label-icon">📝</span>
+                作成エリア
+            </label>
             <textarea id="vp-composition-input" class="vp-composition-input" rows="2"
-                      placeholder="変数をクリックするとここに追加されます / Click variables to add them here"></textarea>
+                      placeholder="変数をクリックするとここに追加されます"></textarea>
         </div>
 
         <!-- Tabs -->
         <div class="vp-tabs">
             <button type="button" class="vp-tab active" data-tab="variables" onclick="switchVariablePickerTab('variables')">
-                📥 変数 / Variables
+                <span class="vp-tab-icon">📥</span> 変数
             </button>
             <button type="button" class="vp-tab" data-tab="formula" onclick="switchVariablePickerTab('formula')">
-                🧮 数式ヘルプ / Formula Help
+                <span class="vp-tab-icon">🧮</span> 数式ヘルプ
             </button>
         </div>
 
         <!-- Variables Tab Content -->
         <div id="vp-tab-variables" class="vp-tab-content active">
-            <div style="padding: 0.5rem 0;">
-                <input type="text" id="variable-search" placeholder="🔍 変数・関数を検索... / Search variables or functions..."
-                       style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.95rem;"
+            <div class="vp-search-container">
+                <span class="vp-search-icon">🔍</span>
+                <input type="text" id="variable-search" class="vp-search-input"
+                       placeholder="変数・関数を検索..."
                        oninput="filterVariables(this.value)">
             </div>
 
-            <div id="variable-categories" style="flex: 1; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; min-height: 180px; max-height: 280px;">
+            <div id="variable-categories" class="vp-categories-container">
                 <!-- Categories will be rendered here -->
-                <p style="padding: 1rem; color: #7f8c8d;">読み込み中... / Loading...</p>
+                <p class="vp-loading">読み込み中...</p>
             </div>
 
-            <div style="padding-top: 0.5rem;">
-                <small style="color: #7f8c8d;">
-                    💡 変数をクリック → 作成エリアに追加 → 「挿入」ボタンで確定
-                </small>
+            <div class="vp-hint">
+                💡 変数をクリック → 作成エリアに追加 → 「挿入」ボタンで確定
+            </div>
+
+            <div class="vp-function-ref-link" onclick="showFunctionReference()">
+                <span>📚</span>
+                <span>全関数リファレンスを表示 / View All Functions</span>
             </div>
         </div>
 
         <!-- Formula Help Tab Content -->
         {% raw %}
         <div id="vp-tab-formula" class="vp-tab-content" style="display: none;">
-            <div class="formula-help" style="margin-top: 0.5rem;">
-                <h4>📖 利用可能な関数 / Available Functions:</h4>
-                <div class="formula-function-list">
-                    <div class="formula-function">
-                        <code>sum(a, b, ...)</code>
-                        <span>合計 / Sum of values</span>
+            <div class="vp-formula-help">
+                <div class="vp-formula-section">
+                    <h4 class="vp-formula-title">
+                        <span class="vp-formula-icon">📖</span>
+                        利用可能な関数
+                    </h4>
+                    <div class="vp-formula-function-list">
+                        <div class="vp-formula-function">
+                            <code>sum(a, b, ...)</code>
+                            <span>合計を計算</span>
+                        </div>
                     </div>
                 </div>
-                <h4 style="margin-top: 1rem;">💡 クリックで作成エリアに追加 / Click to add:</h4>
-                <div class="formula-examples">
-                    <code onclick="appendToComposition('sum()')">sum()</code>
-                    <code onclick="appendToComposition('sum({{step1.score}}, {{step2.score}})')">sum({{step1.score}}, {{step2.score}})</code>
-                    <code onclick="appendToComposition('sum({{input.value1}}, {{input.value2}})')">sum({{input.value1}}, {{input.value2}})</code>
+
+                <div class="vp-formula-section">
+                    <h4 class="vp-formula-title">
+                        <span class="vp-formula-icon">💡</span>
+                        クリックで追加
+                    </h4>
+                    <div class="vp-formula-examples">
+                        <code class="vp-formula-example" onclick="appendToComposition('sum()')">sum()</code>
+                        <code class="vp-formula-example" onclick="appendToComposition('sum({{step1.score}}, {{step2.score}})')">sum({{step1.score}}, ...)</code>
+                        <code class="vp-formula-example" onclick="appendToComposition('sum({{input.value1}}, {{input.value2}})')">sum({{input.value1}}, ...)</code>
+                    </div>
                 </div>
-                <h4 style="margin-top: 1rem;">📝 数式の書き方 / How to write formulas:</h4>
-                <p style="font-size: 0.85rem; color: #64748b; margin: 0.5rem 0;">
-                    1. 変数タブから変数を選択<br>
-                    2. 作成エリアで編集（カンマ追加など）<br>
-                    3. sum()で囲むなど関数を適用<br>
-                    4. 「挿入」ボタンで確定
-                </p>
+
+                <div class="vp-formula-section">
+                    <h4 class="vp-formula-title">
+                        <span class="vp-formula-icon">📝</span>
+                        数式の書き方
+                    </h4>
+                    <ol class="vp-formula-steps">
+                        <li>変数タブから変数を選択</li>
+                        <li>作成エリアで編集（カンマ追加など）</li>
+                        <li>sum()で囲むなど関数を適用</li>
+                        <li>「挿入」ボタンで確定</li>
+                    </ol>
+                </div>
             </div>
         </div>
         {% endraw %}
 
         <!-- Action Buttons (shared) -->
         <div class="vp-actions">
-            <button type="button" class="btn btn-primary" onclick="insertCompositionValue()">
-                ➕ 挿入 / Insert
+            <button type="button" class="vp-btn vp-btn-primary" onclick="insertCompositionValue()">
+                <span class="vp-btn-icon">➕</span> 挿入
             </button>
-            <button type="button" class="btn btn-secondary" onclick="clearComposition()">
-                🗑️ クリア / Clear
+            <button type="button" class="vp-btn vp-btn-secondary" onclick="clearComposition()">
+                <span class="vp-btn-icon">🗑️</span> クリア
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Resource Picker Modal for AI Agent -->
+<div id="resource-picker-overlay" class="modal-overlay" style="z-index: 1100;">
+    <div id="resource-picker-modal" class="modal-content" style="max-width: 700px; max-height: 85vh; display: flex; flex-direction: column;">
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 1rem; border-bottom: 1px solid #ddd;">
+            <h3 style="margin: 0;">📋 リソース参照</h3>
+            <button class="btn btn-secondary" onclick="closeResourcePicker()">✕</button>
+        </div>
+
+        <!-- Search Area -->
+        <div style="padding: 0.25rem 0;">
+            <input type="text" id="resource-search" placeholder="🔍 検索... / Search..."
+                   style="width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.95rem;"
+                   oninput="filterResources(this.value)">
+        </div>
+
+        <!-- Project Filter (shown for non-project tabs) -->
+        <div id="resource-project-filter" style="padding: 0.25rem 0;">
+            <select id="resource-project-select"
+                    style="width: 100%; padding: 0.375rem; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.9rem;"
+                    onchange="onResourceProjectChange()">
+                <option value="">-- 全プロジェクト / All Projects --</option>
+            </select>
+        </div>
+
+        <!-- Tabs -->
+        <div class="rp-tabs" style="display: flex; gap: 0.25rem; margin-bottom: 0.25rem; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.25rem;">
+            <button type="button" class="rp-tab active" data-tab="datasets" onclick="switchResourceTab('datasets')" style="padding: 0.5rem 1rem; border: none; background: #3b82f6; color: white; border-radius: 4px 4px 0 0; cursor: pointer; font-size: 0.85rem;">
+                📊 データセット
+            </button>
+            <button type="button" class="rp-tab" data-tab="workflows" onclick="switchResourceTab('workflows')" style="padding: 0.5rem 1rem; border: none; background: #f1f5f9; color: #475569; border-radius: 4px 4px 0 0; cursor: pointer; font-size: 0.85rem;">
+                ⚡ ワークフロー
+            </button>
+            <button type="button" class="rp-tab" data-tab="prompts" onclick="switchResourceTab('prompts')" style="padding: 0.5rem 1rem; border: none; background: #f1f5f9; color: #475569; border-radius: 4px 4px 0 0; cursor: pointer; font-size: 0.85rem;">
+                📝 プロンプト
+            </button>
+            <button type="button" class="rp-tab" data-tab="projects" onclick="switchResourceTab('projects')" style="padding: 0.5rem 1rem; border: none; background: #f1f5f9; color: #475569; border-radius: 4px 4px 0 0; cursor: pointer; font-size: 0.85rem;">
+                📁 プロジェクト
+            </button>
+        </div>
+
+        <!-- Resource List -->
+        <div id="resource-list" style="flex: 1; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; min-height: 250px; max-height: 350px;">
+            <p style="padding: 1rem; color: #7f8c8d;">読み込み中... / Loading...</p>
+        </div>
+
+        <!-- Dataset Column Selector (shown only for datasets) -->
+        <div id="dataset-column-selector" style="display: none; margin-top: 0.5rem; padding: 0.5rem; background: #f8fafc; border-radius: 4px;">
+            <label style="font-size: 0.85rem; font-weight: 500; color: #475569;">📊 カラム選択 (任意):</label>
+            <select id="dataset-column-select" style="width: 100%; padding: 0.375rem; border: 1px solid #e2e8f0; border-radius: 4px; margin-top: 0.25rem;">
+                <option value="">-- 全カラム / All columns --</option>
+            </select>
+        </div>
+
+        <!-- Usage Guide -->
+        <div style="padding: 0.25rem 0; font-size: 0.8rem; color: #64748b;">
+            💡 挿入形式: <code style="background: #f1f5f9; padding: 2px 4px; border-radius: 3px;">dataset:ID # 名前</code> /
+            <code style="background: #f1f5f9; padding: 2px 4px; border-radius: 3px;">workflow:ID # 名前</code>
+        </div>
+
+        <!-- Action Buttons -->
+        <div style="display: flex; gap: 0.5rem; padding-top: 0.25rem; border-top: 1px solid #e2e8f0;">
+            <button type="button" class="btn btn-secondary" onclick="closeResourcePicker()" style="flex: 1;">
+                閉じる / Close
             </button>
         </div>
     </div>
@@ -875,6 +1215,25 @@ Feed this document to an LLM to help create workflow JSON.
 {"step_type": "endif"}
 ```
 
+### output (結果出力)
+```json
+{
+  "step_type": "output",
+  "condition_config": {
+    "output_type": "screen",
+    "columns": ["日付", "結果", "スコア"],
+    "values": ["{{vars.date}}", "{{step1.result}}", "{{vars.score}}"],
+    "append": false
+  }
+}
+```
+- **output_type**: "screen" (画面表示) or "file" (ファイル出力)
+- **format**: "csv" or "tsv" (ファイル出力時)
+- **columns**: カラム名の配列
+- **values**: 各カラムの値 (変数参照可)
+- **append**: true = 追記モード (FOREACHループ内で有用)
+- ファイル出力時は結果タブからダウンロード可能
+
 ## 3. 変数参照 / Variable References
 
 | 構文 | 説明 | 例 |
@@ -943,6 +1302,17 @@ Feed this document to an LLM to help create workflow JSON.
 |------|------|-----|
 | shuffle(s, delim) | シャッフル | shuffle(a;b;c, ;) → "c;a;b" (ランダム) |
 | debug(s1, s2, ...) | デバッグ出力 | debug({{x}}, {{y}}) → "val1 \| val2" |
+
+### 日時 / Date & Time
+| 関数 | 説明 | 例 |
+|------|------|-----|
+| now(fmt) | 現在日時 | now(%Y-%m-%d %H:%M:%S) → "2025-01-15 14:30:45" |
+| today(fmt) | 今日の日付 | today(%Y/%m/%d) → "2025/01/15" |
+| time(fmt) | 現在時刻 | time(%H:%M) → "14:30" |
+
+- フォーマットはPython strftime形式
+- 主なフォーマット指定子: %Y(年4桁), %m(月), %d(日), %H(時), %M(分), %S(秒)
+- 例: now(%Y年%m月%d日) → "2025年01月15日"
 
 ## 5. 条件式の演算子 / Condition Operators
 
@@ -1065,7 +1435,6 @@ Feed this document to an LLM to help create workflow JSON.
     <div class="draggable-header" id="prompt-editor-header">
         <span class="draggable-title">📝 プロンプト編集 / Prompt Editor</span>
         <div class="draggable-controls">
-            <button type="button" class="btn-header-help" onclick="showPromptTemplateHelp()" title="ヘルプを表示 / Show Help">❓</button>
             <button type="button" class="btn-minimize" onclick="minimizePromptEditor()" title="最小化">−</button>
             <button type="button" class="btn-close" onclick="closePromptEditor()" title="閉じる">×</button>
         </div>
@@ -1084,6 +1453,9 @@ Feed this document to an LLM to help create workflow JSON.
             </select>
             <button type="button" class="btn btn-success btn-sm" onclick="showCreatePromptInEditor()" style="white-space: nowrap; padding: 0.4rem 0.8rem;">
                 ＋ 新規作成
+            </button>
+            <button type="button" class="btn btn-info btn-sm" onclick="duplicatePromptFromEditor()" style="white-space: nowrap; padding: 0.4rem 0.6rem;" title="複製 / Duplicate">
+                📋
             </button>
             <button type="button" class="btn btn-danger btn-sm" id="prompt-editor-delete-btn" onclick="deletePromptFromEditor()" style="white-space: nowrap; padding: 0.4rem 0.6rem;" title="削除 / Delete">
                 🗑
@@ -1177,7 +1549,7 @@ Feed this document to an LLM to help create workflow JSON.
                     </select>
 
                     <label style="margin-top: 1rem; display: block;">パーサー設定 (JSON):</label>
-                    <textarea id="prompt-editor-parser-config" style="width: 100%; height: 200px; font-family: monospace; font-size: 0.85rem;" placeholder='{"type": "none"}'></textarea>
+                    <textarea id="prompt-editor-parser-config" style="width: 100%; min-height: 150px; font-family: monospace; font-size: 0.85rem; flex: 1;" placeholder='{"type": "none"}'></textarea>
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0.3rem;">
                         <small style="color: #7f8c8d;">例: {"type": "json_path", "paths": {"field1": "$.data.value"}}</small>
                         <button type="button" id="json-csv-toggle-btn-workflow" onclick="toggleJsonCsvConverter('-workflow')" style="font-size: 0.75rem; padding: 2px 8px; background: transparent; border: 1px solid #9b59b6; color: #9b59b6; border-radius: 3px; cursor: pointer;">JSON→CSV</button>
@@ -1255,8 +1627,65 @@ Feed this document to an LLM to help create workflow JSON.
     </div>
 </div>
 
+<!-- Dataset Column Edit Modal -->
+<div id="dataset-columns-overlay" class="modal-overlay" style="z-index: 1300;">
+    <div id="dataset-columns-modal" class="modal-content" style="max-width: 600px; max-height: 80vh; display: flex; flex-direction: column;">
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 1rem; border-bottom: 1px solid #ddd;">
+            <h3 style="margin: 0;">列名の編集 / Edit Column Names</h3>
+            <button class="btn btn-secondary" onclick="closeDatasetColumnsModal()">×</button>
+        </div>
+
+        <div style="flex: 1; overflow-y: auto; padding: 1rem 0;">
+            <div id="column-edit-list" style="display: flex; flex-direction: column; gap: 0.75rem;">
+                <!-- Column inputs will be added dynamically -->
+            </div>
+            <p style="margin-top: 1rem; font-size: 0.85rem; color: #666;">
+                ※ 空白・特殊文字はアンダースコアに変換されます
+            </p>
+        </div>
+
+        <div style="display: flex; justify-content: flex-end; gap: 0.5rem; padding-top: 1rem; border-top: 1px solid #ddd;">
+            <button class="btn btn-primary" onclick="saveDatasetColumns()">保存 / Save</button>
+            <button class="btn btn-secondary" onclick="closeDatasetColumnsModal()">キャンセル / Cancel</button>
+        </div>
+    </div>
+</div>
+
+<!-- Function Reference Modal -->
+<div id="function-reference-overlay" class="modal-overlay" style="z-index: 1400;">
+    <div id="function-reference-modal" class="modal-content" style="max-width: 900px; max-height: 90vh; display: flex; flex-direction: column;">
+        <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 1rem; border-bottom: 1px solid #ddd;">
+            <h3 style="margin: 0; display: flex; align-items: center; gap: 0.5rem;">
+                <span style="font-size: 1.5rem;">📚</span>
+                関数リファレンス / Function Reference
+            </h3>
+            <button class="btn btn-secondary" onclick="closeFunctionReference()" style="font-size: 1.5rem; padding: 0.25rem 0.75rem; line-height: 1;">&times;</button>
+        </div>
+
+        <div style="padding: 0.75rem 0; border-bottom: 1px solid #e5e7eb;">
+            <input type="text" id="function-reference-search" placeholder="関数を検索... / Search functions..."
+                   style="width: 100%; padding: 0.5rem 1rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.9rem;"
+                   oninput="filterFunctionReference(this.value)">
+        </div>
+
+        <div id="function-reference-content" style="flex: 1; overflow-y: auto; padding: 1rem 0;">
+            <!-- Function list will be loaded dynamically -->
+            <div style="text-align: center; padding: 2rem; color: #666;">
+                読み込み中... / Loading...
+            </div>
+        </div>
+
+        <div style="display: flex; justify-content: space-between; align-items: center; padding-top: 1rem; border-top: 1px solid #ddd;">
+            <span style="color: #666; font-size: 0.85rem;">
+                <span id="function-reference-count">0</span> 関数 / functions
+            </span>
+            <button class="btn btn-secondary" onclick="closeFunctionReference()">閉じる / Close</button>
+        </div>
+    </div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/app.js?v=20251215_050000"></script>
+<script src="/static/js/app.js?v=20251227_prompt_name_sync"></script>
 {% endblock %}

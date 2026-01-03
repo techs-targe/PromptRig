@@ -6,13 +6,17 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <title>{% block title %}Prompt Evaluation System{% endblock %}</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=20251216_112000">
+    <title>{% block title %}{{ app_name | default('PromptRig') }}{% endblock %}</title>
+    <link rel="stylesheet" href="/static/css/style.css?v=20251217_theme_v1">
+    <style>
+        :root {
+            {{ css_vars | default('') | safe }}
+        }
+    </style>
 </head>
 <body>
-    <header>
-        <h1>プロンプト評価システム / Prompt Evaluation System</h1>
-        <p class="subtitle">Phase 2 Complete</p>
+    <header class="compact-header">
+        <h1>{{ app_name | default('PromptRig') }}</h1>
     </header>
 
     <main>
@@ -20,7 +24,7 @@
     </main>
 
     <footer>
-        <p>Prompt Evaluation System v2.0.0 (Phase 2 Complete)</p>
+        <p>{{ app_name | default('PromptRig') }} v{{ app_version | default('3.0.0') }}</p>
     </footer>
 
     {% block scripts %}{% endblock %}

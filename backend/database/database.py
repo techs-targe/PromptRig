@@ -3,11 +3,14 @@
 Based on specification in docs/req.txt section 2.3 and 3.1
 """
 
+import logging
 import os
 from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 from .models import (
     Base, Project, ProjectRevision, Prompt, PromptRevision,
@@ -70,17 +73,17 @@ def migrate_db():
 
             # Migration: Add merged_csv_output column
             if 'merged_csv_output' not in columns:
-                print("⚙ Adding merged_csv_output column to jobs table...")
+                logger.info("Adding merged_csv_output column to jobs table...")
                 db.execute(text('ALTER TABLE jobs ADD COLUMN merged_csv_output TEXT'))
                 db.commit()
-                print("✓ Migration: merged_csv_output column added")
+                logger.info("Migration: merged_csv_output column added")
 
             # Migration: Add model_name column
             if 'model_name' not in columns:
-                print("⚙ Adding model_name column to jobs table...")
+                logger.info("Adding model_name column to jobs table...")
                 db.execute(text('ALTER TABLE jobs ADD COLUMN model_name TEXT'))
                 db.commit()
-                print("✓ Migration: model_name column added")
+                logger.info("Migration: model_name column added")
 
         # Check if workflow_jobs table exists
         if 'workflow_jobs' in inspector.get_table_names():
@@ -88,14 +91,46 @@ def migrate_db():
 
             # Migration: Add merged_csv_output column to workflow_jobs
             if 'merged_csv_output' not in wf_columns:
-                print("⚙ Adding merged_csv_output column to workflow_jobs table...")
+                logger.info("Adding merged_csv_output column to workflow_jobs table...")
                 db.execute(text('ALTER TABLE workflow_jobs ADD COLUMN merged_csv_output TEXT'))
                 db.commit()
-                print("✓ Migration: workflow_jobs.merged_csv_output column added")
+                logger.info("Migration: workflow_jobs.merged_csv_output column added")
+
+        # Migration: Add soft delete columns to projects table
+        if 'projects' in inspector.get_table_names():
+            proj_columns = [col['name'] for col in inspector.get_columns('projects')]
+
+            if 'is_deleted' not in proj_columns:
+                logger.info("Adding is_deleted column to projects table...")
+                db.execute(text('ALTER TABLE projects ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0'))
+                db.commit()
+                logger.info("Migration: projects.is_deleted column added")
+
+            if 'deleted_at' not in proj_columns:
+                logger.info("Adding deleted_at column to projects table...")
+                db.execute(text('ALTER TABLE projects ADD COLUMN deleted_at TEXT'))
+                db.commit()
+                logger.info("Migration: projects.deleted_at column added")
+
+        # Migration: Add soft delete columns to workflows table
+        if 'workflows' in inspector.get_table_names():
+            wflow_columns = [col['name'] for col in inspector.get_columns('workflows')]
+
+            if 'is_deleted' not in wflow_columns:
+                logger.info("Adding is_deleted column to workflows table...")
+                db.execute(text('ALTER TABLE workflows ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0'))
+                db.commit()
+                logger.info("Migration: workflows.is_deleted column added")
+
+            if 'deleted_at' not in wflow_columns:
+                logger.info("Adding deleted_at column to workflows table...")
+                db.execute(text('ALTER TABLE workflows ADD COLUMN deleted_at TEXT'))
+                db.commit()
+                logger.info("Migration: workflows.deleted_at column added")
 
     except Exception as e:
         db.rollback()
-        print(f"⚠ Migration warning: {str(e)}")
+        logger.warning(f"Migration warning: {str(e)}")
     finally:
         db.close()
 
@@ -134,7 +169,7 @@ def init_db():
             db.commit()
             db.refresh(default_project)
 
-            # Create initial revision with sample prompt template
+            # Create initial revision with sample prompt template (legacy table)
             initial_revision = ProjectRevision(
                 project_id=default_project.id,
                 revision=1,
@@ -148,10 +183,66 @@ def init_db():
             db.add(initial_revision)
             db.commit()
 
-            print(f"✓ Created default project (ID={default_project.id})")
-            print(f"✓ Created initial revision (ID={initial_revision.id})")
+            # Create sample prompt in new Prompt table
+            sample_prompt = Prompt(
+                name="Sample Prompt",
+                project_id=default_project.id,
+                is_deleted=0
+            )
+            db.add(sample_prompt)
+            db.commit()
+            db.refresh(sample_prompt)
+
+            # Create initial revision for the sample prompt
+            sample_revision = PromptRevision(
+                prompt_id=sample_prompt.id,
+                revision=1,
+                prompt_template=(
+                    "以下の情報に基づいて回答してください。\n\n"
+                    "質問: {{question:TEXT5}}\n"
+                    "コンテキスト: {{context:TEXT10}}\n"
+                ),
+                parser_config="{}"
+            )
+            db.add(sample_revision)
+            db.commit()
+
+            logger.info(f"Created default project (ID={default_project.id})")
+            logger.info(f"Created initial revision (ID={initial_revision.id})")
+            logger.info(f"Created sample prompt (ID={sample_prompt.id}) with revision")
         else:
-            print(f"✓ Default project already exists (ID={default_project.id})")
+            logger.info(f"Default project already exists (ID={default_project.id})")
+
+            # Check if Default Project has any prompts (migration for existing DBs)
+            existing_prompt = db.query(Prompt).filter(
+                Prompt.project_id == default_project.id,
+                Prompt.is_deleted == 0
+            ).first()
+            if not existing_prompt:
+                # Create sample prompt for existing Default Project
+                sample_prompt = Prompt(
+                    name="Sample Prompt",
+                    project_id=default_project.id,
+                    is_deleted=0
+                )
+                db.add(sample_prompt)
+                db.commit()
+                db.refresh(sample_prompt)
+
+                # Create initial revision
+                sample_revision = PromptRevision(
+                    prompt_id=sample_prompt.id,
+                    revision=1,
+                    prompt_template=(
+                        "以下の情報に基づいて回答してください。\n\n"
+                        "質問: {{question:TEXT5}}\n"
+                        "コンテキスト: {{context:TEXT10}}\n"
+                    ),
+                    parser_config="{}"
+                )
+                db.add(sample_revision)
+                db.commit()
+                logger.info(f"Created sample prompt for existing Default Project (ID={sample_prompt.id})")
 
         # Initialize default "ALL" tag for access control
         init_default_tags(db)
@@ -183,6 +274,6 @@ def init_default_tags(db: Session):
         )
         db.add(all_tag)
         db.commit()
-        print("✓ Created default 'ALL' tag")
+        logger.info("Created default 'ALL' tag")
     else:
-        print("✓ Default 'ALL' tag already exists")
+        logger.info("Default 'ALL' tag already exists")

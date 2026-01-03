@@ -24,6 +24,10 @@ class Project(Base):
     description = Column(Text)
     created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
 
+    # Soft delete support
+    is_deleted = Column(Integer, nullable=False, default=0)  # 0=active, 1=deleted
+    deleted_at = Column(Text, nullable=True)  # Timestamp when deleted
+
     # Relationships - OLD (for backward compatibility during migration)
     revisions = relationship("ProjectRevision", back_populates="project", cascade="all, delete-orphan")
     datasets = relationship("Dataset", back_populates="project", cascade="all, delete-orphan")
@@ -31,6 +35,9 @@ class Project(Base):
     # Relationships - NEW (for new architecture)
     prompts = relationship("Prompt", back_populates="project", cascade="all, delete-orphan")
     project_workflows = relationship("Workflow", back_populates="project", foreign_keys="Workflow.project_id")
+
+    # Relationships - NEW (many-to-many with datasets)
+    dataset_associations = relationship("ProjectDataset", back_populates="project", cascade="all, delete-orphan")
 
 
 class ProjectRevision(Base):
@@ -186,18 +193,49 @@ class Dataset(Base):
 
     Specification: docs/req.txt section 5.6
     Phase 2 feature, but table structure defined for completeness.
+
+    NEW: Datasets can belong to multiple projects via ProjectDataset junction table.
+    The project_id column is kept for backward compatibility (original owner).
     """
     __tablename__ = "datasets"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)  # Original owner (backward compat)
     name = Column(Text, nullable=False)
     source_file_name = Column(Text, nullable=False)
     sqlite_table_name = Column(Text, nullable=False)  # e.g., Dataset_PJ1_20241205_001
     created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
 
-    # Relationships
+    # Relationships - OLD (backward compatibility)
     project = relationship("Project", back_populates="datasets")
+
+    # Relationships - NEW (many-to-many with projects)
+    project_associations = relationship("ProjectDataset", back_populates="dataset", cascade="all, delete-orphan")
+
+
+class ProjectDataset(Base):
+    """Junction table for project-dataset many-to-many relationship.
+
+    Allows datasets to be associated with multiple projects.
+    Similar pattern to PromptTag.
+    """
+    __tablename__ = "project_datasets"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=False)
+    created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+
+    # Relationships
+    project = relationship("Project", back_populates="dataset_associations")
+    dataset = relationship("Dataset", back_populates="project_associations")
+
+    __table_args__ = (
+        Index("idx_project_datasets_project", "project_id"),
+        Index("idx_project_datasets_dataset", "dataset_id"),
+        # Unique constraint to prevent duplicate associations
+        Index("idx_project_datasets_unique", "project_id", "dataset_id", unique=True),
+    )
 
 
 class SystemSetting(Base):
@@ -278,6 +316,10 @@ class Workflow(Base):
     auto_context = Column(Integer, nullable=False, default=0)  # 0=disabled, 1=enabled
     created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
     updated_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+
+    # Soft delete support
+    is_deleted = Column(Integer, nullable=False, default=0)  # 0=active, 1=deleted
+    deleted_at = Column(Text, nullable=True)  # Timestamp when deleted
 
     # Relationships
     project = relationship("Project", back_populates="project_workflows", foreign_keys=[project_id])
@@ -390,4 +432,82 @@ class WorkflowJobStep(Base):
 
     __table_args__ = (
         Index("idx_workflow_job_steps_job", "workflow_job_id"),
+    )
+
+
+# ========== AI AGENT MODELS ==========
+
+class AgentSession(Base):
+    """AI Agent session.
+
+    Stores agent conversation sessions for history tracking.
+    """
+    __tablename__ = "agent_sessions"
+
+    id = Column(Text, primary_key=True)  # session_xxxx format
+    title = Column(Text)  # First message summary or user-defined title
+    model_name = Column(Text)  # LLM model used
+    terminated = Column(Integer, default=0)  # 1 if session terminated by security guardrail
+    created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+    updated_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+
+    # Relationship to messages
+    messages = relationship("AgentMessage", back_populates="session", cascade="all, delete-orphan",
+                           order_by="AgentMessage.created_at")
+
+    __table_args__ = (
+        Index("idx_agent_sessions_created", "created_at"),
+        Index("idx_agent_sessions_updated", "updated_at"),
+    )
+
+
+class AgentMessage(Base):
+    """AI Agent message.
+
+    Stores individual messages in an agent conversation.
+    """
+    __tablename__ = "agent_messages"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(Text, ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False)
+    role = Column(Text, nullable=False)  # user, assistant, system, tool
+    content = Column(Text, nullable=False)
+    tool_calls = Column(Text)  # JSON array of tool calls (for assistant messages)
+    tool_call_id = Column(Text)  # For tool response messages
+    created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+
+    # Relationship to session
+    session = relationship("AgentSession", back_populates="messages")
+
+    __table_args__ = (
+        Index("idx_agent_messages_session", "session_id"),
+        Index("idx_agent_messages_created", "created_at"),
+    )
+
+
+class AgentTask(Base):
+    """AI Agent background task.
+
+    Stores agent tasks that run in the background, allowing
+    users to close the browser and check results later.
+    """
+    __tablename__ = "agent_tasks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(Text, nullable=False)  # Agent session ID
+    status = Column(Text, nullable=False, default="pending")  # pending, running, completed, error, cancelled
+    model_name = Column(Text)  # LLM model used
+    user_message = Column(Text, nullable=False)  # User's input message
+    assistant_response = Column(Text)  # Agent's response (when completed)
+    error_message = Column(Text)  # Error message (if status=error)
+    tool_calls_log = Column(Text)  # JSON log of tool calls made
+    execution_log = Column(Text)  # JSON array of execution events for real-time streaming
+    created_at = Column(Text, nullable=False, default=lambda: datetime.utcnow().isoformat())
+    started_at = Column(Text)  # When execution started
+    finished_at = Column(Text)  # When execution finished
+
+    __table_args__ = (
+        Index("idx_agent_tasks_session", "session_id"),
+        Index("idx_agent_tasks_status", "status"),
+        Index("idx_agent_tasks_created", "created_at"),
     )

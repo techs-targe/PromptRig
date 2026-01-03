@@ -9,7 +9,7 @@ from typing import Optional, List
 from openai import OpenAI
 from dotenv import load_dotenv
 
-from .base import LLMClient, LLMResponse, Message
+from .base import LLMClient, LLMResponse, Message, EnvVarConfig
 
 # Load environment variables
 load_dotenv()
@@ -19,22 +19,23 @@ class OpenAIGPT5NanoClient(LLMClient):
     """OpenAI GPT-5-nano client.
 
     Configuration from environment variables:
-    - OPENAI_API_KEY
+    - OPENAI_GPT5_NANO_API_KEY or OPENAI_API_KEY
     """
 
     # Model identifier for gpt-5-nano
     MODEL_NAME = "gpt-5-nano"
+    DISPLAY_NAME = "openai-gpt-5-nano"
+
+    # Environment variable configuration
+    ENV_VARS = [
+        EnvVarConfig("api_key", "OPENAI_GPT5_NANO_API_KEY", "OPENAI_API_KEY"),
+    ]
 
     def __init__(self):
         """Initialize OpenAI client with environment configuration."""
-        self.api_key = os.getenv("OPENAI_API_KEY")
+        self._validate_env_vars()
 
-        # Validate configuration
-        if not self.api_key:
-            raise ValueError(
-                "OpenAI configuration incomplete. "
-                "Please set OPENAI_API_KEY in .env file."
-            )
+        self.api_key = self._get_env_var("api_key")
 
         # Initialize client
         self.client = OpenAI(api_key=self.api_key)
@@ -110,11 +111,21 @@ class OpenAIGPT5NanoClient(LLMClient):
                     else:
                         api_messages.append({"role": role, "content": content})
 
+            # Get max tokens parameter (GPT-5 uses max_completion_tokens, not max_tokens)
+            max_tokens = kwargs.get("max_output_tokens", kwargs.get("max_tokens", None))
+
+            # Build API call parameters
+            create_params = {
+                "model": self.MODEL_NAME,
+                "messages": api_messages
+            }
+
+            # Add max_completion_tokens if specified (GPT-5 models require this instead of max_tokens)
+            if max_tokens:
+                create_params["max_completion_tokens"] = max_tokens
+
             # Call OpenAI GPT-5 API
-            response = self.client.chat.completions.create(
-                model=self.MODEL_NAME,
-                messages=api_messages
-            )
+            response = self.client.chat.completions.create(**create_params)
 
             # Calculate turnaround time
             turnaround_ms = int((time.time() - start_time) * 1000)

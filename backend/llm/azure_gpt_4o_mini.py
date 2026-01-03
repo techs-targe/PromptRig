@@ -9,7 +9,7 @@ from typing import Optional, List
 from openai import AzureOpenAI
 from dotenv import load_dotenv
 
-from .base import LLMClient, LLMResponse, Message
+from .base import LLMClient, LLMResponse, Message, EnvVarConfig
 
 # Load environment variables
 load_dotenv()
@@ -19,31 +19,35 @@ class AzureGPT4oMiniClient(LLMClient):
     """Azure OpenAI GPT-4o-mini client.
 
     Configuration from environment variables:
-    - AZURE_OPENAI_ENDPOINT
-    - AZURE_OPENAI_API_KEY
-    - AZURE_OPENAI_GPT4O_MINI_DEPLOYMENT_NAME
-    - AZURE_OPENAI_API_VERSION
+    - AZURE_GPT4O_MINI_ENDPOINT or AZURE_OPENAI_ENDPOINT
+    - AZURE_GPT4O_MINI_API_KEY or AZURE_OPENAI_API_KEY
+    - AZURE_GPT4O_MINI_DEPLOYMENT_NAME or AZURE_OPENAI_DEPLOYMENT_NAME
+    - AZURE_GPT4O_MINI_API_VERSION or AZURE_OPENAI_API_VERSION
 
     Model: gpt-4o-mini (version: 2024-07-18)
     Supports: Vision API, multimodal inputs
     """
 
+    # Model identifier for auto-discovery
+    DISPLAY_NAME = "azure-gpt-4o-mini"
+
+    # Environment variable configuration
+    ENV_VARS = [
+        EnvVarConfig("endpoint", "AZURE_GPT4O_MINI_ENDPOINT", "AZURE_OPENAI_ENDPOINT"),
+        EnvVarConfig("api_key", "AZURE_GPT4O_MINI_API_KEY", "AZURE_OPENAI_API_KEY"),
+        EnvVarConfig("deployment", "AZURE_GPT4O_MINI_DEPLOYMENT_NAME", "AZURE_OPENAI_DEPLOYMENT_NAME"),
+        EnvVarConfig("api_version", "AZURE_GPT4O_MINI_API_VERSION", "AZURE_OPENAI_API_VERSION",
+                     required=False, default="2024-02-15-preview"),
+    ]
+
     def __init__(self):
         """Initialize Azure OpenAI GPT-4o-mini client with environment configuration."""
-        self.endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-        self.api_key = os.getenv("AZURE_OPENAI_API_KEY")
-        # Use GPT-4o-mini specific deployment name
-        self.deployment_name = os.getenv("AZURE_OPENAI_GPT4O_MINI_DEPLOYMENT_NAME")
-        # GPT-4o-mini supports API version 2024-02-15-preview or later
-        self.api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+        self._validate_env_vars()
 
-        # Validate configuration
-        if not all([self.endpoint, self.api_key, self.deployment_name]):
-            raise ValueError(
-                "Azure OpenAI GPT-4o-mini configuration incomplete. "
-                "Please set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, "
-                "and AZURE_OPENAI_GPT4O_MINI_DEPLOYMENT_NAME in .env file."
-            )
+        self.endpoint = self._get_env_var("endpoint")
+        self.api_key = self._get_env_var("api_key")
+        self.deployment_name = self._get_env_var("deployment")
+        self.api_version = self._get_env_var("api_version")
 
         # Initialize client
         self.client = AzureOpenAI(

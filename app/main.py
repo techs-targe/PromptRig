@@ -24,11 +24,13 @@ if str(project_root) not in sys.path:
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.routes import main, config, run, projects, datasets, settings, workflows, prompts, tags
+from app.routes import main, config, run, projects, datasets, settings, workflows, prompts, tags, agent
+from backend.utils import get_app_name
 
-# Create FastAPI app
+# Create FastAPI app with dynamic app name
+app_name = get_app_name()
 app = FastAPI(
-    title="Prompt Evaluation System",
+    title=app_name,
     description="LLM prompt evaluation and benchmarking tool - Phase 2 Complete",
     version="2.0.0 (Phase 2 Complete)"
 )
@@ -54,6 +56,9 @@ app.include_router(prompts.router, tags=["prompts"])
 
 # Tags router (v3.1 - access control)
 app.include_router(tags.router, tags=["tags"])
+
+# Agent router (v3.2 - MCP server and AI agent)
+app.include_router(agent.router, tags=["agent"])
 
 
 @app.on_event("startup")

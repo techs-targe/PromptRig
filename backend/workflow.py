@@ -21,12 +21,50 @@ from sqlalchemy.orm import Session
 
 from .database.models import (
     Workflow, WorkflowStep, WorkflowJob, WorkflowJobStep,
-    Project, ProjectRevision, Prompt, PromptRevision, Job, JobItem
+    Project, ProjectRevision, Prompt, PromptRevision, Job, JobItem,
+    Dataset
 )
 from .job import JobManager
 from .prompt import PromptTemplateParser, get_message_parser
 
 logger = logging.getLogger(__name__)
+
+
+def _decode_escape_sequences(text: str) -> str:
+    """Decode common escape sequences in text.
+
+    Converts literal escape sequences to actual characters:
+    - \\n → newline
+    - \\t → tab
+    - \\r → carriage return
+    - \\" → double quote
+    - \\' → single quote
+    - \\\\ → backslash
+
+    Args:
+        text: String potentially containing escape sequences
+
+    Returns:
+        String with escape sequences decoded
+    """
+    if not text:
+        return text
+
+    # Replace escape sequences in order (backslash must be last to avoid double processing)
+    replacements = [
+        ('\\n', '\n'),
+        ('\\t', '\t'),
+        ('\\r', '\r'),
+        ('\\"', '"'),
+        ("\\'", "'"),
+        ('\\\\', '\\'),
+    ]
+
+    result = text
+    for escaped, actual in replacements:
+        result = result.replace(escaped, actual)
+
+    return result
 
 
 class WorkflowManager:
@@ -44,57 +82,257 @@ class WorkflowManager:
     - LOOP/ENDLOOP: Loop with condition
     - FOREACH/ENDFOREACH: Iterate over list
     - BREAK/CONTINUE: Loop control
+
+    Dataset iteration (FOREACH):
+    - dataset:ID - Iterate over all rows as dict objects
+    - dataset:ID:column - Iterate over values from specific column
+    - dataset:ID:col1,col2 - Iterate over rows with selected columns only
     """
 
-    # Pattern to match step references: {{step_name.field_name}}
-    STEP_REF_PATTERN = re.compile(r'\{\{(\w+)\.(\w+)\}\}')
+    # Pattern to match step references: {{step_name.field_name}} or nested {{a.b.c.d}}
+    # Supports unlimited nesting depth for JSON field access
+    STEP_REF_PATTERN = re.compile(r'\{\{(\w+(?:\.\w+)+)\}\}')
 
     # Pattern to match formula expressions: func_name(args)
     # Supported functions: sum, upper, lower, trim, length, slice, replace,
     # split, join, concat, default, contains, startswith, endswith, count,
-    # left, right, repeat, reverse, capitalize, title, lstrip, rstrip
+    # left, right, repeat, reverse, capitalize, title, lstrip, rstrip,
+    # getprompt, getparser
     FORMULA_PATTERN = re.compile(
         r'^(sum|upper|lower|trim|length|len|slice|substr|substring|replace|'
         r'split|join|concat|default|ifempty|contains|startswith|endswith|'
         r'count|left|right|repeat|reverse|capitalize|title|lstrip|rstrip|'
-        r'shuffle|debug|calc)\((.+)\)$',
+        r'shuffle|debug|calc|getprompt|getparser|json_parse|json_zip|format_choices|'
+        r'dataset_filter|dataset_join|array_push)\((.+)\)$',
         re.IGNORECASE
     )
 
     # Available string functions for documentation/UI
     STRING_FUNCTIONS = {
-        'upper': {'args': 1, 'desc': '大文字変換 / Convert to uppercase', 'example': 'upper({{step.text}})'},
-        'lower': {'args': 1, 'desc': '小文字変換 / Convert to lowercase', 'example': 'lower({{step.text}})'},
-        'trim': {'args': 1, 'desc': '前後空白削除 / Remove leading/trailing whitespace', 'example': 'trim({{step.text}})'},
-        'lstrip': {'args': 1, 'desc': '先頭空白削除 / Remove leading whitespace', 'example': 'lstrip({{step.text}})'},
-        'rstrip': {'args': 1, 'desc': '末尾空白削除 / Remove trailing whitespace', 'example': 'rstrip({{step.text}})'},
-        'length': {'args': 1, 'desc': '文字数 / String length', 'example': 'length({{step.text}})'},
-        'capitalize': {'args': 1, 'desc': '先頭大文字 / Capitalize first letter', 'example': 'capitalize({{step.text}})'},
-        'title': {'args': 1, 'desc': '各単語先頭大文字 / Title case', 'example': 'title({{step.text}})'},
-        'reverse': {'args': 1, 'desc': '文字列反転 / Reverse string', 'example': 'reverse({{step.text}})'},
-        'slice': {'args': '2-3', 'desc': '部分文字列 / Extract substring', 'example': 'slice({{step.text}}, 0, 10)'},
-        'left': {'args': 2, 'desc': '先頭N文字 / Left N characters', 'example': 'left({{step.text}}, 5)'},
-        'right': {'args': 2, 'desc': '末尾N文字 / Right N characters', 'example': 'right({{step.text}}, 5)'},
-        'replace': {'args': 3, 'desc': '置換 / Replace substring', 'example': 'replace({{step.text}}, old, new)'},
-        'repeat': {'args': 2, 'desc': '繰り返し / Repeat N times', 'example': 'repeat({{step.text}}, 3)'},
-        'split': {'args': 2, 'desc': '分割(JSON配列) / Split into array', 'example': 'split({{step.text}}, ,)'},
-        'join': {'args': 2, 'desc': '結合 / Join array elements', 'example': 'join({{step.items}}, ,)'},
-        'concat': {'args': '2+', 'desc': '連結 / Concatenate strings', 'example': 'concat({{step1.a}}, -, {{step2.b}})'},
-        'default': {'args': 2, 'desc': '空の場合のデフォルト値 / Default if empty', 'example': 'default({{step.text}}, N/A)'},
-        'contains': {'args': 2, 'desc': '含むか / Check if contains', 'example': 'contains({{step.text}}, word)'},
-        'startswith': {'args': 2, 'desc': '先頭一致 / Check if starts with', 'example': 'startswith({{step.text}}, prefix)'},
-        'endswith': {'args': 2, 'desc': '末尾一致 / Check if ends with', 'example': 'endswith({{step.text}}, suffix)'},
-        'count': {'args': 2, 'desc': '出現回数 / Count occurrences', 'example': 'count({{step.text}}, a)'},
-        'sum': {'args': '2+', 'desc': '合計 / Sum of numbers', 'example': 'sum({{step1.score}}, {{step2.score}})'},
-        'shuffle': {'args': '1-2', 'desc': 'シャッフル / Shuffle (1引数:文字, 2引数:デリミタ分割)', 'example': 'shuffle({{step.items}}, ;)'},
-        'calc': {'args': 1, 'desc': '計算式評価 / Evaluate arithmetic expression', 'example': 'calc({{vars.x}} + 1)'},
-        'debug': {'args': '1+', 'desc': 'デバッグ出力 / Debug output to log', 'example': 'debug({{step.result}})'},
+        # 文字列操作 / Text Operations
+        'upper': {
+            'args': 1, 'desc': '大文字変換 / Convert to uppercase',
+            'example': 'upper({{step.text}})',
+            'usage': ['upper("hello") → "HELLO"', 'upper("Tokyo") → "TOKYO"']
+        },
+        'lower': {
+            'args': 1, 'desc': '小文字変換 / Convert to lowercase',
+            'example': 'lower({{step.text}})',
+            'usage': ['lower("HELLO") → "hello"', 'lower("Tokyo") → "tokyo"']
+        },
+        'trim': {
+            'args': 1, 'desc': '前後空白削除 / Remove leading/trailing whitespace',
+            'example': 'trim({{step.text}})',
+            'usage': ['trim("  hello  ") → "hello"', 'trim("\\n text \\n") → "text"']
+        },
+        'lstrip': {
+            'args': 1, 'desc': '先頭空白削除 / Remove leading whitespace',
+            'example': 'lstrip({{step.text}})',
+            'usage': ['lstrip("  hello") → "hello"', 'lstrip("\\t text") → "text"']
+        },
+        'rstrip': {
+            'args': 1, 'desc': '末尾空白削除 / Remove trailing whitespace',
+            'example': 'rstrip({{step.text}})',
+            'usage': ['rstrip("hello  ") → "hello"', 'rstrip("text\\n") → "text"']
+        },
+        'length': {
+            'args': 1, 'desc': '文字数 / String length',
+            'example': 'length({{step.text}})',
+            'usage': ['length("hello") → 5', 'length("日本語") → 3']
+        },
+        'len': {
+            'args': 1, 'desc': '文字数 (lengthのエイリアス) / String length (alias)',
+            'example': 'len({{step.text}})',
+            'usage': ['len("hello") → 5', 'len("") → 0']
+        },
+        'capitalize': {
+            'args': 1, 'desc': '先頭大文字 / Capitalize first letter',
+            'example': 'capitalize({{step.text}})',
+            'usage': ['capitalize("hello world") → "Hello world"', 'capitalize("HELLO") → "Hello"']
+        },
+        'title': {
+            'args': 1, 'desc': '各単語先頭大文字 / Title case',
+            'example': 'title({{step.text}})',
+            'usage': ['title("hello world") → "Hello World"', 'title("the quick fox") → "The Quick Fox"']
+        },
+        'reverse': {
+            'args': 1, 'desc': '文字列反転 / Reverse string',
+            'example': 'reverse({{step.text}})',
+            'usage': ['reverse("hello") → "olleh"', 'reverse("12345") → "54321"']
+        },
+        'slice': {
+            'args': '2-3', 'desc': '部分文字列 / Extract substring',
+            'example': 'slice({{step.text}}, 0, 10)',
+            'usage': ['slice("hello world", 0, 5) → "hello"', 'slice("hello", 2) → "llo"', 'slice("hello", -2) → "lo"']
+        },
+        'left': {
+            'args': 2, 'desc': '先頭N文字 / Left N characters',
+            'example': 'left({{step.text}}, 5)',
+            'usage': ['left("hello world", 5) → "hello"', 'left("abc", 10) → "abc"']
+        },
+        'right': {
+            'args': 2, 'desc': '末尾N文字 / Right N characters',
+            'example': 'right({{step.text}}, 5)',
+            'usage': ['right("hello world", 5) → "world"', 'right("abc", 10) → "abc"']
+        },
+        'replace': {
+            'args': 3, 'desc': '置換 / Replace substring',
+            'example': 'replace({{step.text}}, old, new)',
+            'usage': ['replace("hello", "l", "L") → "heLLo"', 'replace("a-b-c", "-", "_") → "a_b_c"']
+        },
+        'repeat': {
+            'args': 2, 'desc': '繰り返し / Repeat N times',
+            'example': 'repeat({{step.text}}, 3)',
+            'usage': ['repeat("ab", 3) → "ababab"', 'repeat("-", 10) → "----------"']
+        },
+        'split': {
+            'args': 2, 'desc': '分割(JSON配列) / Split into array',
+            'example': 'split({{step.text}}, ,)',
+            'usage': ['split("a,b,c", ",") → ["a","b","c"]', 'split("1;2;3", ";") → ["1","2","3"]']
+        },
+        'join': {
+            'args': 2, 'desc': '結合 / Join array elements',
+            'example': 'join({{step.items}}, ,)',
+            'usage': ['join(["a","b","c"], "-") → "a-b-c"', 'join(["1","2"], "") → "12"']
+        },
+        'concat': {
+            'args': '2+', 'desc': '連結 / Concatenate strings',
+            'example': 'concat({{step1.a}}, -, {{step2.b}})',
+            'usage': ['concat("Hello", " ", "World") → "Hello World"', 'concat({{vars.first}}, {{vars.last}}) → 名前結合']
+        },
+        'default': {
+            'args': 2, 'desc': '空の場合のデフォルト値 / Default if empty',
+            'example': 'default({{step.text}}, N/A)',
+            'usage': ['default("", "N/A") → "N/A"', 'default("value", "N/A") → "value"', 'default(null, "未設定") → "未設定"']
+        },
+        'ifempty': {
+            'args': 2, 'desc': '空の場合のデフォルト値 (defaultのエイリアス) / Default if empty (alias)',
+            'example': 'ifempty({{step.text}}, N/A)',
+            'usage': ['ifempty("", "デフォルト") → "デフォルト"', 'ifempty({{step.result}}, "結果なし")']
+        },
+        # 検索・判定 / Search & Check
+        'contains': {
+            'args': 2, 'desc': '含むか / Check if contains',
+            'example': 'contains({{step.text}}, word)',
+            'usage': ['contains("hello world", "world") → true', 'contains("abc", "x") → false']
+        },
+        'startswith': {
+            'args': 2, 'desc': '先頭一致 / Check if starts with',
+            'example': 'startswith({{step.text}}, prefix)',
+            'usage': ['startswith("hello", "he") → true', 'startswith("world", "he") → false']
+        },
+        'endswith': {
+            'args': 2, 'desc': '末尾一致 / Check if ends with',
+            'example': 'endswith({{step.text}}, suffix)',
+            'usage': ['endswith("hello.txt", ".txt") → true', 'endswith("file.pdf", ".txt") → false']
+        },
+        'count': {
+            'args': 2, 'desc': '出現回数 / Count occurrences',
+            'example': 'count({{step.text}}, a)',
+            'usage': ['count("banana", "a") → 3', 'count("hello", "l") → 2']
+        },
+        # 計算 / Math
+        'sum': {
+            'args': '2+', 'desc': '合計 / Sum of numbers',
+            'example': 'sum({{step1.score}}, {{step2.score}})',
+            'usage': ['sum(1, 2, 3) → 6', 'sum({{vars.a}}, {{vars.b}}) → 2つの変数の合計']
+        },
+        'calc': {
+            'args': 1, 'desc': '計算式評価 / Evaluate arithmetic expression',
+            'example': 'calc({{vars.x}} + 1)',
+            'usage': ['calc(10 + 5) → 15', 'calc({{vars.score}} * 2) → スコアを2倍', 'calc(100 / 4) → 25', 'calc({{vars.correct}} / {{vars.total}} * 100) → 正解率%']
+        },
+        # JSON処理 / JSON Processing
+        'json_parse': {
+            'args': 1, 'desc': 'JSON文字列をパース / Parse JSON string for nested access',
+            'example': 'json_parse({{step.result}})',
+            'usage': ['json_parse(\'{"name":"太郎"}\').name → "太郎"', 'json_parse({{step.json}}).items[0] → 最初の要素']
+        },
+        'json_zip': {
+            'args': '2+', 'desc': '複数キーの配列をzip / Zip arrays from JSON into list of dicts',
+            'example': 'json_zip({{step.json}}, text, label)',
+            'usage': ['json_zip({"a":[1,2],"b":["x","y"]}, a, b) → [{"a":1,"b":"x"},{"a":2,"b":"y"}]', 'FOREACHで複数配列を同時処理する場合に使用']
+        },
+        'format_choices': {
+            'args': 1, 'desc': '選択肢JSONをフォーマット / Format choices JSON as A:text, B:text...',
+            'example': 'format_choices({{step.choices}})',
+            'usage': ['format_choices({"A":"りんご","B":"みかん"}) → "A: りんご\\nB: みかん"', 'クイズの選択肢表示に使用']
+        },
+        # データセット / Dataset
+        'dataset_filter': {
+            'args': 2, 'desc': 'データセット絞り込み (AND/OR/数値比較/LIKE対応) / Filter dataset rows',
+            'example': "dataset_filter(dataset:6, \"score>80 AND category='a'\")",
+            'usage': [
+                "dataset_filter(dataset:6, \"category='A'\") → カテゴリAの行のみ",
+                "dataset_filter(dataset:6, \"score>=80\") → 80点以上",
+                "dataset_filter(dataset:6, \"name LIKE 'test%'\") → test始まり",
+                "dataset_filter(dataset:6, \"status='done' OR status='skip'\") → OR条件",
+                "dataset_filter(dataset:6, \"score>50 AND category='math'\") → AND条件"
+            ]
+        },
+        'dataset_join': {
+            'args': '2-3', 'desc': 'データセットカラム値を結合 / Join column values with separator',
+            'example': "dataset_join(dataset:6, \"value\", \"\\n\")",
+            'usage': ['dataset_join(dataset:6, "name", ", ") → "田中, 鈴木, 佐藤"', 'dataset_join(dataset:6, "id") → "1,2,3" (デフォルト区切り)']
+        },
+        # 配列操作関数 / Array manipulation functions
+        'array_push': {
+            'args': 2, 'desc': '配列に要素を追加 / Push element to array',
+            'example': 'array_push({{vars.items}}, {{step.value}})',
+            'usage': ['array_push({{vars.results}}, {{step.answer}}) → ループで結果を蓄積', 'array_push([], "first") → ["first"]']
+        },
+        'shuffle': {
+            'args': '1-2', 'desc': 'シャッフル / Shuffle (1引数:文字, 2引数:デリミタ分割)',
+            'example': 'shuffle({{step.items}}, ;)',
+            'usage': ['shuffle("abc") → "bca" (文字単位)', 'shuffle("A;B;C", ";") → "C;A;B" (デリミタ分割)']
+        },
+        # 日時関数 / Date and time functions
+        'now': {
+            'args': '0-1', 'desc': '現在日時 / Current datetime',
+            'example': 'now(%Y-%m-%d %H:%M:%S)',
+            'usage': ['now() → "2024-01-15 14:30:00"', 'now(%Y年%m月%d日) → "2024年01月15日"']
+        },
+        'today': {
+            'args': '0-1', 'desc': '今日の日付 / Today\'s date',
+            'example': 'today(%Y-%m-%d)',
+            'usage': ['today() → "2024-01-15"', 'today(%m/%d) → "01/15"']
+        },
+        'time': {
+            'args': '0-1', 'desc': '現在時刻 / Current time',
+            'example': 'time(%H:%M:%S)',
+            'usage': ['time() → "14:30:00"', 'time(%H時%M分) → "14時30分"']
+        },
+        # ユーティリティ / Utility
+        'debug': {
+            'args': '1+', 'desc': 'デバッグ出力 / Debug output to log',
+            'example': 'debug({{step.result}})',
+            'usage': ['debug({{vars.counter}}) → サーバーログに値を出力', 'debug("checkpoint", {{step.data}}) → ラベル付きデバッグ']
+        },
+        'getprompt': {
+            'args': '1-3', 'desc': 'プロンプト内容取得 / Get prompt content',
+            'example': 'getprompt(プロンプト名, CURRENT, CURRENT)',
+            'usage': ['getprompt(質問プロンプト) → プロンプトテンプレート取得', 'getprompt(プロンプト名, プロジェクト名, リビジョン) → 特定バージョン取得']
+        },
+        'getparser': {
+            'args': '1-3', 'desc': 'パーサー設定取得 / Get parser config',
+            'example': 'getparser(プロンプト名, CURRENT, CURRENT)',
+            'usage': ['getparser(質問プロンプト) → パーサー設定取得', 'getparser(プロンプト名, CURRENT, CURRENT) → 現在のプロジェクトから']
+        },
+    }
+
+    # Special constants for getprompt/getparser functions
+    SPECIAL_CONSTANTS = {
+        'CURRENT': 'Use current project (workflow\'s project) or latest revision',
     }
 
     # Step types for control flow
-    CONTROL_FLOW_TYPES = {'set', 'if', 'elif', 'else', 'endif', 'loop', 'endloop', 'foreach', 'endforeach', 'break', 'continue'}
+    CONTROL_FLOW_TYPES = {'set', 'if', 'elif', 'else', 'endif', 'loop', 'endloop', 'foreach', 'endforeach', 'break', 'continue', 'output'}
     BLOCK_START_TYPES = {'if', 'loop', 'foreach'}
     BLOCK_END_TYPES = {'endif', 'endloop', 'endforeach'}
+
+    # Output types for output step
+    OUTPUT_TYPES = {'screen', 'file'}
+    OUTPUT_FORMATS = {'text', 'csv', 'json'}
 
     # Default max iterations for loops to prevent infinite loops
     DEFAULT_MAX_ITERATIONS = 100
@@ -442,6 +680,13 @@ class WorkflowManager:
         variables: Dict[str, Any] = {}
         step_context["vars"] = variables
 
+        # Add workflow metadata to context (for getprompt/getparser functions)
+        step_context["_meta"] = {
+            "workflow_id": workflow_id,
+            "project_id": workflow.project_id,
+            "project_name": workflow.project.name if workflow.project else None,
+        }
+
         # Loop state tracking: stack of (loop_start_ip, iteration_count, max_iterations)
         loop_stack: List[Tuple[int, int, int]] = []
 
@@ -735,6 +980,23 @@ class WorkflowManager:
                             "warning": "outside_of_loop"
                         })
 
+                elif step_type == "output":
+                    # Execute OUTPUT step
+                    config = json.loads(step.condition_config or "{}")
+                    output_result = self._execute_output_step(
+                        step, steps, ip, step_context, variables, workflow_job
+                    )
+                    ip += 1
+                    execution_trace.append({
+                        "step_order": step.step_order,
+                        "step_name": step.step_name,
+                        "step_type": "output",
+                        "action": "output_executed",
+                        "output_type": config.get("output_type", "screen"),
+                        "format": config.get("format", "text"),
+                        "result": output_result.get("preview", "")[:100] if output_result else ""
+                    })
+
                 else:
                     logger.warning(f"Unknown step type '{step_type}' at step {step.step_order}, treating as prompt")
                     ip = self._execute_prompt_step(
@@ -887,6 +1149,204 @@ class WorkflowManager:
 
         return ip + 1
 
+    def _execute_output_step(
+        self,
+        step: WorkflowStep,
+        steps: List[WorkflowStep],
+        ip: int,
+        step_context: Dict[str, Dict[str, Any]],
+        variables: Dict[str, Any],
+        workflow_job: WorkflowJob
+    ) -> Dict[str, Any]:
+        """Execute an OUTPUT step to output variables to screen or file.
+
+        Args:
+            step: Current step
+            steps: All steps
+            ip: Current instruction pointer
+            step_context: Step context with outputs
+            variables: Variables store
+            workflow_job: WorkflowJob object
+
+        Returns:
+            Dict with output result info (preview, filename, etc.)
+
+        Condition Config Schema:
+            {
+                "output_type": "screen" | "file",    // Output destination
+                "format": "text" | "csv" | "json",   // Output format
+                "content": "{{vars.x}}",             // For text format
+                "columns": ["col1", "col2"],         // For CSV format (header names)
+                "values": ["{{vars.a}}", "{{step.b}}"], // For CSV format (data values)
+                "fields": {"key": "{{vars.x}}"},     // For JSON format
+                "filename": "result.csv",            // For file output
+                "append": true                       // Append mode (for foreach loops)
+            }
+        """
+        import os
+        import csv
+        import io
+
+        config = json.loads(step.condition_config or "{}")
+
+        output_type = config.get("output_type", "screen")
+        output_format = config.get("format", "text")
+        append_mode = config.get("append", False)
+        filename = config.get("filename", "")
+
+        result = {
+            "output_type": output_type,
+            "format": output_format,
+            "preview": "",
+            "filename": None,
+            "filepath": None
+        }
+
+        # Resolve filename if provided (may contain variables)
+        if filename:
+            filename = self._substitute_step_refs(filename, step_context)
+
+        # Build output content based on format
+        if output_format == "text":
+            # Simple text output
+            content = config.get("content", "")
+            resolved_content = self._substitute_step_refs(str(content), step_context)
+            result["content"] = resolved_content
+            result["preview"] = resolved_content[:200]
+            logger.info(f"OUTPUT (text): {resolved_content[:100]}...")
+
+        elif output_format == "csv":
+            # CSV output with columns and values
+            columns = config.get("columns", [])
+            values = config.get("values", [])
+
+            # Resolve column names if they contain variables (usually static)
+            resolved_columns = [self._substitute_step_refs(str(c), step_context) for c in columns]
+
+            # Resolve values
+            resolved_values = [self._substitute_step_refs(str(v), step_context) for v in values]
+
+            # Build CSV row
+            output_buffer = io.StringIO()
+            writer = csv.writer(output_buffer, lineterminator='\n')
+            writer.writerow(resolved_values)
+            csv_row = output_buffer.getvalue().strip()
+
+            result["columns"] = resolved_columns
+            result["values"] = resolved_values
+            result["csv_row"] = csv_row
+            result["preview"] = csv_row[:200]
+
+            # Add fields for _merge_csv_outputs() compatibility
+            result["csv_output"] = csv_row
+            result["csv_header"] = ",".join(resolved_columns) if resolved_columns else None
+
+            logger.info(f"OUTPUT (csv): {csv_row[:100]}...")
+
+        elif output_format == "json":
+            # JSON output with fields
+            fields = config.get("fields", {})
+            resolved_fields = {}
+            for key, value_expr in fields.items():
+                resolved_value = self._substitute_step_refs(str(value_expr), step_context)
+                # Try to parse as JSON if it looks like it
+                try:
+                    if resolved_value.startswith('{') or resolved_value.startswith('['):
+                        resolved_fields[key] = json.loads(resolved_value)
+                    else:
+                        resolved_fields[key] = resolved_value
+                except json.JSONDecodeError:
+                    resolved_fields[key] = resolved_value
+
+            result["fields"] = resolved_fields
+            json_str = json.dumps(resolved_fields, ensure_ascii=False, indent=2)
+            result["content"] = json_str
+            result["preview"] = json_str[:200]
+            logger.info(f"OUTPUT (json): {json_str[:100]}...")
+
+        # Handle file output
+        if output_type == "file" and filename:
+            # Ensure uploads directory exists
+            uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads", "workflow_outputs")
+            os.makedirs(uploads_dir, exist_ok=True)
+
+            # Sanitize filename
+            safe_filename = "".join(c for c in filename if c.isalnum() or c in '._-')
+            if not safe_filename:
+                safe_filename = f"output_{workflow_job.id}_{step.step_name}"
+
+            # Add extension if not present
+            if output_format == "csv" and not safe_filename.endswith('.csv'):
+                safe_filename += '.csv'
+            elif output_format == "json" and not safe_filename.endswith('.json'):
+                safe_filename += '.json'
+            elif output_format == "text" and not safe_filename.endswith('.txt'):
+                safe_filename += '.txt'
+
+            filepath = os.path.join(uploads_dir, safe_filename)
+
+            # Handle append mode for CSV (used in foreach loops)
+            if output_format == "csv" and append_mode:
+                file_exists = os.path.exists(filepath)
+                with open(filepath, 'a', encoding='utf-8', newline='') as f:
+                    writer = csv.writer(f, lineterminator='\n')
+                    # Write header only if file is new
+                    if not file_exists and resolved_columns:
+                        writer.writerow(resolved_columns)
+                    writer.writerow(resolved_values)
+                logger.info(f"OUTPUT (file/append): {filepath}")
+            else:
+                # Overwrite mode
+                with open(filepath, 'w', encoding='utf-8', newline='') as f:
+                    if output_format == "csv":
+                        writer = csv.writer(f, lineterminator='\n')
+                        if resolved_columns:
+                            writer.writerow(resolved_columns)
+                        writer.writerow(resolved_values)
+                    elif output_format == "json":
+                        f.write(result.get("content", "{}"))
+                    else:
+                        # Decode escape sequences for text format (e.g., \n → actual newline)
+                        content = _decode_escape_sequences(result.get("content", ""))
+                        f.write(content)
+                logger.info(f"OUTPUT (file/write): {filepath}")
+
+            result["filename"] = safe_filename
+            result["filepath"] = filepath
+
+        # Store output in step context
+        # For CSV format, accumulate rows across foreach loop iterations
+        if output_format == "csv":
+            existing = step_context.get(step.step_name, {})
+            existing_csv = existing.get("csv_output", "")
+            new_csv = result.get("csv_output", "")
+
+            if existing_csv and new_csv:
+                # Append new row to existing rows
+                result["csv_output"] = existing_csv + "\n" + new_csv
+                # Keep header from first iteration
+                result["csv_header"] = existing.get("csv_header") or result.get("csv_header")
+
+        step_context[step.step_name] = result
+
+        # Also store accumulated CSV data for merged output
+        if output_format == "csv" and output_type == "file":
+            # Track CSV outputs in a special context key
+            if "_csv_outputs" not in step_context:
+                step_context["_csv_outputs"] = {}
+
+            output_key = step.step_name
+            if output_key not in step_context["_csv_outputs"]:
+                step_context["_csv_outputs"][output_key] = {
+                    "columns": resolved_columns,
+                    "rows": [],
+                    "filename": result.get("filename"),
+                    "filepath": result.get("filepath")
+                }
+            step_context["_csv_outputs"][output_key]["rows"].append(resolved_values)
+
+        return result
+
     def _execute_if_step(
         self,
         step: WorkflowStep,
@@ -1009,7 +1469,8 @@ class WorkflowManager:
             return ip + 1
 
         # First entry into FOREACH - parse source list
-        source_expr = config.get("source", "")
+        # Support both "source" (new) and "list_ref" (legacy) keys
+        source_expr = config.get("source", "") or config.get("list_ref", "")
         item_var = config.get("item_var", "item")
         index_var = config.get("index_var", "i")
 
@@ -1077,12 +1538,21 @@ class WorkflowManager:
         """Parse FOREACH source into a list.
 
         Args:
-            source: Source string (JSON array or comma-separated values)
+            source: Source string. Supported formats:
+                - JSON array: ["a", "b", "c"]
+                - Comma-separated: a, b, c
+                - Dataset reference: dataset:ID (all rows as dicts)
+                - Dataset column: dataset:ID:column (values from specific column)
+                - Dataset columns: dataset:ID:col1,col2 (rows with selected columns)
 
         Returns:
             List of items
         """
         source = source.strip()
+
+        # Check for dataset reference: dataset:ID or dataset:ID:columns
+        if source.startswith('dataset:'):
+            return self._load_dataset_for_foreach(source)
 
         # Try parsing as JSON array first
         if source.startswith('['):
@@ -1099,6 +1569,361 @@ class WorkflowManager:
         if source:
             return [source]
         return []
+
+    def _evaluate_filter_condition(self, condition: str, row: dict) -> bool:
+        """Evaluate a filter condition against a row.
+
+        Supports:
+        - column = 'value' or column == 'value' (equality)
+        - column != 'value' or column <> 'value' (inequality)
+        - column < 100, column > 50, column <= 80, column >= 20 (numeric)
+        - column LIKE 'pattern%' (SQL-like pattern matching)
+        - column contains 'text' (substring matching)
+        - column IS NULL, column IS NOT NULL
+        - column IS EMPTY, column IS NOT EMPTY
+        - condition1 AND condition2
+        - condition1 OR condition2
+
+        Args:
+            condition: Condition string
+            row: Row dictionary to evaluate
+
+        Returns:
+            True if condition matches, False otherwise
+        """
+        condition = condition.strip()
+        if not condition:
+            return True
+
+        # Handle OR first (lower precedence)
+        # Split on ' OR ' (case insensitive) but not inside quotes
+        or_parts = self._split_condition_by_operator(condition, ' OR ')
+        if len(or_parts) > 1:
+            return any(self._evaluate_filter_condition(part, row) for part in or_parts)
+
+        # Handle AND (higher precedence)
+        and_parts = self._split_condition_by_operator(condition, ' AND ')
+        if len(and_parts) > 1:
+            return all(self._evaluate_filter_condition(part, row) for part in and_parts)
+
+        # Single condition - parse and evaluate
+        return self._evaluate_single_condition(condition, row)
+
+    def _split_condition_by_operator(self, condition: str, operator: str) -> List[str]:
+        """Split condition by operator, respecting quoted strings.
+
+        Args:
+            condition: Condition string
+            operator: Operator to split by (e.g., ' AND ', ' OR ')
+
+        Returns:
+            List of condition parts
+        """
+        # Simple split that handles quoted strings
+        parts = []
+        current = ""
+        in_single_quote = False
+        in_double_quote = False
+        i = 0
+        op_upper = operator.upper()
+        cond_upper = condition.upper()
+
+        while i < len(condition):
+            char = condition[i]
+
+            # Track quote state
+            if char == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+            elif char == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+
+            # Check for operator (case-insensitive) when not in quotes
+            if not in_single_quote and not in_double_quote:
+                if cond_upper[i:i+len(operator)] == op_upper:
+                    if current.strip():
+                        parts.append(current.strip())
+                    current = ""
+                    i += len(operator)
+                    continue
+
+            current += char
+            i += 1
+
+        if current.strip():
+            parts.append(current.strip())
+
+        return parts if len(parts) > 1 else [condition]
+
+    def _evaluate_single_condition(self, condition: str, row: dict) -> bool:
+        """Evaluate a single condition (no AND/OR).
+
+        Args:
+            condition: Single condition string
+            row: Row dictionary
+
+        Returns:
+            True if condition matches
+        """
+        condition = condition.strip()
+
+        # IS NULL / IS NOT NULL
+        is_null_match = re.match(r"(\w+)\s+IS\s+(NOT\s+)?NULL", condition, re.IGNORECASE)
+        if is_null_match:
+            col_name = is_null_match.group(1)
+            is_not = is_null_match.group(2) is not None
+            row_value = row.get(col_name)
+            is_null = row_value is None
+            return not is_null if is_not else is_null
+
+        # IS EMPTY / IS NOT EMPTY
+        is_empty_match = re.match(r"(\w+)\s+IS\s+(NOT\s+)?EMPTY", condition, re.IGNORECASE)
+        if is_empty_match:
+            col_name = is_empty_match.group(1)
+            is_not = is_empty_match.group(2) is not None
+            row_value = row.get(col_name)
+            is_empty = row_value is None or str(row_value).strip() == ""
+            return not is_empty if is_not else is_empty
+
+        # LIKE pattern matching
+        like_match = re.match(r"(\w+)\s+LIKE\s+['\"](.+?)['\"]", condition, re.IGNORECASE)
+        if like_match:
+            col_name = like_match.group(1)
+            pattern = like_match.group(2)
+            row_value = str(row.get(col_name, ""))
+            # Convert SQL LIKE pattern to regex: % -> .*, _ -> .
+            regex_pattern = "^" + pattern.replace("%", ".*").replace("_", ".") + "$"
+            try:
+                return bool(re.match(regex_pattern, row_value, re.IGNORECASE))
+            except re.error:
+                return False
+
+        # Standard comparison: column operator value
+        # Operators: = == != <> < > <= >= contains
+        comp_match = re.match(
+            r"(\w+)\s*(<=|>=|<>|!=|==|=|<|>|contains)\s*['\"]?([^'\"]*)['\"]?",
+            condition,
+            re.IGNORECASE
+        )
+        if comp_match:
+            col_name = comp_match.group(1)
+            operator = comp_match.group(2).lower()
+            value = comp_match.group(3)
+            row_value = row.get(col_name)
+
+            # Handle None values
+            if row_value is None:
+                row_value = ""
+
+            row_value_str = str(row_value)
+
+            # Equality operators
+            if operator in ("=", "=="):
+                return row_value_str == value
+            elif operator in ("!=", "<>"):
+                return row_value_str != value
+            elif operator == "contains":
+                return value.lower() in row_value_str.lower()
+
+            # Numeric comparisons
+            try:
+                row_num = float(row_value_str) if row_value_str else 0
+                val_num = float(value) if value else 0
+
+                if operator == "<":
+                    return row_num < val_num
+                elif operator == ">":
+                    return row_num > val_num
+                elif operator == "<=":
+                    return row_num <= val_num
+                elif operator == ">=":
+                    return row_num >= val_num
+            except (ValueError, TypeError):
+                # Fall back to string comparison for non-numeric values
+                if operator == "<":
+                    return row_value_str < value
+                elif operator == ">":
+                    return row_value_str > value
+                elif operator == "<=":
+                    return row_value_str <= value
+                elif operator == ">=":
+                    return row_value_str >= value
+
+        # Unknown condition format - log and return False (exclude row)
+        logger.warning(f"dataset_filter: Unknown condition format: {condition}")
+        return False
+
+    def _load_dataset_for_foreach(self, source: str) -> List[Any]:
+        """Load dataset rows for FOREACH iteration.
+
+        Args:
+            source: Dataset reference string. Formats:
+                - dataset:ID - All rows as dict objects
+                - dataset:ID:column - Values from specific column as list
+                - dataset:ID:col1,col2 - Rows with only selected columns
+                - dataset:ID::limit:N - First N rows (all columns)
+                - dataset:ID:column:limit:N - First N rows from specific column
+                - dataset:ID:col1,col2:limit:N - First N rows with selected columns
+
+        Returns:
+            List of rows (dicts) or column values (strings)
+        """
+        from sqlalchemy import text
+        import random as rand_module
+
+        # Extract RANDOM clause if present (:random:N or :random:N:seed:S)
+        limit_clause = None
+        use_random = False
+        random_seed = None
+
+        if ':random:' in source:
+            random_parts = source.split(':random:')
+            source = random_parts[0]
+            remaining = random_parts[1] if len(random_parts) > 1 else ""
+
+            if ':seed:' in remaining:
+                seed_parts = remaining.split(':seed:')
+                try:
+                    limit_clause = int(seed_parts[0])
+                    random_seed = int(seed_parts[1])
+                    use_random = True
+                    logger.debug(f"FOREACH random: limit={limit_clause}, seed={random_seed}")
+                except (ValueError, IndexError):
+                    logger.warning(f"Invalid random/seed format: {remaining}")
+                    return []  # Invalid syntax = 0 rows
+            else:
+                try:
+                    limit_clause = int(remaining)
+                    use_random = True
+                    logger.debug(f"FOREACH random: limit={limit_clause}, no seed")
+                except ValueError:
+                    logger.warning(f"Invalid random limit: {remaining}")
+                    return []  # Invalid syntax = 0 rows
+
+        # Extract LIMIT clause if present (:limit:N or :limit:N:seed:S) - only if not using random
+        elif ':limit:' in source:
+            limit_parts = source.split(':limit:')
+            source = limit_parts[0]
+            remaining = limit_parts[1] if len(limit_parts) > 1 else ""
+
+            if ':seed:' in remaining:
+                # :limit:N:seed:S format
+                seed_parts = remaining.split(':seed:')
+                try:
+                    limit_clause = int(seed_parts[0])
+                    random_seed = int(seed_parts[1])
+                    use_random = True  # Apply random shuffle with seed
+                    logger.debug(f"FOREACH limit with seed: limit={limit_clause}, seed={random_seed}")
+                except (ValueError, IndexError):
+                    logger.warning(f"Invalid limit/seed format: {remaining}")
+                    return []  # Invalid syntax = 0 rows
+            else:
+                # :limit:N format
+                try:
+                    limit_clause = int(remaining)
+                    logger.debug(f"FOREACH limit: {limit_clause}")
+                except (ValueError, IndexError):
+                    logger.warning(f"Invalid limit value in source: {limit_parts}")
+                    return []  # Invalid syntax = 0 rows
+
+        parts = source.split(':', 2)  # Split into max 3 parts
+        if len(parts) < 2:
+            logger.warning(f"Invalid dataset reference: {source}")
+            return []
+
+        try:
+            dataset_id = int(parts[1])
+        except ValueError:
+            logger.warning(f"Invalid dataset ID in: {source}")
+            return []
+
+        # Get dataset from database
+        dataset = self.db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        if not dataset:
+            logger.warning(f"Dataset {dataset_id} not found")
+            return []
+
+        table_name = dataset.sqlite_table_name
+        if not table_name:
+            logger.warning(f"Dataset {dataset_id} has no table")
+            return []
+
+        # Get column names from table
+        try:
+            col_result = self.db.execute(text(f'PRAGMA table_info("{table_name}")'))
+            all_columns = [row[1] for row in col_result]
+        except Exception as e:
+            logger.error(f"Failed to get columns for dataset {dataset_id}: {e}")
+            return []
+
+        if not all_columns:
+            logger.warning(f"Dataset {dataset_id} has no columns")
+            return []
+
+        # Determine which columns to select
+        selected_columns = all_columns
+        single_column = None
+
+        if len(parts) == 3 and parts[2]:
+            column_spec = parts[2].strip()
+            if ',' in column_spec:
+                # Multiple columns specified: dataset:ID:col1,col2
+                selected_columns = [c.strip() for c in column_spec.split(',') if c.strip()]
+                # Validate columns exist
+                invalid_cols = [c for c in selected_columns if c not in all_columns]
+                if invalid_cols:
+                    logger.warning(f"Invalid columns {invalid_cols} in dataset {dataset_id}")
+                    selected_columns = [c for c in selected_columns if c in all_columns]
+                    if not selected_columns:
+                        logger.warning(f"All specified columns are invalid for dataset {dataset_id}")
+                        return []  # All columns invalid = 0 rows
+            else:
+                # Single column specified: dataset:ID:column
+                if column_spec in all_columns:
+                    single_column = column_spec
+                    selected_columns = [column_spec]
+                else:
+                    logger.warning(f"Column '{column_spec}' not found in dataset {dataset_id}")
+                    return []
+
+        # Build and execute query
+        cols_sql = ', '.join([f'"{c}"' for c in selected_columns])
+        sql = f'SELECT {cols_sql} FROM "{table_name}"'
+
+        # Handle random ordering
+        if use_random:
+            if random_seed is not None:
+                # Seed specified: fetch all then use Python shuffle for reproducibility
+                pass  # Don't add ORDER BY RANDOM() - will shuffle in Python
+            else:
+                # No seed: use SQL RANDOM() for efficiency
+                sql += ' ORDER BY RANDOM()'
+
+        if limit_clause and not (use_random and random_seed is not None):
+            # Apply LIMIT in SQL (except when using seed - need to shuffle first)
+            sql += f' LIMIT {limit_clause}'
+
+        try:
+            result = self.db.execute(text(sql))
+            rows = result.fetchall()
+        except Exception as e:
+            logger.error(f"Failed to load dataset {dataset_id}: {e}")
+            return []
+
+        # Apply Python-level random with seed if specified (for reproducibility)
+        if use_random and random_seed is not None:
+            rand_module.seed(random_seed)
+            rows = list(rows)
+            rand_module.shuffle(rows)
+            if limit_clause:
+                rows = rows[:limit_clause]
+
+        # Return data in appropriate format
+        if single_column:
+            # Return list of values from single column
+            return [row[0] if row[0] is not None else "" for row in rows]
+        else:
+            # Return list of dicts
+            return [dict(zip(selected_columns, row)) for row in rows]
 
     def _evaluate_condition(self, step: WorkflowStep, step_context: Dict[str, Dict[str, Any]]) -> bool:
         """Evaluate condition for IF/ELIF/LOOP steps.
@@ -1274,8 +2099,8 @@ class WorkflowManager:
         Returns:
             Resolved input parameters
         """
-        # For first step, use initial params
-        if step.step_order == 1:
+        # For first step (step_order=0), use initial params
+        if step.step_order == 0:
             return dict(initial_params)
 
         # Start with empty dict for subsequent steps
@@ -1312,15 +2137,49 @@ class WorkflowManager:
             args_str = formula_match.group(2)
             return str(self._evaluate_formula(func_name, args_str, step_context))
 
-        # Otherwise, do normal variable substitution
+        # Otherwise, do normal variable substitution with nested access support
         def replacer(match):
-            step_name = match.group(1)
-            field_name = match.group(2)
+            full_path = match.group(1)  # "vars.item.text" or "step.field"
+            parts = full_path.split('.')
 
-            if step_name in step_context:
-                value = step_context[step_name].get(field_name, "")
-                return str(value) if value is not None else ""
-            return match.group(0)  # Keep original if not found
+            # Handle "step.STEPNAME.field" format - skip the "step" prefix
+            # This allows {{step.ask.answer}} to resolve to step_context["ask"]["answer"]
+            if parts[0] == "step" and len(parts) >= 3:
+                parts = parts[1:]  # Remove "step" prefix
+
+            # First part must be in step_context
+            if parts[0] not in step_context:
+                return match.group(0)  # Keep original if not found
+
+            # Start with the top-level context value
+            value = step_context[parts[0]]
+
+            # Navigate through nested fields
+            for part in parts[1:]:
+                if isinstance(value, dict):
+                    value = value.get(part, "")
+                elif isinstance(value, str):
+                    # Try to parse as JSON for nested access
+                    try:
+                        parsed = json.loads(value)
+                        if isinstance(parsed, dict):
+                            value = parsed.get(part, "")
+                        else:
+                            # Can't access field on non-dict
+                            return match.group(0)
+                    except (json.JSONDecodeError, TypeError):
+                        return match.group(0)
+                else:
+                    # Can't navigate further
+                    return match.group(0)
+
+                if value is None:
+                    return ""
+
+            # Convert result to string
+            if isinstance(value, (dict, list)):
+                return json.dumps(value, ensure_ascii=False)
+            return str(value) if value is not None else ""
 
         return self.STEP_REF_PATTERN.sub(replacer, template)
 
@@ -1418,9 +2277,21 @@ class WorkflowManager:
                 if len(args) >= 2:
                     text = str(args[0])
                     delimiter = str(args[1])
+                    # Handle empty delimiter (common when user writes split(text, ,) without quotes)
+                    if not delimiter:
+                        delimiter = ","  # Default to comma if delimiter is empty
                     result = text.split(delimiter)
                     return json.dumps(result, ensure_ascii=False)
-                return json.dumps([str(args[0])], ensure_ascii=False) if args else "[]"
+                elif len(args) == 1:
+                    # Only 1 arg provided - use comma as default delimiter
+                    # This handles cases like split({{vars.list}}, ,) where the comma
+                    # delimiter was consumed by the argument parser
+                    text = str(args[0])
+                    if "," in text:
+                        result = text.split(",")
+                        return json.dumps(result, ensure_ascii=False)
+                    return json.dumps([text], ensure_ascii=False)
+                return "[]"
 
             if func_name == "join":
                 if len(args) >= 2:
@@ -1439,6 +2310,22 @@ class WorkflowManager:
 
             if func_name == "concat":
                 return "".join(str(arg) for arg in args)
+
+            if func_name == "array_push":
+                if len(args) >= 2:
+                    arr = args[0]
+                    new_item = args[1]
+                    # Handle JSON array string or list
+                    if isinstance(arr, str):
+                        try:
+                            arr = json.loads(arr)
+                        except json.JSONDecodeError:
+                            arr = [] if not arr else [arr]
+                    if not isinstance(arr, list):
+                        arr = [arr] if arr else []
+                    arr.append(new_item)
+                    return json.dumps(arr, ensure_ascii=False)
+                return "[]"
 
             if func_name in ("default", "ifempty"):
                 if len(args) >= 2:
@@ -1487,7 +2374,15 @@ class WorkflowManager:
                         random.shuffle(parts)
                         return delimiter.join(parts)
                     else:
-                        # Shuffle characters
+                        # Try to parse as JSON array first
+                        try:
+                            items = json.loads(text)
+                            if isinstance(items, list):
+                                random.shuffle(items)
+                                return json.dumps(items, ensure_ascii=False)
+                        except json.JSONDecodeError:
+                            pass
+                        # Fallback: shuffle characters
                         chars = list(text)
                         random.shuffle(chars)
                         return "".join(chars)
@@ -1517,6 +2412,175 @@ class WorkflowManager:
                 logger.info(f"[DEBUG] {debug_output}")
                 return debug_output
 
+            # Date and time functions
+            if func_name == "now":
+                # Current datetime with optional format
+                fmt = str(args[0]) if args else "%Y-%m-%d %H:%M:%S"
+                return datetime.now().strftime(fmt)
+
+            if func_name == "today":
+                # Today's date with optional format
+                fmt = str(args[0]) if args else "%Y-%m-%d"
+                return datetime.now().strftime(fmt)
+
+            if func_name == "time":
+                # Current time with optional format
+                fmt = str(args[0]) if args else "%H:%M:%S"
+                return datetime.now().strftime(fmt)
+
+            if func_name == "getprompt":
+                # Get prompt content: getprompt(prompt_name, [project_name], [revision])
+                return self._get_prompt_or_parser(args, step_context, get_parser=False)
+
+            if func_name == "getparser":
+                # Get parser config: getparser(prompt_name, [project_name], [revision])
+                return self._get_prompt_or_parser(args, step_context, get_parser=True)
+
+            # JSON parse function - parses JSON string for nested field access
+            if func_name == "json_parse":
+                try:
+                    json_str = str(args[0]) if args else ""
+                    parsed = json.loads(json_str)
+                    if isinstance(parsed, (dict, list)):
+                        return json.dumps(parsed, ensure_ascii=False)
+                    return str(parsed)
+                except (json.JSONDecodeError, TypeError):
+                    # Return original if not valid JSON
+                    return args[0] if args else ""
+
+            # JSON zip function - zip multiple arrays from JSON object into list of dicts
+            if func_name == "json_zip":
+                if len(args) < 2:
+                    logger.warning("json_zip requires at least 2 arguments: json_string and key names")
+                    return "[]"
+
+                json_str = str(args[0])
+                keys = [str(k).strip() for k in args[1:]]
+
+                try:
+                    data = json.loads(json_str)
+                    if not isinstance(data, dict):
+                        logger.warning("json_zip: First argument must be a JSON object")
+                        return "[]"
+
+                    # Extract arrays for each key
+                    arrays = []
+                    for key in keys:
+                        val = data.get(key, [])
+                        if not isinstance(val, list):
+                            val = [val]  # Wrap non-list values
+                        arrays.append(val)
+
+                    # Find minimum length (zip to shortest)
+                    if not arrays:
+                        return "[]"
+                    min_len = min(len(arr) for arr in arrays)
+
+                    # Build result list of dicts
+                    result = []
+                    for i in range(min_len):
+                        row = {keys[j]: arrays[j][i] for j in range(len(keys))}
+                        result.append(row)
+
+                    return json.dumps(result, ensure_ascii=False)
+
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"json_zip: Failed to parse JSON: {e}")
+                    return "[]"
+
+            # Format choices JSON - {"text": [...], "label": [...]} -> "A:text1\nB:text2\n..."
+            if func_name == "format_choices":
+                json_str = str(args[0]) if args else ""
+                try:
+                    data = json.loads(json_str)
+                    if not isinstance(data, dict):
+                        logger.warning("format_choices: Input must be a JSON object")
+                        return json_str  # Return as-is if not valid
+
+                    labels = data.get("label", [])
+                    texts = data.get("text", [])
+
+                    if not labels or not texts:
+                        logger.warning("format_choices: Missing 'label' or 'text' array")
+                        return json_str
+
+                    # Build formatted choices
+                    lines = []
+                    for label, text in zip(labels, texts):
+                        lines.append(f"{label}:{text}")
+
+                    return "\n".join(lines)
+
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"format_choices: Failed to parse JSON: {e}")
+                    return json_str  # Return original if parsing fails
+
+            # Dataset filter - filter rows by condition (extended version)
+            # Supports: AND, OR, <, >, <=, >=, LIKE, IS NULL, IS EMPTY
+            if func_name == "dataset_filter":
+                if len(args) < 2:
+                    logger.warning("dataset_filter: Requires 2 arguments (dataset_ref, condition)")
+                    return "[]"
+
+                dataset_ref = str(args[0]).strip()
+                condition = str(args[1]).strip().strip('"').strip("'")
+
+                try:
+                    # Load dataset rows
+                    rows = self._load_dataset_for_foreach(dataset_ref)
+                    if not rows:
+                        return "[]"
+
+                    # Filter rows using extended condition evaluator
+                    filtered = []
+                    for row in rows:
+                        if self._evaluate_filter_condition(condition, row):
+                            filtered.append(row)
+
+                    return json.dumps(filtered, ensure_ascii=False)
+
+                except Exception as e:
+                    logger.warning(f"dataset_filter: Error - {e}")
+                    return "[]"
+
+            # Dataset join - join column values with separator
+            if func_name == "dataset_join":
+                if len(args) < 2:
+                    logger.warning("dataset_join: Requires at least 2 arguments (source, column)")
+                    return ""
+
+                source = str(args[0]).strip()
+                column = str(args[1]).strip().strip('"').strip("'")
+                separator = str(args[2]).strip().strip('"').strip("'") if len(args) > 2 else "\n"
+
+                # Handle escape sequences
+                separator = separator.replace("\\n", "\n").replace("\\t", "\t")
+
+                try:
+                    # Determine if source is dataset reference or JSON array
+                    if source.startswith("dataset:"):
+                        rows = self._load_dataset_for_foreach(source)
+                    else:
+                        # Try to parse as JSON array (from dataset_filter result)
+                        rows = json.loads(source)
+
+                    if not rows or not isinstance(rows, list):
+                        return ""
+
+                    # Extract column values
+                    values = []
+                    for row in rows:
+                        if isinstance(row, dict):
+                            val = row.get(column, "")
+                            if val is not None:
+                                values.append(str(val))
+
+                    return separator.join(values)
+
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"dataset_join: Error - {e}")
+                    return ""
+
             # Unknown function - return empty string
             logger.warning(f"Unknown formula function: {func_name}")
             return ""
@@ -1525,12 +2589,110 @@ class WorkflowManager:
             logger.error(f"Error evaluating formula {func_name}({args_str}): {e}")
             return ""
 
+    def _get_prompt_or_parser(
+        self,
+        args: List[Any],
+        step_context: Dict[str, Dict[str, Any]],
+        get_parser: bool = False
+    ) -> str:
+        """Get prompt content or parser config from database.
+
+        Args:
+            args: [prompt_name, project_name (optional), revision (optional)]
+                  - prompt_name: Name of the prompt to retrieve
+                  - project_name: Project name or "CURRENT" (default: CURRENT = workflow's project)
+                  - revision: Revision number or "CURRENT" (default: CURRENT = latest revision)
+            step_context: Context with step outputs (includes _meta with workflow info)
+            get_parser: If True, return parser_config; if False, return prompt_template
+
+        Returns:
+            Prompt template or parser config string
+        """
+        if not args:
+            logger.warning("getprompt/getparser: No prompt name provided")
+            return ""
+
+        prompt_name = str(args[0]).strip()
+        project_arg = str(args[1]).strip() if len(args) > 1 else "CURRENT"
+        revision_arg = str(args[2]).strip() if len(args) > 2 else "CURRENT"
+
+        # Get workflow metadata from context
+        meta = step_context.get("_meta", {})
+        workflow_project_id = meta.get("project_id")
+
+        logger.info(f"[getprompt/getparser] prompt_name={prompt_name}, project_arg={project_arg}, revision_arg={revision_arg}")
+
+        try:
+            # Resolve project
+            target_project_id = None
+            if project_arg.upper() == "CURRENT":
+                # Use workflow's project
+                target_project_id = workflow_project_id
+                if not target_project_id:
+                    logger.warning("getprompt/getparser: CURRENT project requested but workflow has no project")
+                    return ""
+            else:
+                # Look up project by name
+                project = self.db.query(Project).filter(Project.name == project_arg).first()
+                if not project:
+                    logger.warning(f"getprompt/getparser: Project '{project_arg}' not found")
+                    return ""
+                target_project_id = project.id
+
+            # Find prompt by name within the project
+            prompt = self.db.query(Prompt).filter(
+                Prompt.project_id == target_project_id,
+                Prompt.name == prompt_name,
+                Prompt.is_deleted == 0
+            ).first()
+
+            if not prompt:
+                logger.warning(f"getprompt/getparser: Prompt '{prompt_name}' not found in project {target_project_id}")
+                return ""
+
+            # Resolve revision
+            prompt_revision = None
+            if revision_arg.upper() == "CURRENT":
+                # Get latest revision
+                prompt_revision = self.db.query(PromptRevision).filter(
+                    PromptRevision.prompt_id == prompt.id
+                ).order_by(PromptRevision.revision.desc()).first()
+            else:
+                # Get specific revision
+                try:
+                    revision_num = int(revision_arg)
+                    prompt_revision = self.db.query(PromptRevision).filter(
+                        PromptRevision.prompt_id == prompt.id,
+                        PromptRevision.revision == revision_num
+                    ).first()
+                except ValueError:
+                    logger.warning(f"getprompt/getparser: Invalid revision number '{revision_arg}'")
+                    return ""
+
+            if not prompt_revision:
+                logger.warning(f"getprompt/getparser: No revision found for prompt '{prompt_name}'")
+                return ""
+
+            # Return the requested content
+            if get_parser:
+                result = prompt_revision.parser_config or ""
+                logger.info(f"[getparser] Retrieved parser config for '{prompt_name}' (rev {prompt_revision.revision})")
+            else:
+                result = prompt_revision.prompt_template or ""
+                logger.info(f"[getprompt] Retrieved prompt template for '{prompt_name}' (rev {prompt_revision.revision})")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in getprompt/getparser: {e}")
+            return ""
+
     def _parse_function_args(
         self,
         args_str: str,
         step_context: Dict[str, Dict[str, Any]]
     ) -> List[Any]:
-        """Parse function arguments with proper handling of commas and braces.
+        """Parse function arguments with proper handling of commas, braces, parentheses, and quotes.
 
         Args:
             args_str: Comma-separated arguments string
@@ -1542,15 +2704,38 @@ class WorkflowManager:
         args = []
         current_arg = ""
         brace_depth = 0
+        paren_depth = 0
+        bracket_depth = 0  # Track square brackets for JSON arrays
+        in_double_quote = False
+        in_single_quote = False
 
         for char in args_str:
-            if char == '{':
+            # Track quotes (only toggle if not inside the other quote type)
+            if char == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+                current_arg += char
+            elif char == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+                current_arg += char
+            elif char == '{' and not in_double_quote and not in_single_quote:
                 brace_depth += 1
                 current_arg += char
-            elif char == '}':
+            elif char == '}' and not in_double_quote and not in_single_quote:
                 brace_depth -= 1
                 current_arg += char
-            elif char == ',' and brace_depth == 0:
+            elif char == '(' and not in_double_quote and not in_single_quote:
+                paren_depth += 1
+                current_arg += char
+            elif char == ')' and not in_double_quote and not in_single_quote:
+                paren_depth -= 1
+                current_arg += char
+            elif char == '[' and not in_double_quote and not in_single_quote:
+                bracket_depth += 1
+                current_arg += char
+            elif char == ']' and not in_double_quote and not in_single_quote:
+                bracket_depth -= 1
+                current_arg += char
+            elif char == ',' and brace_depth == 0 and paren_depth == 0 and bracket_depth == 0 and not in_double_quote and not in_single_quote:
                 args.append(current_arg.strip())
                 current_arg = ""
             else:
@@ -1559,13 +2744,42 @@ class WorkflowManager:
         if current_arg.strip():
             args.append(current_arg.strip())
 
-        # Resolve variable references in each argument
+        # Resolve variable references and nested function calls in each argument
         resolved_args = []
         for arg in args:
-            resolved = self._substitute_single_ref(arg, step_context)
+            # First check if the ORIGINAL argument (before substitution) is a function call
+            formula_match = self.FORMULA_PATTERN.match(arg.strip())
+            if formula_match:
+                # It's a nested function - evaluate using the full _substitute_step_refs
+                # This ensures proper argument parsing before variable substitution
+                resolved = self._substitute_step_refs(arg, step_context)
+            else:
+                # Not a function - substitute variable references
+                resolved = self._substitute_single_ref(arg, step_context)
+                # Strip quotes from string literals
+                resolved = self._strip_string_quotes(resolved)
+
             resolved_args.append(resolved)
 
         return resolved_args
+
+    def _strip_string_quotes(self, value: str) -> str:
+        """Strip surrounding quotes from a string literal.
+
+        Handles both single and double quotes.
+        E.g., '"hello"' -> 'hello', "'world'" -> 'world'
+        Does NOT strip whitespace from the content.
+        """
+        # Only check the stripped version for quote detection,
+        # but if stripping quotes, strip the original value's quotes only
+        stripped = value.strip()
+        if len(stripped) >= 2:
+            if (stripped.startswith('"') and stripped.endswith('"')):
+                # Return content between quotes (preserving internal whitespace)
+                return stripped[1:-1]
+            elif (stripped.startswith("'") and stripped.endswith("'")):
+                return stripped[1:-1]
+        return value
 
     def _get_unmapped_params_content(
         self,
@@ -1684,13 +2898,45 @@ class WorkflowManager:
             String with all references resolved
         """
         def replacer(match):
-            step_name = match.group(1)
-            field_name = match.group(2)
+            full_path = match.group(1)  # "vars.incorrect" or "step.field.nested"
+            parts = full_path.split('.')
 
-            if step_name in step_context:
-                value = step_context[step_name].get(field_name, "")
-                return str(value) if value is not None else ""
-            return match.group(0)  # Keep original if not found
+            # Handle "step.STEPNAME.field" format - skip the "step" prefix
+            # This allows {{step.ask.answer}} to resolve to step_context["ask"]["answer"]
+            if parts[0] == "step" and len(parts) >= 3:
+                parts = parts[1:]  # Remove "step" prefix
+
+            # First part must be in step_context
+            if parts[0] not in step_context:
+                return match.group(0)  # Keep original if not found
+
+            # Start with the top-level context value
+            value = step_context[parts[0]]
+
+            # Navigate through nested fields
+            for part in parts[1:]:
+                if isinstance(value, dict):
+                    value = value.get(part, "")
+                elif isinstance(value, str):
+                    # Try to parse as JSON for nested access
+                    try:
+                        parsed = json.loads(value)
+                        if isinstance(parsed, dict):
+                            value = parsed.get(part, "")
+                        else:
+                            return match.group(0)
+                    except (json.JSONDecodeError, TypeError):
+                        return match.group(0)
+                else:
+                    return match.group(0)
+
+                if value is None:
+                    return ""
+
+            # Convert result to string
+            if isinstance(value, (dict, list)):
+                return json.dumps(value, ensure_ascii=False)
+            return str(value) if value is not None else ""
 
         # Replace all {{step.field}} references in the template
         return self.STEP_REF_PATTERN.sub(replacer, template)
@@ -1823,10 +3069,14 @@ class WorkflowManager:
             parsed = json.loads(job_item.parsed_response)
 
         # Return fields plus raw response (include csv_output if present)
+        # Note: parsed_fields is stored both under "parsed" key (for {{step.parsed.FIELD}} syntax)
+        # and spread at top level (for {{step.FIELD}} syntax) for backward compatibility
+        parsed_fields = parsed.get("fields", {})
         result = {
             "raw": job_item.raw_response,
-            "parsed": parsed.get("parsed", False),
-            **parsed.get("fields", {})
+            "_is_parsed": parsed.get("parsed", False),  # Metadata renamed to avoid conflict
+            "parsed": parsed_fields,                     # Parser output as dict for nested access
+            **parsed_fields                              # Also spread for direct access
         }
         # Include csv_output and csv_header if present (from csv_template parser)
         if "csv_output" in parsed:
