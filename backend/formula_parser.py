@@ -626,22 +626,195 @@ class FormulaEvaluator:
         return self._builtin_function(node.name, args)
 
     def _builtin_function(self, name: str, args: List[Any]) -> Any:
-        """Built-in function implementations."""
+        """Built-in function implementations for all 39 supported functions."""
+        # --- Text Operations ---
         if name == 'upper':
             return str(args[0]).upper() if args else ""
         if name == 'lower':
             return str(args[0]).lower() if args else ""
         if name == 'trim':
             return str(args[0]).strip() if args else ""
-        if name == 'length' or name == 'len':
+        if name == 'lstrip':
+            return str(args[0]).lstrip() if args else ""
+        if name == 'rstrip':
+            return str(args[0]).rstrip() if args else ""
+        if name == 'capitalize':
+            return str(args[0]).capitalize() if args else ""
+        if name == 'title':
+            return str(args[0]).title() if args else ""
+        if name == 'reverse':
+            return str(args[0])[::-1] if args else ""
+        if name in ('length', 'len'):
             return len(str(args[0])) if args else 0
+        if name in ('slice', 'substr', 'substring'):
+            if len(args) >= 2:
+                text = str(args[0])
+                start = int(args[1])
+                end = int(args[2]) if len(args) >= 3 else None
+                return text[start:end]
+            return str(args[0]) if args else ""
+        if name == 'left':
+            if len(args) >= 2:
+                return str(args[0])[:int(args[1])]
+            return str(args[0]) if args else ""
+        if name == 'right':
+            if len(args) >= 2:
+                n = int(args[1])
+                return str(args[0])[-n:] if n > 0 else ""
+            return str(args[0]) if args else ""
+        if name == 'replace':
+            if len(args) >= 3:
+                return str(args[0]).replace(str(args[1]), str(args[2]))
+            return str(args[0]) if args else ""
+        if name == 'repeat':
+            if len(args) >= 2:
+                return str(args[0]) * max(0, min(int(args[1]), 1000))
+            return str(args[0]) if args else ""
         if name == 'concat':
             return "".join(str(arg) for arg in args)
+        if name == 'split':
+            if len(args) >= 2:
+                delimiter = str(args[1]) or ","
+                return json.dumps(str(args[0]).split(delimiter), ensure_ascii=False)
+            return "[]"
+        if name == 'join':
+            if len(args) >= 2:
+                items = args[0]
+                delimiter = str(args[1])
+                if isinstance(items, str):
+                    try:
+                        items = json.loads(items)
+                    except json.JSONDecodeError:
+                        items = [items]
+                if isinstance(items, list):
+                    return delimiter.join(str(item) for item in items)
+            return str(args[0]) if args else ""
+
+        # --- Search & Check ---
+        if name == 'contains':
+            if len(args) >= 2:
+                return "true" if str(args[1]) in str(args[0]) else "false"
+            return "false"
+        if name == 'startswith':
+            if len(args) >= 2:
+                return "true" if str(args[0]).startswith(str(args[1])) else "false"
+            return "false"
+        if name == 'endswith':
+            if len(args) >= 2:
+                return "true" if str(args[0]).endswith(str(args[1])) else "false"
+            return "false"
+        if name == 'count':
+            if len(args) >= 2:
+                return str(args[0]).count(str(args[1]))
+            return 0
+
+        # --- Math ---
         if name == 'sum':
             return sum(float(arg) for arg in args)
         if name == 'calc':
             # For calc, the argument should already be evaluated
-            return args[0] if args else 0
+            if args:
+                val = args[0]
+                if isinstance(val, (int, float)):
+                    return val
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    return 0
+            return 0
+
+        # --- Utility ---
+        if name in ('default', 'ifempty'):
+            if len(args) >= 2:
+                value = str(args[0]).strip() if args[0] else ""
+                return value if value else str(args[1])
+            return str(args[0]) if args else ""
+        if name == 'debug':
+            debug_output = " | ".join(str(arg) for arg in args)
+            logger.info(f"[DEBUG] {debug_output}")
+            return debug_output
+
+        # --- Array ---
+        if name == 'shuffle':
+            import random
+            if args:
+                text = str(args[0])
+                if len(args) >= 2:
+                    delimiter = str(args[1])
+                    if delimiter:
+                        parts = text.split(delimiter)
+                        random.shuffle(parts)
+                        return delimiter.join(parts)
+                chars = list(text)
+                random.shuffle(chars)
+                return "".join(chars)
+            return ""
+        if name == 'array_push':
+            if len(args) >= 2:
+                arr = args[0]
+                if isinstance(arr, str):
+                    try:
+                        arr = json.loads(arr)
+                    except json.JSONDecodeError:
+                        arr = [] if not arr else [arr]
+                if not isinstance(arr, list):
+                    arr = [arr] if arr else []
+                arr.append(args[1])
+                return json.dumps(arr, ensure_ascii=False)
+            return "[]"
+
+        # --- Date/Time ---
+        if name == 'now':
+            from datetime import datetime
+            fmt = str(args[0]) if args else "%Y-%m-%d %H:%M:%S"
+            return datetime.now().strftime(fmt)
+        if name == 'today':
+            from datetime import datetime
+            fmt = str(args[0]) if args else "%Y-%m-%d"
+            return datetime.now().strftime(fmt)
+        if name == 'time':
+            from datetime import datetime
+            fmt = str(args[0]) if args else "%H:%M:%S"
+            return datetime.now().strftime(fmt)
+
+        # --- JSON ---
+        if name == 'json_parse':
+            if args:
+                try:
+                    return json.loads(str(args[0]))
+                except json.JSONDecodeError:
+                    return args[0]
+            return ""
+        if name == 'format_choices':
+            if args:
+                choices = args[0]
+                if isinstance(choices, str):
+                    try:
+                        choices = json.loads(choices)
+                    except json.JSONDecodeError:
+                        return str(choices)
+                if isinstance(choices, dict):
+                    return "\n".join(f"{k}: {v}" for k, v in choices.items())
+            return ""
+        if name == 'json_zip':
+            # Simplified implementation - just return empty for now
+            return "[]"
+
+        # --- Dataset (requires database, return placeholder) ---
+        if name == 'dataset_filter':
+            logger.warning("dataset_filter called in standalone parser - requires database")
+            return "[]"
+        if name == 'dataset_join':
+            logger.warning("dataset_join called in standalone parser - requires database")
+            return ""
+
+        # --- Prompt functions (requires database) ---
+        if name == 'getprompt':
+            logger.warning("getprompt called in standalone parser - requires database")
+            return ""
+        if name == 'getparser':
+            logger.warning("getparser called in standalone parser - requires database")
+            return ""
 
         raise EvaluationError(f"Function '{name}' not implemented in built-in evaluator")
 
