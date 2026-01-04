@@ -26,14 +26,17 @@ let featureFlags = {
 let singleHistoryOffset = 0;
 const SINGLE_HISTORY_PAGE_SIZE = 10;
 let singleHistoryHasMore = true;
+let isSingleHistoryLoading = false;  // Prevent parallel loading
 
 let batchHistoryOffset = 0;
 const BATCH_HISTORY_PAGE_SIZE = 10;
 let batchHistoryHasMore = true;
 let currentBatchPromptId = null;  // Current selected prompt ID for batch history filtering
+let isBatchHistoryLoading = false;  // Prevent parallel loading
 
 // Dataset preview state
 let currentPreviewDatasetId = null;
+let currentPreviewShowAll = false;
 
 /**
  * Format date to JST (Japan Standard Time)
@@ -1226,6 +1229,12 @@ function renderParameterInputs() {
 async function loadSingleHistory(projectId, promptId = null, workflowId = null, append = false) {
     const container = document.getElementById('history-list');
 
+    // Prevent parallel loading (skip if already loading, unless appending)
+    if (isSingleHistoryLoading && !append) {
+        return;
+    }
+    isSingleHistoryLoading = true;
+
     try {
         if (!append) {
             singleHistoryOffset = 0;
@@ -1261,6 +1270,8 @@ async function loadSingleHistory(projectId, promptId = null, workflowId = null, 
         if (!append && container) {
             container.innerHTML = '<p class="info">履歴の読み込みに失敗しました / Failed to load history</p>';
         }
+    } finally {
+        isSingleHistoryLoading = false;
     }
 }
 
@@ -4234,6 +4245,12 @@ async function loadBatchJobs() {
 async function loadBatchJobHistory(projectId, promptId = null, append = false) {
     const container = document.getElementById('batch-jobs-list');
 
+    // Prevent parallel loading (skip if already loading, unless appending)
+    if (isBatchHistoryLoading && !append) {
+        return;
+    }
+    isBatchHistoryLoading = true;
+
     try {
         // Reset pagination state for batch history (unless appending)
         if (!append) {
@@ -4263,6 +4280,8 @@ async function loadBatchJobHistory(projectId, promptId = null, append = false) {
         if (!append && container) {
             container.innerHTML = '<p class="info">バッチジョブの履歴を読み込めませんでした / Failed to load batch job history</p>';
         }
+    } finally {
+        isBatchHistoryLoading = false;
     }
 }
 
@@ -6640,8 +6659,9 @@ async function addDatasetRow(datasetId) {
  */
 async function previewDatasetWithEdit(datasetId, showAll = false) {
     try {
-        // Store dataset ID for toggle functionality
+        // Store dataset ID and showAll state for refresh after edit
         currentPreviewDatasetId = datasetId;
+        currentPreviewShowAll = showAll;
 
         // Use rows API to get rowid
         const limit = showAll ? 0 : 10;
@@ -6807,6 +6827,10 @@ async function saveDatasetRow(datasetId, rowid) {
 
         closeModal2();
         await loadDatasets();
+        // Refresh preview to show updated data
+        if (currentPreviewDatasetId) {
+            await previewDatasetWithEdit(currentPreviewDatasetId, currentPreviewShowAll);
+        }
         alert('行を更新しました / Row updated');
     } catch (error) {
         console.error('Failed to save row:', error);
@@ -6861,10 +6885,10 @@ function openZoomEditor(sourceElement) {
             .replace(/'/g, "&#039;");
     }
 
-    showModal2(`
+    showModal3(`
         <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center;">
             <span>📝 ${escapeHtml(columnName)} - 拡大編集 / Zoom Edit</span>
-            <button onclick="closeModal2()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #7f8c8d; padding: 0 0.5rem;" title="閉じる / Close">&times;</button>
+            <button onclick="closeModal3()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #7f8c8d; padding: 0 0.5rem;" title="閉じる / Close">&times;</button>
         </div>
         <div class="modal-body" style="flex: 1; display: flex; flex-direction: column; padding: 1rem;">
             <textarea id="zoom-editor-textarea"
@@ -6879,7 +6903,7 @@ function openZoomEditor(sourceElement) {
                 文字数 / Chars: <span id="zoom-char-count">${currentValue.length}</span>
             </span>
             <div style="display: flex; gap: 0.5rem;">
-                <button class="btn btn-secondary" onclick="closeModal2()">キャンセル / Cancel</button>
+                <button class="btn btn-secondary" onclick="closeModal3()">キャンセル / Cancel</button>
                 <button class="btn btn-primary" onclick="applyZoomEditor()">適用 / Apply</button>
             </div>
         </div>
@@ -6916,7 +6940,7 @@ function applyZoomEditor() {
         // Trigger input event for any listeners
         window._zoomEditorSource.dispatchEvent(new Event('input', { bubbles: true }));
     }
-    closeModal2();
+    closeModal3();
     window._zoomEditorSource = null;
 }
 
@@ -8199,8 +8223,11 @@ function togglePreviewShowAll(showAll) {
  * Step 1: User selects a dataset from the list
  */
 function showDatasetSelectorForSingle() {
-    // Filter datasets for current project
-    const projectDatasets = allDatasets.filter(d => d.project_id === currentProjectId);
+    // Filter datasets for current project (including secondary associations via project_ids)
+    const projectDatasets = allDatasets.filter(d =>
+        d.project_id === currentProjectId ||
+        (d.project_ids && d.project_ids.includes(currentProjectId))
+    );
 
     if (projectDatasets.length === 0) {
         alert('このプロジェクトにはデータセットがありません。\nバッチ実行タブでデータセットをインポートしてください。\n\nNo datasets for this project.\nPlease import a dataset from the Batch Execution tab.');
@@ -8437,6 +8464,22 @@ function showModal2(content) {
 
 function closeModal2() {
     const modal = document.getElementById('modal-overlay-2');
+    if (modal) {
+        modal.classList.remove('show');
+    }
+}
+
+function showModal3(content) {
+    const modal = document.getElementById('modal-overlay-3');
+    const modalContent = document.getElementById('modal-content-3');
+    if (modal && modalContent) {
+        modalContent.innerHTML = content;
+        modal.classList.add('show');
+    }
+}
+
+function closeModal3() {
+    const modal = document.getElementById('modal-overlay-3');
     if (modal) {
         modal.classList.remove('show');
     }
@@ -10572,6 +10615,9 @@ async function addWorkflowStep(stepData = null) {
     stepDiv.className = 'workflow-step';
     stepDiv.id = `workflow-step-${stepNumber}`;
     stepDiv.dataset.stepId = stepData ? stepData.id : '';
+    // Store project and prompt IDs in data attributes for reliable access regardless of collapse state
+    stepDiv.dataset.projectId = stepData?.project_id || '';
+    stepDiv.dataset.promptId = stepData?.prompt_id || '';
 
     // Determine step type (default to 'prompt' for backward compatibility)
     const stepType = stepData?.step_type || 'prompt';
@@ -10684,6 +10730,7 @@ async function addWorkflowStep(stepData = null) {
         <div class="step-header">
             <button type="button" class="btn-step-toggle" onclick="toggleWorkflowStep(this)" title="${toggleTitle}">${toggleIcon}</button>
             <span class="step-number">Step ${stepNumber}</span>
+            <span class="step-validation-icon" style="display: none;"></span>
             <span class="step-summary">
                 <span class="step-summary-name step-name-clickable" onclick="focusStepName(this)" title="クリックして名前を編集 / Click to edit name">${initialStepName}</span>
                 <span class="step-summary-type">${stepTypeLabel}</span>
@@ -11224,8 +11271,15 @@ function onOutputFormatChange(stepNumber) {
  * Handle project change in workflow step - load prompts for the selected project
  */
 async function onStepProjectChange(stepNumber, projectId) {
+    const stepDiv = document.getElementById(`workflow-step-${stepNumber}`);
     const promptSelect = document.getElementById(`step-prompt-${stepNumber}`);
     if (!promptSelect) return;
+
+    // Update data attribute for reliable access regardless of collapse state
+    if (stepDiv) {
+        stepDiv.dataset.projectId = projectId || '';
+        stepDiv.dataset.promptId = '';  // Clear prompt when project changes
+    }
 
     if (!projectId) {
         promptSelect.innerHTML = '<option value="">-- プロジェクトを先に選択 / Select project first --</option>';
@@ -11259,9 +11313,10 @@ async function loadPromptsForWorkflowStep(stepNumber, projectId, selectedPromptI
 
         let options = '<option value="">-- プロンプトを選択 / Select prompt --</option>';
         prompts.forEach(p => {
-            const selected = selectedPromptId && p.id === selectedPromptId ? 'selected' : '';
+            // Use String() comparison to handle type mismatches (number vs string from API)
+            const selected = selectedPromptId && String(p.id) === String(selectedPromptId) ? 'selected' : '';
             const deletedLabel = p.is_deleted ? '（削除済み）' : '';
-            const disabled = p.is_deleted && p.id !== selectedPromptId ? 'disabled' : '';
+            const disabled = p.is_deleted && String(p.id) !== String(selectedPromptId) ? 'disabled' : '';
             const style = p.is_deleted ? 'style="color: #999; font-style: italic;"' : '';
             options += `<option value="${p.id}" ${selected} ${disabled} ${style}>${deletedLabel}${escapeHtmlGlobal(p.name)}</option>`;
         });
@@ -11270,6 +11325,12 @@ async function loadPromptsForWorkflowStep(stepNumber, projectId, selectedPromptI
 
         // Add onchange handler to load parameters when prompt changes
         promptSelect.onchange = async () => {
+            // Update data attribute for reliable access regardless of collapse state
+            const stepDiv = document.getElementById(`workflow-step-${stepNumber}`);
+            if (stepDiv) {
+                stepDiv.dataset.promptId = promptSelect.value || '';
+            }
+
             // Capture existing input mapping values before changing prompt
             const container = document.getElementById(`input-mapping-container-${stepNumber}`);
             const existingMappingValues = {};
@@ -11940,145 +12001,72 @@ function renumberWorkflowSteps() {
  * Save workflow (create or update)
  */
 async function saveWorkflow() {
-    const workflowId = document.getElementById('workflow-id').value;
-    const name = document.getElementById('workflow-name').value.trim();
-    const description = document.getElementById('workflow-description').value.trim();
-    const autoContext = document.getElementById('workflow-auto-context').checked;
-    const projectIdValue = document.getElementById('workflow-project').value;
-    const workflowProjectId = projectIdValue ? parseInt(projectIdValue) : null;
+    // Clear existing validation marks
+    clearAllValidationMarks();
 
-    if (!name) {
-        alert('ワークフロー名を入力してください / Please enter workflow name');
+    // Use shared validation function (same as validate button)
+    const validationResult = await performFullValidation();
+
+    // If there are errors, show dialog and don't save
+    if (validationResult.errors > 0) {
+        markStepValidationErrors(validationResult.issues);
+        showValidationErrorDialog({
+            message: validationResult.summary || 'Validation failed',
+            errors: validationResult.errors,
+            warnings: validationResult.warnings,
+            all_issues: validationResult.issues
+        });
         return;
     }
 
-    // Collect steps from workflow editor container only
-    const container = document.getElementById('workflow-steps-container');
-    if (!container) {
-        alert('ワークフローエディタが見つかりません / Workflow editor not found');
-        return;
-    }
-    const stepDivs = container.querySelectorAll('.workflow-step');
-    const steps = [];
-    let stepOrder = 0;
-
-    for (const stepDiv of stepDivs) {
-        stepOrder++;
-        const stepNameInput = stepDiv.querySelector('input.step-name');
-        const stepName = stepNameInput ? stepNameInput.value.trim() : '';
-        const stepTypeSelect = stepDiv.querySelector('.step-type');
-        const stepType = stepTypeSelect ? stepTypeSelect.value : 'prompt';
-        const projectSelect = stepDiv.querySelector('.step-project');
-        const projectId = projectSelect ? projectSelect.value : '';
-        const promptSelect = stepDiv.querySelector('.step-prompt');
-        const promptId = promptSelect ? promptSelect.value : '';
-
-        if (!stepName) {
-            alert(`Step ${stepOrder}: ステップ名は必須です / Step name is required`);
-            return;
-        }
-
-        // For prompt type steps, project is required
-        if (stepType === 'prompt' && !projectId) {
-            alert(`Step ${stepOrder}: プロンプトステップにはプロジェクトが必須です / Project is required for prompt steps`);
-            return;
-        }
-
-        // Build condition_config based on step type
-        const conditionConfig = buildConditionConfig(stepDiv, stepType);
-
-        const stepData = {
-            step_name: stepName,
-            step_type: stepType,
-            step_order: stepOrder,
-            execution_mode: 'sequential'
-        };
-
-        // Include project_id and prompt_id only for prompt type steps
-        if (stepType === 'prompt') {
-            if (projectId) stepData.project_id = parseInt(projectId);
-            if (promptId) stepData.prompt_id = parseInt(promptId);
-
-            // Collect input mapping from Key-Value UI
-            const inputMapping = collectInputMappingFromStep(stepDiv);
-            if (inputMapping && Object.keys(inputMapping).length > 0) {
-                stepData.input_mapping = inputMapping;
-            }
-        }
-
-        // Include condition_config for control flow steps
-        if (conditionConfig && Object.keys(conditionConfig).length > 0) {
-            stepData.condition_config = conditionConfig;
-        }
-
-        steps.push(stepData);
-    }
-
-    // Validate step names uniqueness and format
-    const stepNames = steps.map(s => s.step_name);
-    const duplicates = stepNames.filter((name, index) => stepNames.indexOf(name) !== index);
-    if (duplicates.length > 0) {
-        alert(`ステップ名が重複しています / Duplicate step names: ${[...new Set(duplicates)].join(', ')}\n\n各ステップ名はユニークである必要があります。`);
-        return;
-    }
-
-    // Check for reserved names
-    const reservedNames = ['input', 'vars'];  // 'input' and 'vars' are reserved
-    const usedReserved = stepNames.filter(name => reservedNames.includes(name.toLowerCase()));
-    if (usedReserved.length > 0) {
-        alert(`予約語のステップ名は使用できません / Reserved step names cannot be used: ${usedReserved.join(', ')}\n\n"input" と "vars" は予約されています。`);
-        return;
-    }
-
-    // Validate step name format (alphanumeric and underscore only)
-    const invalidNames = stepNames.filter(name => !/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name));
-    if (invalidNames.length > 0) {
-        alert(`ステップ名の形式が不正です / Invalid step name format: ${invalidNames.join(', ')}\n\n英字で始まり、英数字とアンダースコアのみ使用できます。`);
-        return;
-    }
+    // Get workflow JSON using shared function
+    const { workflowId, workflowJson } = buildWorkflowJson();
 
     try {
         let savedWorkflowId;
 
         if (workflowId) {
-            // Update existing workflow
-            const response = await fetch(`/api/workflows/${workflowId}`, {
+            // Update existing workflow using JSON API
+            const response = await fetch(`/api/workflows/${workflowId}/json`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, description, project_id: workflowProjectId, auto_context: autoContext })
+                body: JSON.stringify({ workflow_json: workflowJson })
             });
 
-            if (!response.ok) throw new Error('Failed to update workflow');
-
-            // Update steps: delete all and re-add
-            const existingWorkflow = await response.json();
-            for (const step of existingWorkflow.steps) {
-                await fetch(`/api/workflows/${workflowId}/steps/${step.id}`, { method: 'DELETE' });
-            }
-            for (const step of steps) {
-                await fetch(`/api/workflows/${workflowId}/steps`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(step)
-                });
+            if (!response.ok) {
+                const errorData = await response.json();
+                if (response.status === 422 && errorData.detail) {
+                    // Server validation error - show detailed error dialog
+                    if (errorData.detail.all_issues || errorData.detail.issues) {
+                        markStepValidationErrors(errorData.detail.all_issues || errorData.detail.issues);
+                    }
+                    showValidationErrorDialog(errorData.detail);
+                    return;
+                }
+                throw new Error(errorData.detail || 'Failed to update workflow');
             }
 
             savedWorkflowId = workflowId;
         } else {
-            // Create new workflow (include project_id from dropdown)
+            // Create new workflow
             const response = await fetch('/api/workflows', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    name,
-                    description,
-                    project_id: workflowProjectId,
-                    auto_context: autoContext,
-                    steps
-                })
+                body: JSON.stringify(workflowJson)
             });
 
-            if (!response.ok) throw new Error('Failed to create workflow');
+            if (!response.ok) {
+                const errorData = await response.json();
+                if (response.status === 422 && errorData.detail) {
+                    // Server validation error - show detailed error dialog
+                    if (errorData.detail.all_issues || errorData.detail.issues) {
+                        markStepValidationErrors(errorData.detail.all_issues || errorData.detail.issues);
+                    }
+                    showValidationErrorDialog(errorData.detail);
+                    return;
+                }
+                throw new Error(errorData.detail || 'Failed to create workflow');
+            }
 
             const savedWorkflow = await response.json();
             savedWorkflowId = savedWorkflow.id;
@@ -12100,7 +12088,21 @@ async function saveWorkflow() {
 
     } catch (error) {
         console.error('Error saving workflow:', error);
-        alert('ワークフローの保存に失敗しました / Failed to save workflow: ' + error.message);
+        showValidationErrorDialog({
+            message: 'Failed to save workflow',
+            errors: 1,
+            warnings: 0,
+            all_issues: [{
+                severity: 'error',
+                step_order: null,
+                step_name: null,
+                category: 'api_error',
+                message: `Failed to save workflow: ${error.message}`,
+                message_ja: `ワークフローの保存に失敗しました: ${error.message}`,
+                suggestion: 'Check the server logs for more details',
+                suggestion_ja: 'サーバーログを確認してください'
+            }]
+        });
     }
 }
 
@@ -12136,6 +12138,572 @@ function showWorkflowSaveSuccess() {
         msg.style.animation = 'fadeOut 0.3s ease-out';
         setTimeout(() => msg.remove(), 300);
     }, 3000);
+}
+
+/**
+ * Build workflow JSON from current form state.
+ * This is the single source of truth for collecting workflow data.
+ * Used by both saveWorkflow and validateWorkflow for consistency.
+ */
+function buildWorkflowJson() {
+    const workflowId = document.getElementById('workflow-id').value;
+    const name = document.getElementById('workflow-name').value.trim();
+    const description = document.getElementById('workflow-description').value.trim();
+    const autoContext = document.getElementById('workflow-auto-context').checked;
+    const projectIdValue = document.getElementById('workflow-project').value;
+    const workflowProjectId = projectIdValue ? parseInt(projectIdValue) : null;
+
+    // Collect steps from workflow editor container only
+    const container = document.getElementById('workflow-steps-container');
+    const stepDivs = container.querySelectorAll('.workflow-step');
+    const steps = [];
+    let stepOrder = 0;
+
+    for (const stepDiv of stepDivs) {
+        stepOrder++;
+        const stepNameInput = stepDiv.querySelector('input.step-name');
+        const stepName = stepNameInput ? stepNameInput.value.trim() : '';
+        const stepTypeSelect = stepDiv.querySelector('.step-type');
+        const stepType = stepTypeSelect ? stepTypeSelect.value : 'prompt';
+        const projectSelect = stepDiv.querySelector('.step-project');
+        // Use data attribute as fallback for collapsed steps where DOM elements may be inaccessible
+        const projectId = (projectSelect && projectSelect.value) || stepDiv.dataset.projectId || '';
+        const promptSelect = stepDiv.querySelector('.step-prompt');
+        const promptId = (promptSelect && promptSelect.value) || stepDiv.dataset.promptId || '';
+
+        // Build condition_config based on step type
+        const conditionConfig = buildConditionConfig(stepDiv, stepType);
+
+        const stepData = {
+            step_name: stepName,
+            step_type: stepType,
+            step_order: stepOrder,
+            execution_mode: 'sequential'
+        };
+
+        // Include project_id and prompt_id only for prompt type steps
+        if (stepType === 'prompt') {
+            if (projectId) stepData.project_id = parseInt(projectId);
+            if (promptId) stepData.prompt_id = parseInt(promptId);
+
+            // Collect input mapping from Key-Value UI
+            const inputMapping = collectInputMappingFromStep(stepDiv);
+            if (inputMapping && Object.keys(inputMapping).length > 0) {
+                stepData.input_mapping = inputMapping;
+            }
+        }
+
+        // Include condition_config for control flow steps
+        if (conditionConfig && Object.keys(conditionConfig).length > 0) {
+            stepData.condition_config = conditionConfig;
+        }
+
+        steps.push(stepData);
+    }
+
+    return {
+        workflowId: workflowId ? parseInt(workflowId) : null,
+        workflowJson: {
+            name,
+            description,
+            project_id: workflowProjectId,
+            auto_context: autoContext,
+            steps
+        }
+    };
+}
+
+/**
+ * Perform full validation (client + server) on current workflow form data.
+ * This is the unified validation function used by both save and validate operations.
+ *
+ * @returns {Object} { valid: boolean, errors: number, warnings: number, issues: Array }
+ */
+async function performFullValidation() {
+    // Build workflow JSON from current form
+    const { workflowId, workflowJson } = buildWorkflowJson();
+
+    // First, collect client-side validation errors
+    const clientIssues = collectClientValidationErrors();
+
+    // If there are client errors, return them immediately (no need for server validation)
+    const clientErrors = clientIssues.filter(i => i.severity === 'error');
+    if (clientErrors.length > 0) {
+        return {
+            valid: false,
+            errors: clientErrors.length,
+            warnings: clientIssues.filter(i => i.severity === 'warning').length,
+            issues: clientIssues
+        };
+    }
+
+    // Call server validation with current form data
+    try {
+        const response = await fetch('/api/workflows/validate-json', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                workflow_json: workflowJson,
+                workflow_id: workflowId
+            })
+        });
+
+        const serverResult = await response.json();
+
+        // Combine client warnings with server issues (avoid duplicates)
+        const allIssues = [...clientIssues];
+        for (const serverIssue of (serverResult.issues || [])) {
+            const isDuplicate = clientIssues.some(ci =>
+                ci.step_order === serverIssue.step_order &&
+                ci.category === serverIssue.category &&
+                ci.message === serverIssue.message
+            );
+            if (!isDuplicate) {
+                allIssues.push(serverIssue);
+            }
+        }
+
+        const errors = allIssues.filter(i => i.severity === 'error').length;
+        const warnings = allIssues.filter(i => i.severity === 'warning').length;
+
+        return {
+            valid: errors === 0,
+            errors,
+            warnings,
+            issues: allIssues,
+            summary: serverResult.summary
+        };
+
+    } catch (error) {
+        console.error('Server validation error:', error);
+        // If server validation fails, return client issues only
+        return {
+            valid: clientIssues.filter(i => i.severity === 'error').length === 0,
+            errors: clientIssues.filter(i => i.severity === 'error').length,
+            warnings: clientIssues.filter(i => i.severity === 'warning').length,
+            issues: clientIssues,
+            serverError: error.message
+        };
+    }
+}
+
+/**
+ * Collect client-side validation errors from the workflow editor
+ * Returns an array of issue objects in the same format as server validation
+ */
+function collectClientValidationErrors() {
+    const issues = [];
+    const name = document.getElementById('workflow-name').value.trim();
+    const container = document.getElementById('workflow-steps-container');
+
+    // Check workflow name
+    if (!name) {
+        issues.push({
+            severity: 'error',
+            step_order: null,
+            step_name: null,
+            category: 'workflow',
+            message: 'Workflow name is required',
+            message_ja: 'ワークフロー名を入力してください',
+            suggestion: 'Enter a name for this workflow',
+            suggestion_ja: 'ワークフローの名前を入力してください'
+        });
+    }
+
+    // Check if editor container exists
+    if (!container) {
+        issues.push({
+            severity: 'error',
+            step_order: null,
+            step_name: null,
+            category: 'workflow',
+            message: 'Workflow editor not found',
+            message_ja: 'ワークフローエディタが見つかりません',
+            suggestion: 'Reload the page',
+            suggestion_ja: 'ページをリロードしてください'
+        });
+        return issues;
+    }
+
+    const stepDivs = container.querySelectorAll('.workflow-step');
+    const steps = [];
+    let stepOrder = 0;
+
+    // Collect step information
+    for (const stepDiv of stepDivs) {
+        stepOrder++;
+        const stepNameInput = stepDiv.querySelector('input.step-name');
+        const stepName = stepNameInput ? stepNameInput.value.trim() : '';
+        const stepTypeSelect = stepDiv.querySelector('.step-type');
+        const stepType = stepTypeSelect ? stepTypeSelect.value : 'prompt';
+        const projectSelect = stepDiv.querySelector('.step-project');
+        const projectId = projectSelect ? projectSelect.value : '';
+        const promptSelect = stepDiv.querySelector('.step-prompt');
+        const promptId = promptSelect ? promptSelect.value : '';
+
+        steps.push({
+            step_order: stepOrder,
+            step_name: stepName,
+            step_type: stepType,
+            project_id: projectId,
+            prompt_id: promptId
+        });
+    }
+
+    // Validate each step
+    for (const step of steps) {
+        // Check step name is filled
+        if (!step.step_name) {
+            issues.push({
+                severity: 'error',
+                step_order: step.step_order,
+                step_name: step.step_name || `step${step.step_order}`,
+                category: 'step_name',
+                message: 'Step name is required',
+                message_ja: 'ステップ名が入力されていません',
+                suggestion: 'Enter a name for this step',
+                suggestion_ja: 'ステップ名を入力してください'
+            });
+        }
+
+        // For prompt type steps, validate project and prompt selection
+        if (step.step_type === 'prompt') {
+            if (!step.project_id) {
+                issues.push({
+                    severity: 'error',
+                    step_order: step.step_order,
+                    step_name: step.step_name || `step${step.step_order}`,
+                    category: 'config',
+                    message: 'Project is required for prompt steps',
+                    message_ja: 'プロジェクトが選択されていません',
+                    suggestion: 'Select a project for this step',
+                    suggestion_ja: 'このステップにプロジェクトを選択してください'
+                });
+            }
+
+            if (!step.prompt_id) {
+                issues.push({
+                    severity: 'error',
+                    step_order: step.step_order,
+                    step_name: step.step_name || `step${step.step_order}`,
+                    category: 'config',
+                    message: 'Prompt is required for prompt steps',
+                    message_ja: 'プロンプトが選択されていません',
+                    suggestion: 'Select a prompt for this step',
+                    suggestion_ja: 'このステップにプロンプトを選択してください'
+                });
+            }
+        }
+    }
+
+    // Check for duplicate step names
+    const stepNames = steps.map(s => s.step_name).filter(n => n);
+    const duplicateNames = [...new Set(stepNames.filter((name, index) => stepNames.indexOf(name) !== index))];
+    if (duplicateNames.length > 0) {
+        const duplicateSteps = steps.filter(s => duplicateNames.includes(s.step_name));
+        for (const step of duplicateSteps) {
+            issues.push({
+                severity: 'error',
+                step_order: step.step_order,
+                step_name: step.step_name,
+                category: 'step_name',
+                message: `Duplicate step name: ${step.step_name}`,
+                message_ja: `ステップ名が重複しています: ${step.step_name}`,
+                suggestion: 'Each step must have a unique name',
+                suggestion_ja: '各ステップ名はユニークである必要があります'
+            });
+        }
+    }
+
+    // Check for reserved names
+    const reservedNames = ['input', 'vars', '_meta', '_error', '_execution_trace'];
+    const reservedSteps = steps.filter(s => s.step_name && reservedNames.includes(s.step_name.toLowerCase()));
+    for (const step of reservedSteps) {
+        issues.push({
+            severity: 'error',
+            step_order: step.step_order,
+            step_name: step.step_name,
+            category: 'step_name',
+            message: `Reserved step name: ${step.step_name}`,
+            message_ja: `予約語のステップ名は使用できません: ${step.step_name}`,
+            suggestion: `Avoid: ${reservedNames.join(', ')}`,
+            suggestion_ja: `予約語: ${reservedNames.join(', ')}`
+        });
+    }
+
+    // Validate step name format (alphanumeric and underscore only)
+    const invalidSteps = steps.filter(s => s.step_name && !/^[a-zA-Z][a-zA-Z0-9_]*$/.test(s.step_name));
+    for (const step of invalidSteps) {
+        issues.push({
+            severity: 'error',
+            step_order: step.step_order,
+            step_name: step.step_name,
+            category: 'step_name',
+            message: `Invalid step name format: ${step.step_name}`,
+            message_ja: `ステップ名の形式が不正です: ${step.step_name}`,
+            suggestion: 'Use alphanumeric characters and underscores, starting with a letter',
+            suggestion_ja: '英字で始まり、英数字とアンダースコア(_)のみ使用できます'
+        });
+    }
+
+    return issues;
+}
+
+/**
+ * Clear all validation marks from workflow steps
+ */
+function clearAllValidationMarks() {
+    // Remove validation classes from steps
+    document.querySelectorAll('.workflow-step').forEach(stepDiv => {
+        stepDiv.classList.remove('has-validation-error', 'has-validation-warning');
+        const icon = stepDiv.querySelector('.step-validation-icon');
+        if (icon) {
+            icon.style.display = 'none';
+            icon.className = 'step-validation-icon';
+            icon.textContent = '';
+            icon.title = '';
+        }
+    });
+}
+
+/**
+ * Mark steps with validation errors/warnings
+ * @param {Array} issues - Array of validation issues
+ */
+function markStepValidationErrors(issues) {
+    // Clear existing marks first
+    clearAllValidationMarks();
+
+    // Group issues by step_order
+    const issuesByStep = {};
+    for (const issue of issues) {
+        if (issue.step_order) {
+            if (!issuesByStep[issue.step_order]) {
+                issuesByStep[issue.step_order] = [];
+            }
+            issuesByStep[issue.step_order].push(issue);
+        }
+    }
+
+    // Mark each step
+    for (const [stepOrder, stepIssues] of Object.entries(issuesByStep)) {
+        const stepDiv = document.querySelector(`#workflow-steps-container .workflow-step:nth-child(${stepOrder})`);
+        if (!stepDiv) continue;
+
+        const hasError = stepIssues.some(i => i.severity === 'error');
+        const hasWarning = stepIssues.some(i => i.severity === 'warning');
+
+        // Add class to step
+        if (hasError) {
+            stepDiv.classList.add('has-validation-error');
+        } else if (hasWarning) {
+            stepDiv.classList.add('has-validation-warning');
+        }
+
+        // Update validation icon
+        const icon = stepDiv.querySelector('.step-validation-icon');
+        if (icon) {
+            icon.style.display = 'inline';
+            if (hasError) {
+                icon.textContent = '❌';
+                icon.className = 'step-validation-icon error';
+            } else if (hasWarning) {
+                icon.textContent = '⚠️';
+                icon.className = 'step-validation-icon warning';
+            }
+
+            // Build tooltip
+            const messages = stepIssues.map(i => `${i.severity === 'error' ? '❌' : '⚠️'} ${i.message_ja || i.message}`).join('\n');
+            icon.title = messages;
+        }
+    }
+}
+
+/**
+ * Show validation success message toast
+ */
+function showValidationSuccessMessage() {
+    // Remove any existing toast
+    const existingToast = document.querySelector('.validation-success-toast');
+    if (existingToast) existingToast.remove();
+
+    const toast = document.createElement('div');
+    toast.className = 'validation-success-toast';
+    toast.innerHTML = '<span class="toast-icon">✓</span> バリデーション成功 / Validation passed';
+
+    document.body.appendChild(toast);
+
+    // Auto-remove after 3 seconds
+    setTimeout(() => {
+        toast.style.animation = 'fadeOut 0.3s ease-out';
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+}
+
+/**
+ * Validate workflow (called from validate button)
+ * Uses the same validation logic as saveWorkflow for consistency.
+ */
+async function validateWorkflow() {
+    // Clear existing marks
+    clearAllValidationMarks();
+
+    // Use shared validation function (same as save button)
+    const validationResult = await performFullValidation();
+
+    // Mark step validation errors
+    if (validationResult.issues.length > 0) {
+        markStepValidationErrors(validationResult.issues);
+    }
+
+    // Show appropriate dialog or success message
+    if (validationResult.errors > 0 || validationResult.warnings > 0) {
+        showValidationErrorDialog({
+            message: validationResult.summary || 'Validation completed',
+            errors: validationResult.errors,
+            warnings: validationResult.warnings,
+            all_issues: validationResult.issues
+        });
+    } else {
+        showValidationSuccessMessage();
+    }
+}
+
+/**
+ * Show validation error dialog when workflow save fails due to validation errors
+ */
+function showValidationErrorDialog(errorDetail) {
+    // Remove any existing dialog
+    const existingDialog = document.getElementById('validation-error-dialog');
+    if (existingDialog) existingDialog.remove();
+
+    // Create modal backdrop
+    const backdrop = document.createElement('div');
+    backdrop.id = 'validation-error-dialog';
+    backdrop.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.6);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 10001;
+    `;
+
+    // Parse error info
+    const message = errorDetail.message || 'Validation failed';
+    const errors = errorDetail.errors || 0;
+    const warnings = errorDetail.warnings || 0;
+    const allIssues = errorDetail.all_issues || errorDetail.issues || [];
+
+    // Build issues HTML
+    let issuesHtml = '';
+    for (const issue of allIssues) {
+        const isError = issue.severity === 'error';
+        const icon = isError ? '❌' : '⚠️';
+        const color = isError ? '#ef4444' : '#f59e0b';
+        const stepInfo = issue.step_name ? `[${issue.step_order || '?'}] ${issue.step_name}` : '';
+
+        issuesHtml += `
+            <div style="padding: 10px 12px; border-left: 3px solid ${color}; background: ${isError ? 'rgba(239, 68, 68, 0.1)' : 'rgba(245, 158, 11, 0.1)'}; margin-bottom: 8px; border-radius: 0 4px 4px 0;">
+                <div style="display: flex; align-items: flex-start; gap: 8px;">
+                    <span style="font-size: 14px;">${icon}</span>
+                    <div style="flex: 1;">
+                        ${stepInfo ? `<div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">ステップ: ${stepInfo}</div>` : ''}
+                        <div style="font-size: 13px; color: #374151;">${issue.message_ja || issue.message}</div>
+                        ${issue.suggestion_ja || issue.suggestion ? `<div style="font-size: 12px; color: #059669; margin-top: 4px;">💡 ${issue.suggestion_ja || issue.suggestion}</div>` : ''}
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    // Create dialog content
+    const dialog = document.createElement('div');
+    dialog.style.cssText = `
+        background: white;
+        border-radius: 12px;
+        max-width: 600px;
+        max-height: 80vh;
+        width: 90%;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+    `;
+
+    // Determine dialog style based on errors vs warnings only
+    const hasErrors = errors > 0;
+    const headerBg = hasErrors ? '#fef2f2' : '#f0fdf4';  // red-50 vs green-50
+    const headerIcon = hasErrors ? '🚫' : '✅';
+    const titleColor = hasErrors ? '#dc2626' : '#16a34a';  // red-600 vs green-600
+    const titleText = hasErrors
+        ? 'バリデーションエラー / Validation Error'
+        : 'バリデーション成功（警告あり）/ Validation Passed with Warnings';
+    const subtitleColor = hasErrors ? '#7f1d1d' : '#166534';  // red-900 vs green-800
+    const subtitleText = hasErrors
+        ? 'ワークフローを保存できません。以下のエラーを修正してください。'
+        : 'ワークフローは保存可能です。以下の警告を確認してください。';
+
+    dialog.innerHTML = `
+        <div style="padding: 20px; border-bottom: 1px solid #e5e7eb; background: ${headerBg};">
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <span style="font-size: 24px;">${headerIcon}</span>
+                <div>
+                    <h3 style="margin: 0; color: ${titleColor}; font-size: 18px;">
+                        ${titleText}
+                    </h3>
+                    <p style="margin: 4px 0 0 0; color: ${subtitleColor}; font-size: 14px;">
+                        ${subtitleText}
+                    </p>
+                </div>
+            </div>
+        </div>
+        <div style="padding: 16px 20px; background: #f9fafb; border-bottom: 1px solid #e5e7eb;">
+            <div style="display: flex; gap: 16px; font-size: 14px;">
+                <span style="color: #dc2626;">❌ エラー: ${errors}</span>
+                <span style="color: #f59e0b;">⚠️ 警告: ${warnings}</span>
+            </div>
+        </div>
+        <div style="padding: 16px 20px; overflow-y: auto; flex: 1;">
+            ${issuesHtml || '<p style="color: #6b7280;">詳細情報がありません。</p>'}
+        </div>
+        <div style="padding: 16px 20px; border-top: 1px solid #e5e7eb; text-align: right;">
+            <button id="validation-error-close" style="
+                padding: 10px 24px;
+                background: #3b82f6;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                cursor: pointer;
+                font-size: 14px;
+                font-weight: 500;
+            ">閉じる / Close</button>
+        </div>
+    `;
+
+    backdrop.appendChild(dialog);
+    document.body.appendChild(backdrop);
+
+    // Close on button click
+    document.getElementById('validation-error-close').onclick = () => backdrop.remove();
+
+    // Close on backdrop click
+    backdrop.onclick = (e) => {
+        if (e.target === backdrop) backdrop.remove();
+    };
+
+    // Close on Escape key
+    const handleEscape = (e) => {
+        if (e.key === 'Escape') {
+            backdrop.remove();
+            document.removeEventListener('keydown', handleEscape);
+        }
+    };
+    document.addEventListener('keydown', handleEscape);
 }
 
 /**
@@ -12526,6 +13094,70 @@ let variablePickerTarget = null;  // The textarea that will receive the inserted
 let cachedWorkflowVariables = null;  // Cached variables data
 let variablePickerCurrentStep = null;  // Current step number for variable filtering
 let compositionCaretPosition = 0;  // Saved caret position for composition input
+const datasetColumnsCache = {};  // Cache for dataset columns: {datasetId: [columns]}
+
+/**
+ * Fetch dataset columns from API
+ * @param {number} datasetId - The dataset ID to fetch columns for
+ * @returns {Promise<string[]>} Array of column names
+ */
+async function getDatasetColumns(datasetId) {
+    if (datasetColumnsCache[datasetId]) {
+        return datasetColumnsCache[datasetId];
+    }
+    try {
+        const response = await fetch(`/api/datasets/${datasetId}/columns`);
+        if (response.ok) {
+            const data = await response.json();
+            // API returns array directly, not {columns: [...]}
+            datasetColumnsCache[datasetId] = Array.isArray(data) ? data : (data.columns || []);
+            return datasetColumnsCache[datasetId];
+        }
+    } catch (e) {
+        console.error('Failed to fetch dataset columns:', e);
+    }
+    return [];
+}
+
+/**
+ * Parse dataset ID from FOREACH source string
+ * @param {string} source - The source string like "dataset:6" or "dataset:6:limit:10"
+ * @returns {number|null} Dataset ID or null if not a dataset source
+ */
+function parseDatasetIdFromSource(source) {
+    if (!source) return null;
+    const match = source.match(/^dataset:(\d+)/);
+    return match ? parseInt(match[1]) : null;
+}
+
+/**
+ * Get the active FOREACH context at a specific step
+ * Tracks FOREACH/ENDFOREACH nesting to find if step is inside a loop
+ * @param {number} stepNumber - The step number to check
+ * @param {Array} workflowSteps - Array of all workflow steps
+ * @returns {Object|null} FOREACH context info or null if not in a loop
+ */
+function getForeachContextForStep(stepNumber, workflowSteps) {
+    const foreachStack = [];
+    for (const step of workflowSteps) {
+        // Only consider steps before the current one
+        if (step.stepNumber >= stepNumber) break;
+
+        if (step.stepType === 'foreach') {
+            foreachStack.push({
+                stepNumber: step.stepNumber,
+                stepName: step.stepName,
+                foreachVariable: step.foreachVariable,
+                indexVariable: step.foreachIndexVariable || 'i',
+                source: step.foreachSource
+            });
+        } else if (step.stepType === 'endforeach' && foreachStack.length > 0) {
+            foreachStack.pop();
+        }
+    }
+    // Return the innermost active FOREACH context (or null if not in a loop)
+    return foreachStack.length > 0 ? foreachStack[foreachStack.length - 1] : null;
+}
 
 // Global list of available functions for variable picker search
 const WORKFLOW_FUNCTIONS = [
@@ -13222,6 +13854,17 @@ async function loadWorkflowVariablesWithContext(stepNumber) {
         // Get current workflow steps for context-aware filtering
         const workflowSteps = getCurrentWorkflowSteps();
 
+        // Pre-fetch dataset columns for FOREACH steps (if we're in a step context)
+        if (stepNumber && workflowSteps.length > 0) {
+            const foreachContext = getForeachContextForStep(stepNumber, workflowSteps);
+            if (foreachContext) {
+                const datasetId = parseDatasetIdFromSource(foreachContext.source);
+                if (datasetId && !datasetColumnsCache[datasetId]) {
+                    await getDatasetColumns(datasetId);
+                }
+            }
+        }
+
         // Build dynamic categories based on workflow context
         const filteredCategories = buildFilteredCategories(stepNumber, workflowSteps);
 
@@ -13273,13 +13916,37 @@ function getCurrentWorkflowSteps() {
             });
         }
 
-        // For FOREACH steps, collect the loop variable name
+        // For FOREACH steps, collect the loop variable name, index variable, and source
         let foreachVariable = null;
+        let foreachIndexVariable = null;
+        let foreachSource = null;
         if (stepType === 'foreach') {
-            const foreachVarInput = stepDiv.querySelector('.foreach-var-name');
+            const foreachVarInput = stepDiv.querySelector('.foreach-item-var');
             if (foreachVarInput && foreachVarInput.value.trim()) {
                 foreachVariable = foreachVarInput.value.trim();
             }
+            const foreachIndexInput = stepDiv.querySelector('.foreach-index-var');
+            if (foreachIndexInput && foreachIndexInput.value.trim()) {
+                foreachIndexVariable = foreachIndexInput.value.trim();
+            } else {
+                foreachIndexVariable = 'i'; // Default index variable
+            }
+            const foreachSourceInput = stepDiv.querySelector('.foreach-source');
+            if (foreachSourceInput && foreachSourceInput.value.trim()) {
+                foreachSource = foreachSourceInput.value.trim();
+            }
+        }
+
+        // For PROMPT steps, collect custom parameters (user-defined key-value pairs)
+        const customParams = [];
+        if (stepType === 'prompt') {
+            const customMappingRows = stepDiv.querySelectorAll('.input-mapping-row[data-type="custom"]');
+            customMappingRows.forEach(row => {
+                const keyInput = row.querySelector('.input-mapping-key-input');
+                if (keyInput && keyInput.value.trim()) {
+                    customParams.push(keyInput.value.trim());
+                }
+            });
         }
 
         steps.push({
@@ -13292,7 +13959,10 @@ function getCurrentWorkflowSteps() {
                 ? promptSelect.options[promptSelect.selectedIndex].text
                 : '',
             setVariables: setVariables,
-            foreachVariable: foreachVariable
+            foreachVariable: foreachVariable,
+            foreachIndexVariable: foreachIndexVariable,
+            foreachSource: foreachSource,
+            customParams: customParams
         });
     });
 
@@ -13403,6 +14073,80 @@ function buildFilteredCategories(currentStepNumber, workflowSteps) {
                 category_id: "wf_variables",
                 category_name: "🏷️ ワークフロー変数 / WF Variables",
                 variables: wfDefinedVars
+            });
+        }
+
+        // Category: FOREACH context (if inside a FOREACH loop)
+        const foreachContext = getForeachContextForStep(currentStepNumber, workflowSteps);
+        if (foreachContext) {
+            const itemVar = foreachContext.foreachVariable;
+            const indexVar = foreachContext.indexVariable || 'i';
+            const datasetId = parseDatasetIdFromSource(foreachContext.source);
+
+            const foreachVars = [];
+
+            // Row object (full item)
+            foreachVars.push({
+                name: `${itemVar} (行全体 / Row object)`,
+                variable: `{{vars.${itemVar}}}`,
+                type: "foreach_item",
+                source: `FOREACH: ${foreachContext.stepName}`
+            });
+
+            // Index variable
+            foreachVars.push({
+                name: `${indexVar} (インデックス / Index)`,
+                variable: `{{vars.${indexVar}}}`,
+                type: "foreach_index",
+                source: "0始まりのループインデックス / 0-based loop index"
+            });
+
+            // Dataset columns (if source is a dataset)
+            if (datasetId) {
+                // Use cached columns or fetch synchronously if already in cache
+                const columns = datasetColumnsCache[datasetId] || [];
+                for (const col of columns) {
+                    foreachVars.push({
+                        name: col,
+                        variable: `{{vars.${itemVar}.${col}}}`,
+                        type: "foreach_column",
+                        source: `Dataset ID: ${datasetId}`
+                    });
+                }
+            }
+
+            if (foreachVars.length > 0) {
+                categories.push({
+                    category_id: "foreach_context",
+                    category_name: `🔄 FOREACH: ${itemVar}`,
+                    variables: foreachVars
+                });
+            }
+        }
+
+        // Category: Custom parameters from previous prompt steps
+        const customParamVars = [];
+        for (const step of workflowSteps) {
+            if (step.stepNumber >= currentStepNumber) continue;
+
+            // Collect custom params from prompt steps
+            if (step.stepType === 'prompt' && step.customParams && step.customParams.length > 0) {
+                for (const paramName of step.customParams) {
+                    customParamVars.push({
+                        name: paramName,
+                        variable: `{{${step.stepName}.${paramName}}}`,
+                        type: "custom_param",
+                        source: `Step ${step.stepNumber}: ${step.stepName}`
+                    });
+                }
+            }
+        }
+
+        if (customParamVars.length > 0) {
+            categories.push({
+                category_id: "custom_params",
+                category_name: "🔧 カスタムパラメータ / Custom Params",
+                variables: customParamVars
             });
         }
     }
@@ -15899,8 +16643,9 @@ async function sendAgentMessage() {
     input.value = '';
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
 
-    // Show loading indicator
+    // Show loading indicator and switch to stop button
     agentIsLoading = true;
+    setAgentButtonStopMode();
     const loadingDiv = document.createElement('div');
     loadingDiv.id = 'agent-loading-indicator';
     loadingDiv.className = 'agent-message assistant-message loading';
@@ -15958,6 +16703,7 @@ async function sendAgentMessage() {
         messagesContainer.appendChild(errorDiv);
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
         agentIsLoading = false;
+        setAgentButtonSendMode();
     }
 }
 
@@ -16020,8 +16766,9 @@ async function checkPendingAgentTasks() {
             userMsgDiv.innerHTML = `<strong>You:</strong> ${formattedTaskUserMessage}`;
             messagesContainer.appendChild(userMsgDiv);
 
-            // Show loading indicator
+            // Show loading indicator and switch to stop button
             agentIsLoading = true;
+            setAgentButtonStopMode();
             const loadingDiv = document.createElement('div');
             loadingDiv.id = 'agent-loading-indicator';
             loadingDiv.className = 'agent-message assistant-message loading';
@@ -16164,6 +16911,7 @@ function handleAgentEvent(eventData, loadingDiv, eventsLogDiv, statusHeader) {
 
         clearCurrentTask();
         agentIsLoading = false;
+        setAgentButtonSendMode();
     }
 }
 
@@ -16213,6 +16961,7 @@ function startAgentPollingFallback(loadingDiv) {
                 displayAgentTaskResult(task);
                 clearCurrentTask();
                 agentIsLoading = false;
+                setAgentButtonSendMode();
             } else if (task.status === 'error') {
                 stopAgentPolling();
                 if (loadingDiv && loadingDiv.parentNode) {
@@ -16226,6 +16975,7 @@ function startAgentPollingFallback(loadingDiv) {
                 messagesContainer.scrollTop = messagesContainer.scrollHeight;
                 clearCurrentTask();
                 agentIsLoading = false;
+                setAgentButtonSendMode();
             } else if (task.status === 'cancelled') {
                 stopAgentPolling();
                 if (loadingDiv && loadingDiv.parentNode) {
@@ -16239,6 +16989,7 @@ function startAgentPollingFallback(loadingDiv) {
                 messagesContainer.scrollTop = messagesContainer.scrollHeight;
                 clearCurrentTask();
                 agentIsLoading = false;
+                setAgentButtonSendMode();
             }
         } catch (error) {
             console.error('Polling error:', error);
@@ -16367,7 +17118,7 @@ function displayAgentTaskResult(task) {
  */
 function disableAgentInput(message) {
     const input = document.getElementById('agent-input');
-    const sendBtn = document.querySelector('.agent-send-btn');
+    const sendBtn = document.getElementById('btn-agent-send');
 
     if (input) {
         input.disabled = true;
@@ -16384,13 +17135,43 @@ function disableAgentInput(message) {
  */
 function enableAgentInput() {
     const input = document.getElementById('agent-input');
-    const sendBtn = document.querySelector('.agent-send-btn');
+    const sendBtn = document.getElementById('btn-agent-send');
 
     if (input) {
         input.disabled = false;
         input.placeholder = 'エージェントにメッセージを送信... / Send message to agent...';
     }
     if (sendBtn) {
+        sendBtn.disabled = false;
+        sendBtn.style.opacity = '1';
+    }
+}
+
+/**
+ * Switch send button to stop mode (when task is running)
+ */
+function setAgentButtonStopMode() {
+    const sendBtn = document.getElementById('btn-agent-send');
+    if (sendBtn) {
+        sendBtn.innerHTML = '⏹ 停止';
+        sendBtn.style.background = 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)';
+        sendBtn.style.boxShadow = '0 2px 4px rgba(220,38,38,0.3)';
+        sendBtn.onclick = function() { cancelAgentTask(); };
+        sendBtn.disabled = false;
+        sendBtn.style.opacity = '1';
+    }
+}
+
+/**
+ * Switch stop button back to send mode (when task completes)
+ */
+function setAgentButtonSendMode() {
+    const sendBtn = document.getElementById('btn-agent-send');
+    if (sendBtn) {
+        sendBtn.innerHTML = '送信';
+        sendBtn.style.background = 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)';
+        sendBtn.style.boxShadow = '0 2px 4px rgba(59,130,246,0.3)';
+        sendBtn.onclick = function() { sendAgentMessage(); };
         sendBtn.disabled = false;
         sendBtn.style.opacity = '1';
     }
@@ -16423,6 +17204,7 @@ async function cancelAgentTask() {
 
             clearCurrentTask();
             agentIsLoading = false;
+            setAgentButtonSendMode();
         }
     } catch (error) {
         console.error('Failed to cancel task:', error);
@@ -16448,6 +17230,7 @@ function clearAgentChat() {
     // Reset state
     currentAgentTaskId = null;
     agentIsLoading = false;
+    setAgentButtonSendMode();
     currentSessionTerminated = false;  // Reset terminated flag
 
     // Re-enable input (in case it was disabled)
@@ -16681,13 +17464,16 @@ async function loadAgentSessionHistory() {
         const response = await fetch('/api/agent/history?limit=50');
         if (response.ok) {
             const data = await response.json();
-            // Convert API format to local format
+            // Convert API format to local format (include task status and model)
             agentSessions = data.sessions.map(s => ({
                 id: s.id,
                 timestamp: s.updated_at,
                 firstMessage: s.title,
                 title: s.title,
-                messages: []  // Messages loaded on demand
+                messages: [],  // Messages loaded on demand
+                taskStatus: s.task_status,  // running, completed, error, cancelled, pending
+                taskId: s.task_id,  // For stop button
+                modelName: s.model_name  // LLM model used
             }));
         }
     } catch (e) {
@@ -16704,6 +17490,71 @@ async function loadAgentSessionHistory() {
 function saveAgentSessionHistory() {
     // History is now saved via API on each message
     // This function is kept for backward compatibility
+}
+
+/**
+ * Get status badge HTML for agent session
+ * @param {string} status - Task status (running, completed, error, cancelled, pending)
+ * @param {number} taskId - Task ID for stop button
+ * @returns {string} HTML for status badge
+ */
+function getAgentStatusBadge(status, taskId) {
+    if (!status) return '';
+
+    const statusConfig = {
+        'running': { icon: '⏳', text: 'running', class: 'agent-status-running', showStop: false },
+        'pending': { icon: '⏳', text: 'pending', class: 'agent-status-pending', showStop: false },
+        'completed': { icon: '✓', text: 'done', class: 'agent-status-completed', showStop: false },
+        'error': { icon: '✕', text: 'error', class: 'agent-status-error', showStop: false },
+        'cancelled': { icon: '⛔', text: 'stopped', class: 'agent-status-cancelled', showStop: false }
+    };
+
+    const config = statusConfig[status] || { icon: '?', text: status, class: '', showStop: false };
+
+    let html = `<span class="agent-status-badge ${config.class}">${config.icon} ${config.text}</span>`;
+
+    return html;
+}
+
+/**
+ * Get model badge HTML for agent session
+ * @param {string} modelName - Model name
+ * @returns {string} HTML for model badge
+ */
+function getAgentModelBadge(modelName) {
+    if (!modelName) return '';
+    // Shorten model name for display
+    let shortName = modelName;
+    if (modelName.length > 15) {
+        shortName = modelName.replace('openai-', '').replace('azure-', '').replace('claude-', 'c-');
+    }
+    return `<span class="agent-model-badge" title="${escapeHtmlGlobal(modelName)}">${escapeHtmlGlobal(shortName)}</span>`;
+}
+
+/**
+ * Stop an agent task
+ * @param {number} taskId - Task ID to stop
+ */
+async function stopAgentTask(taskId) {
+    if (!confirm('このタスクを停止しますか？')) return;
+
+    try {
+        const response = await fetch(`/api/agent/tasks/${taskId}/cancel`, { method: 'POST' });
+        if (response.ok) {
+            const result = await response.json();
+            if (result.cancelled) {
+                alert('タスクを停止しました');
+                loadAgentSessionHistory(); // Refresh the list
+            } else {
+                alert(result.message || 'タスクを停止できませんでした');
+            }
+        } else {
+            alert('停止リクエストに失敗しました');
+        }
+    } catch (e) {
+        console.error('Error stopping task:', e);
+        alert('停止中にエラーが発生しました');
+    }
 }
 
 /**
@@ -16741,9 +17592,13 @@ function renderAgentSessionHistory(filterText = '') {
         <div class="agent-history-item ${session.id === currentAgentSessionId ? 'active' : ''}"
              title="${escapeHtmlGlobal(session.firstMessage || 'New session')}"
              style="position: relative;">
-            <div onclick="loadAgentSession('${session.id}')" style="cursor: pointer; padding-right: 20px;">
+            <div onclick="loadAgentSession('${session.id}')" style="cursor: pointer; padding-right: 30px;">
                 <div class="agent-history-title">${escapeHtmlGlobal(session.title || session.firstMessage?.substring(0, 30) || 'New session')}</div>
-                <div class="agent-history-time">${formatRelativeTime(session.timestamp)}</div>
+                <div class="agent-history-meta">
+                    <span class="agent-history-time">${formatRelativeTime(session.timestamp)}</span>
+                    ${getAgentModelBadge(session.modelName)}
+                    ${getAgentStatusBadge(session.taskStatus, session.taskId)}
+                </div>
             </div>
             <button class="agent-history-delete-btn"
                     onclick="event.stopPropagation(); deleteAgentSession('${session.id}')"

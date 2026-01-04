@@ -1,6 +1,6 @@
 """Anthropic Claude client implementation.
 
-Supports Claude 3.5 Sonnet, Claude 3.5 Haiku, and Claude 3 Opus models.
+Supports Claude 4.5 (Opus, Sonnet, Haiku), Claude Sonnet 4, Claude 3.5, and Claude 3 Opus models.
 Uses the official Anthropic Python SDK.
 """
 
@@ -155,8 +155,12 @@ class AnthropicClaudeClient(LLMClient):
                 "max_tokens": max_tokens,
                 "messages": api_messages,
                 "temperature": temperature,
-                "top_p": top_p
             }
+
+            # Claude 4.5 models don't support both temperature and top_p
+            # Only add top_p for non-4.5 models
+            if "4-5" not in self.MODEL_NAME:
+                api_params["top_p"] = top_p
 
             # Add system message if present
             if system_content:
@@ -210,6 +214,24 @@ class AnthropicClaudeClient(LLMClient):
             Model display name
         """
         return self.DISPLAY_NAME
+
+
+class ClaudeOpus45Client(AnthropicClaudeClient):
+    """Claude Opus 4.5 client (Most capable, highest quality)."""
+    MODEL_NAME = "claude-opus-4-5-20251101"
+    DISPLAY_NAME = "claude-opus-4.5"
+
+
+class ClaudeSonnet45Client(AnthropicClaudeClient):
+    """Claude Sonnet 4.5 client (Balanced performance and cost)."""
+    MODEL_NAME = "claude-sonnet-4-5-20250929"
+    DISPLAY_NAME = "claude-sonnet-4.5"
+
+
+class ClaudeHaiku45Client(AnthropicClaudeClient):
+    """Claude Haiku 4.5 client (Fastest, most cost-effective)."""
+    MODEL_NAME = "claude-haiku-4-5-20251001"
+    DISPLAY_NAME = "claude-haiku-4.5"
 
 
 class ClaudeSonnet4Client(AnthropicClaudeClient):
