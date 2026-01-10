@@ -270,7 +270,10 @@ class WorkflowManager:
                 "dataset_filter(dataset:6, \"score>=80\") → 80点以上",
                 "dataset_filter(dataset:6, \"name LIKE 'test%'\") → test始まり",
                 "dataset_filter(dataset:6, \"status='done' OR status='skip'\") → OR条件",
-                "dataset_filter(dataset:6, \"score>50 AND category='math'\") → AND条件"
+                "dataset_filter(dataset:6, \"score>50 AND category='math'\") → AND条件",
+                "dataset_filter(dataset:6, \"comment IS NULL\") → NULLの行のみ",
+                "dataset_filter(dataset:6, \"comment IS NOT NULL\") → NULLでない行のみ",
+                "【FOREACHソース】source: dataset_filter(...) → 条件に合う行をイテレート"
             ]
         },
         'dataset_join': {
@@ -1226,8 +1229,15 @@ class WorkflowManager:
             # Resolve column names if they contain variables (usually static)
             resolved_columns = [self._substitute_step_refs(str(c), step_context) for c in columns]
 
-            # Resolve values
-            resolved_values = [self._substitute_step_refs(str(v), step_context) for v in values]
+            # Resolve values and strip surrounding quotes
+            # (prevents triple-quoting when user accidentally adds literal quotes)
+            resolved_values = []
+            for v in values:
+                resolved = self._substitute_step_refs(str(v), step_context)
+                # Strip leading/trailing quotes if value is entirely quoted
+                if len(resolved) >= 2 and resolved.startswith('"') and resolved.endswith('"'):
+                    resolved = resolved[1:-1]
+                resolved_values.append(resolved)
 
             # Build CSV row
             output_buffer = io.StringIO()
@@ -2239,13 +2249,34 @@ class WorkflowManager:
                 return 0
             if func_name == 'shuffle':
                 if args:
-                    text = str(args[0])
+                    input_val = args[0]
+
+                    # Handle list input (from nested function like split())
+                    if isinstance(input_val, list):
+                        shuffled = list(input_val)
+                        random.shuffle(shuffled)
+                        return json.dumps(shuffled, ensure_ascii=False)
+
+                    text = str(input_val)
+
+                    # Handle delimiter-based shuffling (2 arguments)
                     if len(args) >= 2:
                         delimiter = str(args[1])
                         if delimiter:
                             parts = text.split(delimiter)
                             random.shuffle(parts)
                             return delimiter.join(parts)
+
+                    # Try to parse as JSON array first
+                    try:
+                        items = json.loads(text)
+                        if isinstance(items, list):
+                            random.shuffle(items)
+                            return json.dumps(items, ensure_ascii=False)
+                    except json.JSONDecodeError:
+                        pass
+
+                    # Fallback: shuffle characters
                     chars = list(text)
                     random.shuffle(chars)
                     return "".join(chars)
@@ -3367,7 +3398,9 @@ class WorkflowManager:
             CSV string with header from the last step, or None if no CSV output
         """
         # Get step names sorted by order (step1, step2, etc.)
-        step_names = [name for name in step_context.keys() if name != "input"]
+        # Skip special keys: "input", "vars", and any key starting with "_" (like "_meta", "_csv_outputs")
+        step_names = [name for name in step_context.keys()
+                      if name != "input" and name != "vars" and not name.startswith("_")]
         # Sort by step number (assuming format "stepN" or alphabetically)
         step_names.sort(key=lambda x: (len(x), x))
 
@@ -3381,9 +3414,10 @@ class WorkflowManager:
             csv_output = fields.get("csv_output")
             csv_header = fields.get("csv_header")
 
-            if csv_output:
+            # Only accept string csv_output (not dicts from other structures)
+            if csv_output and isinstance(csv_output, str):
                 last_csv_output = csv_output
-                last_csv_header = csv_header
+                last_csv_header = csv_header if isinstance(csv_header, str) else None
                 last_step_name = step_name
 
         if not last_csv_output:

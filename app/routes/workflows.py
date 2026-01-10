@@ -10,9 +10,9 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 
-from backend.database import get_db, SessionLocal, Workflow, WorkflowStep, WorkflowJob, Project, Prompt
+from backend.database import get_db, SessionLocal, Workflow, WorkflowStep, WorkflowJob, Project, Prompt, Dataset
 from backend.workflow import WorkflowManager
-from backend.workflow_validator import validate_workflow
+from backend.workflow_validator import validate_workflow, get_available_variables_at_step, get_dataset_columns
 
 router = APIRouter()
 
@@ -81,6 +81,7 @@ class WorkflowResponse(BaseModel):
     description: str
     project_id: Optional[int] = None
     auto_context: bool = False  # Auto-generate CONTEXT from previous steps
+    validated: bool = False  # True if workflow passed validation (0 errors)
     created_at: str
     updated_at: str
     steps: List[WorkflowStepResponse] = []
@@ -134,6 +135,7 @@ def _workflow_to_response(workflow: Workflow, db: Session) -> WorkflowResponse:
         description=workflow.description or "",
         project_id=workflow.project_id,
         auto_context=bool(workflow.auto_context),
+        validated=bool(workflow.validated),
         created_at=workflow.created_at,
         updated_at=workflow.updated_at,
         steps=[_step_to_response(s, db) for s in workflow.steps]
@@ -284,7 +286,11 @@ def list_workflows(project_id: Optional[int] = None, db: Session = Depends(get_d
 
 @router.post("/api/workflows", response_model=WorkflowResponse)
 def create_workflow(request: WorkflowCreate, db: Session = Depends(get_db)):
-    """Create a new workflow with steps."""
+    """Create a new workflow with steps.
+
+    Validates the workflow after creation. If validation fails with errors,
+    the workflow is rolled back and not saved.
+    """
     try:
         manager = WorkflowManager(db)
         workflow = manager.create_workflow(
@@ -302,15 +308,42 @@ def create_workflow(request: WorkflowCreate, db: Session = Depends(get_db)):
                 prompt_id=step_data.prompt_id,
                 step_order=step_data.step_order,
                 input_mapping=step_data.input_mapping,
-                execution_mode=step_data.execution_mode
+                execution_mode=step_data.execution_mode,
+                step_type=step_data.step_type,
+                condition_config=step_data.condition_config
             )
 
+        # Validate workflow control flow before final commit (don't update flag yet)
+        db.flush()  # Ensure all steps are in DB for validation
+        validation = validate_workflow(db, workflow.id, update_flag=False)
+        if validation.errors > 0:
+            db.rollback()
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "Workflow validation failed",
+                    "valid": False,
+                    "errors": validation.errors,
+                    "warnings": validation.warnings,
+                    "issues": [issue.to_dict() for issue in validation.issues
+                              if issue.severity.value == "error"],
+                    "all_issues": [issue.to_dict() for issue in validation.issues]
+                }
+            )
+
+        # Validation passed - set validated flag and commit
+        workflow.validated = 1
+        db.commit()
         db.refresh(workflow)
         return _workflow_to_response(workflow, db)
 
+    except HTTPException:
+        raise
     except ValueError as e:
+        db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to create workflow: {str(e)}")
 
 
@@ -417,10 +450,224 @@ async def get_workflow_functions():
 @router.get("/api/workflows/{workflow_id}", response_model=WorkflowResponse)
 def get_workflow(workflow_id: int, db: Session = Depends(get_db)):
     """Get workflow details."""
-    workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+    workflow = db.query(Workflow).filter(
+        Workflow.id == workflow_id,
+        Workflow.is_deleted != 1  # Exclude soft-deleted workflows
+    ).first()
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
     return _workflow_to_response(workflow, db)
+
+
+class ValidationResponse(BaseModel):
+    """Response model for workflow validation."""
+    valid: bool
+    workflow_id: int
+    workflow_name: str
+    errors: int
+    warnings: int
+    info: int
+    issues: List[Dict[str, Any]]
+    summary: str
+
+
+@router.get("/api/workflows/{workflow_id}/validate", response_model=ValidationResponse)
+def validate_workflow_endpoint(workflow_id: int, db: Session = Depends(get_db)):
+    """Validate a workflow and return detailed validation results.
+
+    Checks for:
+    - Control flow integrity (IF/ENDIF, LOOP/ENDLOOP, FOREACH/ENDFOREACH pairs)
+    - Formula/function syntax validation
+    - Variable and step reference validation
+    - Required parameter and configuration validation
+    - Prompt step configuration
+    - Input parameter usage
+
+    Returns validation result with any errors or warnings found.
+    """
+    workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    validation = validate_workflow(db, workflow_id)
+
+    return ValidationResponse(
+        valid=validation.valid,
+        workflow_id=validation.workflow_id,
+        workflow_name=validation.workflow_name,
+        errors=validation.errors,
+        warnings=validation.warnings,
+        info=validation.info,
+        issues=[issue.to_dict() for issue in validation.issues],
+        summary=validation.get_summary()
+    )
+
+
+@router.get("/api/workflows/{workflow_id}/steps/{step_order}/available-variables")
+def get_step_available_variables(
+    workflow_id: int,
+    step_order: int,
+    db: Session = Depends(get_db)
+):
+    """Get all available variables and functions at a specific workflow step.
+
+    Returns variables that can be used in this step's input_mapping or condition_config:
+    - Initial input variables
+    - SET variables defined before this step
+    - FOREACH item_var and index_var (if inside a FOREACH loop)
+    - Dataset columns (if FOREACH uses a dataset source)
+    - Previous step outputs (parser fields)
+    - Available functions
+
+    This endpoint is useful for:
+    - UI variable picker to show context-aware options
+    - AI agents building workflow steps
+
+    Args:
+        workflow_id: The ID of the workflow
+        step_order: The step order (1-based) to get variables for
+    """
+    workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+    if not workflow:
+        raise HTTPException(status_code=404, detail=f"Workflow {workflow_id} not found")
+
+    result = get_available_variables_at_step(db, workflow_id, step_order)
+    return result
+
+
+@router.get("/api/datasets/{dataset_id}/columns")
+def get_dataset_columns_endpoint(
+    dataset_id: int,
+    db: Session = Depends(get_db)
+):
+    """Get column names for a dataset.
+
+    Returns a list of column names in the dataset's data table.
+    Used by the variable picker to show available columns for FOREACH loops.
+
+    Args:
+        dataset_id: The ID of the dataset
+    """
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found")
+
+    columns = get_dataset_columns(db, dataset_id)
+    return {
+        "dataset_id": dataset_id,
+        "dataset_name": dataset.name,
+        "columns": columns
+    }
+
+
+class WorkflowJsonValidationRequest(BaseModel):
+    """Request model for validating workflow JSON without saving."""
+    workflow_json: Dict[str, Any]
+    workflow_id: Optional[int] = None  # Optional: existing workflow ID for context
+
+
+@router.post("/api/workflows/validate-json", response_model=ValidationResponse)
+def validate_workflow_json(request: WorkflowJsonValidationRequest, db: Session = Depends(get_db)):
+    """Validate workflow JSON without saving.
+
+    This endpoint validates the workflow structure and configuration
+    without persisting changes. Used by the UI to validate current form data.
+
+    For existing workflows, pass workflow_id to provide context for validation.
+    For new workflows, omit workflow_id.
+    """
+    wf_dict = request.workflow_json
+    workflow_id = request.workflow_id
+
+    # Create temporary in-memory workflow structure for validation
+    # We need to temporarily insert into DB for the validator to work
+    from datetime import datetime
+
+    try:
+        # Create temporary workflow
+        temp_workflow = Workflow(
+            name=wf_dict.get("name", "temp_validation"),
+            description=wf_dict.get("description", ""),
+            project_id=wf_dict.get("project_id"),
+            auto_context=1 if wf_dict.get("auto_context") else 0,
+            validated=0,
+            is_deleted=0,
+            created_at=datetime.utcnow().isoformat(),
+            updated_at=datetime.utcnow().isoformat()
+        )
+        db.add(temp_workflow)
+        db.flush()  # Get the ID without committing
+
+        # Create temporary steps
+        for step_dict in wf_dict.get("steps", []):
+            # Get prompt_id from step (already resolved by client)
+            prompt_id = step_dict.get("prompt_id")
+            project_id = step_dict.get("project_id")
+
+            # Also support prompt_name resolution (for API compatibility)
+            if not prompt_id and step_dict.get("prompt_name"):
+                prompt = db.query(Prompt).filter(Prompt.name == step_dict["prompt_name"]).first()
+                if prompt:
+                    prompt_id = prompt.id
+
+            input_mapping = step_dict.get("input_mapping")
+            condition_config = step_dict.get("condition_config")
+
+            step = WorkflowStep(
+                workflow_id=temp_workflow.id,
+                step_order=step_dict.get("step_order", 0),
+                step_name=step_dict.get("step_name", ""),
+                step_type=step_dict.get("step_type", "prompt"),
+                prompt_id=prompt_id,
+                project_id=project_id,
+                execution_mode=step_dict.get("execution_mode"),
+                input_mapping=json.dumps(input_mapping) if input_mapping else None,
+                condition_config=json.dumps(condition_config) if condition_config else None
+            )
+            db.add(step)
+
+        db.flush()  # Ensure all steps are visible to validator
+
+        # Run validation (don't update flag since we'll rollback)
+        validation = validate_workflow(db, temp_workflow.id, update_flag=False)
+
+        # Rollback to discard temporary data
+        db.rollback()
+
+        return ValidationResponse(
+            valid=validation.valid,
+            workflow_id=workflow_id or 0,  # Return original workflow_id if provided
+            workflow_name=wf_dict.get("name", ""),
+            errors=validation.errors,
+            warnings=validation.warnings,
+            info=validation.info,
+            issues=[issue.to_dict() for issue in validation.issues],
+            summary=validation.get_summary()
+        )
+
+    except Exception as e:
+        db.rollback()
+        # Return error as validation issue
+        return ValidationResponse(
+            valid=False,
+            workflow_id=workflow_id or 0,
+            workflow_name=wf_dict.get("name", ""),
+            errors=1,
+            warnings=0,
+            info=0,
+            issues=[{
+                "severity": "error",
+                "step_id": None,
+                "step_name": None,
+                "step_order": None,
+                "category": "validation",
+                "message": f"Validation error: {str(e)}",
+                "message_ja": f"バリデーションエラー: {str(e)}",
+                "suggestion": None,
+                "suggestion_ja": None
+            }],
+            summary=f"Validation failed: {str(e)}"
+        )
 
 
 @router.put("/api/workflows/{workflow_id}", response_model=WorkflowResponse)
@@ -540,10 +787,24 @@ def clone_workflow(
 def add_workflow_step(
     workflow_id: int,
     request: WorkflowStepCreate,
+    validate: bool = False,
     db: Session = Depends(get_db)
 ):
-    """Add a step to a workflow."""
+    """Add a step to a workflow.
+
+    Args:
+        validate: If True, validate the entire workflow after adding the step.
+                  If validation fails, the step addition is rolled back.
+
+    Note: Adding a step resets the workflow's validated flag to false.
+          Run validate_workflow to re-validate after modifications.
+    """
     try:
+        # Reset validated flag when modifying steps
+        workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+        if workflow:
+            workflow.validated = 0
+
         manager = WorkflowManager(db)
         step = manager.add_step(
             workflow_id=workflow_id,
@@ -556,8 +817,30 @@ def add_workflow_step(
             step_type=request.step_type,
             condition_config=request.condition_config
         )
+
+        # If validate=true, validate entire workflow and rollback on errors
+        if validate:
+            db.flush()
+            validation = validate_workflow(db, workflow_id)
+            if validation.errors > 0:
+                db.rollback()
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "message": "Workflow validation failed",
+                        "valid": False,
+                        "errors": validation.errors,
+                        "warnings": validation.warnings,
+                        "issues": [issue.to_dict() for issue in validation.issues
+                                  if issue.severity.value == "error"],
+                        "all_issues": [issue.to_dict() for issue in validation.issues]
+                    }
+                )
+
         return _step_to_response(step, db)
 
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -571,7 +854,11 @@ def update_workflow_step(
     request: WorkflowStepUpdate,
     db: Session = Depends(get_db)
 ):
-    """Update a workflow step."""
+    """Update a workflow step.
+
+    Note: Updating a step resets the workflow's validated flag to false.
+          Run validate_workflow to re-validate after modifications.
+    """
     try:
         # Verify step belongs to workflow
         step = db.query(WorkflowStep).filter(
@@ -580,6 +867,11 @@ def update_workflow_step(
         ).first()
         if not step:
             raise HTTPException(status_code=404, detail="Step not found")
+
+        # Reset validated flag when modifying steps
+        workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+        if workflow:
+            workflow.validated = 0
 
         manager = WorkflowManager(db)
         updated_step = manager.update_step(
@@ -608,7 +900,11 @@ def remove_workflow_step(
     step_id: int,
     db: Session = Depends(get_db)
 ):
-    """Remove a step from a workflow."""
+    """Remove a step from a workflow.
+
+    Note: Removing a step resets the workflow's validated flag to false.
+          Run validate_workflow to re-validate after modifications.
+    """
     try:
         # Verify step belongs to workflow
         step = db.query(WorkflowStep).filter(
@@ -617,6 +913,11 @@ def remove_workflow_step(
         ).first()
         if not step:
             raise HTTPException(status_code=404, detail="Step not found")
+
+        # Reset validated flag when modifying steps
+        workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+        if workflow:
+            workflow.validated = 0
 
         manager = WorkflowManager(db)
         manager.remove_step(step_id)
@@ -639,13 +940,24 @@ def run_workflow(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
-    """Execute a workflow asynchronously."""
+    """Execute a workflow asynchronously.
+
+    Requires the workflow to be validated (0 errors) before execution.
+    Use GET /api/workflows/{id}/validate to validate the workflow first.
+    """
     workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
     if not workflow.steps:
         raise HTTPException(status_code=400, detail="Workflow has no steps")
+
+    # Check if workflow is validated
+    if not workflow.validated:
+        raise HTTPException(
+            status_code=422,
+            detail="Workflow must be validated before execution. Run validate_workflow first (GET /api/workflows/{id}/validate)."
+        )
 
     try:
         # Create pending job
@@ -1117,20 +1429,26 @@ def import_workflow(request: WorkflowImportRequest, db: Session = Depends(get_db
             )
             db.add(step)
 
-        # Validate workflow control flow before commit
+        # Validate workflow control flow before commit (don't update flag yet)
         db.flush()  # Ensure all steps are in DB for validation
-        validation = validate_workflow(db, workflow.id)
+        validation = validate_workflow(db, workflow.id, update_flag=False)
         if validation.errors > 0:
             db.rollback()
             raise HTTPException(
                 status_code=422,
                 detail={
                     "message": "Workflow validation failed",
-                    "errors": [issue.to_dict() for issue in validation.issues
-                              if issue.severity.value == "error"]
+                    "valid": False,
+                    "errors": validation.errors,
+                    "warnings": validation.warnings,
+                    "issues": [issue.to_dict() for issue in validation.issues
+                              if issue.severity.value == "error"],
+                    "all_issues": [issue.to_dict() for issue in validation.issues]
                 }
             )
 
+        # Validation passed - set validated flag and commit
+        workflow.validated = 1
         db.commit()
         db.refresh(workflow)
 
@@ -1169,21 +1487,23 @@ def update_workflow_json(workflow_id: int, request: WorkflowImportRequest, db: S
 
         # Create new steps from JSON
         for step_dict in wf_dict.get("steps", []):
-            # Resolve prompt by name
-            prompt_id = None
-            prompt_name = step_dict.get("prompt_name")
-            if prompt_name:
-                prompt = db.query(Prompt).filter(Prompt.name == prompt_name).first()
-                if prompt:
-                    prompt_id = prompt.id
+            # Get prompt_id: accept direct ID from UI, or resolve by name for API/import
+            prompt_id = step_dict.get("prompt_id")
+            if not prompt_id:
+                prompt_name = step_dict.get("prompt_name")
+                if prompt_name:
+                    prompt = db.query(Prompt).filter(Prompt.name == prompt_name).first()
+                    if prompt:
+                        prompt_id = prompt.id
 
-            # Resolve project by name (backward compatibility)
-            project_id = None
-            project_name = step_dict.get("project_name")
-            if project_name:
-                project = db.query(Project).filter(Project.name == project_name).first()
-                if project:
-                    project_id = project.id
+            # Get project_id: accept direct ID from UI, or resolve by name for API/import
+            project_id = step_dict.get("project_id")
+            if not project_id:
+                project_name = step_dict.get("project_name")
+                if project_name:
+                    project = db.query(Project).filter(Project.name == project_name).first()
+                    if project:
+                        project_id = project.id
 
             input_mapping = step_dict.get("input_mapping")
             condition_config = step_dict.get("condition_config")
@@ -1201,20 +1521,26 @@ def update_workflow_json(workflow_id: int, request: WorkflowImportRequest, db: S
             )
             db.add(step)
 
-        # Validate workflow control flow before commit
+        # Validate workflow control flow before commit (don't update flag yet)
         db.flush()  # Ensure all steps are in DB for validation
-        validation = validate_workflow(db, workflow.id)
+        validation = validate_workflow(db, workflow.id, update_flag=False)
         if validation.errors > 0:
             db.rollback()
             raise HTTPException(
                 status_code=422,
                 detail={
                     "message": "Workflow validation failed",
-                    "errors": [issue.to_dict() for issue in validation.issues
-                              if issue.severity.value == "error"]
+                    "valid": False,
+                    "errors": validation.errors,
+                    "warnings": validation.warnings,
+                    "issues": [issue.to_dict() for issue in validation.issues
+                              if issue.severity.value == "error"],
+                    "all_issues": [issue.to_dict() for issue in validation.issues]
                 }
             )
 
+        # Validation passed - set validated flag and commit
+        workflow.validated = 1
         db.commit()
         db.refresh(workflow)
 

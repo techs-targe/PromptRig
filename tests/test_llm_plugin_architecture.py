@@ -37,11 +37,13 @@ class TestLLMPluginArchitecture(unittest.TestCase):
             "openai-gpt-4.1-nano",
             "openai-gpt-5-nano",
             "openai-o4-mini",
-            # Claude models
+            # Claude models (claude-3.5-sonnet and claude-3-opus disabled due to 404)
             "claude-sonnet-4",
-            "claude-3.5-sonnet",
             "claude-3.5-haiku",
-            "claude-3-opus",
+            # Claude 4.5 models
+            "claude-haiku-4.5",
+            "claude-opus-4.5",
+            "claude-sonnet-4.5",
         ]
 
         for model in expected_models:

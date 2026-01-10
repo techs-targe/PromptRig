@@ -386,7 +386,7 @@ class TestWorkflowValidator:
         workflow = self.create_workflow()
         self.add_step(workflow.id, "step1", step_order=0)
         self.add_step(workflow.id, "step2", step_order=1,
-                      input_mapping={"CONTEXT": "{{step1.result}}"})
+                      input_mapping={"CONTEXT": "{{step1.OUTPUT}}"})  # Use valid output field
 
         result = validate_workflow(self.db, workflow.id)
         assert result.valid, f"Expected valid, got issues: {result.issues}"
@@ -467,9 +467,8 @@ class TestWorkflowValidator:
     def test_valid_function_sum(self):
         """Test valid sum() function passes."""
         workflow = self.create_workflow()
-        self.add_step(workflow.id, "step1", step_order=0)
-        self.add_step(workflow.id, "step2", step_order=1,
-                      input_mapping={"RESULT": "sum({{step1.a}}, {{step1.b}})"})
+        self.add_step(workflow.id, "step1", step_order=0,
+                      input_mapping={"RESULT": "sum({{input.a}}, {{input.b}})"})  # Use input params
 
         result = validate_workflow(self.db, workflow.id)
         assert result.valid, f"Expected valid, got issues: {result.issues}"
@@ -477,9 +476,8 @@ class TestWorkflowValidator:
     def test_valid_function_upper(self):
         """Test valid upper() function passes."""
         workflow = self.create_workflow()
-        self.add_step(workflow.id, "step1", step_order=0)
-        self.add_step(workflow.id, "step2", step_order=1,
-                      input_mapping={"RESULT": "upper({{step1.text}})"})
+        self.add_step(workflow.id, "step1", step_order=0,
+                      input_mapping={"RESULT": "upper({{input.text}})"})  # Use input params
 
         result = validate_workflow(self.db, workflow.id)
         assert result.valid, f"Expected valid, got issues: {result.issues}"
@@ -527,9 +525,8 @@ class TestWorkflowValidator:
     def test_valid_complex_formula(self):
         """Test complex formula with nested functions passes."""
         workflow = self.create_workflow()
-        self.add_step(workflow.id, "step1", step_order=0)
-        self.add_step(workflow.id, "step2", step_order=1,
-                      input_mapping={"RESULT": "concat(upper({{step1.a}}), lower({{step1.b}}))"})
+        self.add_step(workflow.id, "step1", step_order=0,
+                      input_mapping={"RESULT": "concat(upper({{input.a}}), lower({{input.b}}))"})  # Use input params
 
         result = validate_workflow(self.db, workflow.id)
         # Note: nested function validation may not catch all issues, but basic syntax should pass
@@ -546,7 +543,7 @@ class TestWorkflowValidator:
         assert result.valid, f"Expected valid, got issues: {result.issues}"
 
     def test_prompt_step_without_prompt_or_project(self):
-        """Test prompt step without prompt_id or project_id is rejected."""
+        """Test prompt step without prompt_id is rejected."""
         workflow = self.create_workflow()
         step = WorkflowStep(
             workflow_id=workflow.id,
@@ -561,7 +558,7 @@ class TestWorkflowValidator:
 
         result = validate_workflow(self.db, workflow.id)
         assert not result.valid
-        assert any(i.category == "config" and "prompt_id or project_id" in i.message.lower()
+        assert any(i.category == "config" and "requires prompt_id" in i.message.lower()
                    for i in result.issues)
 
     def test_prompt_step_with_invalid_prompt_id(self):

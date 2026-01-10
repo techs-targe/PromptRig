@@ -23,6 +23,10 @@ class RunSingleRequest(BaseModel):
         default=None,
         description="Prompt ID to use (NEW ARCHITECTURE). If provided, uses PromptRevision instead of ProjectRevision."
     )
+    prompt_revision_id: Optional[int] = Field(
+        default=None,
+        description="Specific prompt revision ID to use. If provided, validates and uses this exact revision."
+    )
     input_params: Dict[str, str] = Field(
         ...,
         description="Dictionary of parameter name to value"

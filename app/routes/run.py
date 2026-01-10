@@ -164,6 +164,7 @@ def run_single(request: RunSingleRequest, background_tasks: BackgroundTasks, db:
     - Repeat count limited to 1-10
 
     NEW ARCHITECTURE (v3.0):
+    - If prompt_revision_id is provided, validates and uses that exact revision
     - If prompt_id is provided, uses PromptRevision
     - Otherwise falls back to ProjectRevision for backward compatibility
 
@@ -173,8 +174,21 @@ def run_single(request: RunSingleRequest, background_tasks: BackgroundTasks, db:
         project_revision_id = None
         prompt_revision_id = None
 
+        # NEW ARCHITECTURE: Check if prompt_revision_id is provided directly
+        if request.prompt_revision_id:
+            # Validate that the prompt_revision_id exists
+            prompt_revision = db.query(PromptRevision).filter(
+                PromptRevision.id == request.prompt_revision_id
+            ).first()
+
+            if not prompt_revision:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Prompt revision {request.prompt_revision_id} not found."
+                )
+            prompt_revision_id = prompt_revision.id
         # NEW ARCHITECTURE: Check if prompt_id is provided
-        if request.prompt_id:
+        elif request.prompt_id:
             # Use PromptRevision (new architecture)
             prompt_revision = db.query(PromptRevision).filter(
                 PromptRevision.prompt_id == request.prompt_id
@@ -500,6 +514,357 @@ def cancel_job(job_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to cancel job: {str(e)}")
+
+
+# ========== Retry Endpoints ==========
+
+@router.post("/api/jobs/{job_id}/items/{item_id}/retry", response_model=Dict[str, Any])
+def retry_job_item(job_id: int, item_id: int, db: Session = Depends(get_db)):
+    """Retry a failed job item.
+
+    Re-executes the LLM call with the same input_params and raw_prompt.
+    After successful retry, regenerates merged_csv_output.
+
+    Args:
+        job_id: ID of the job
+        item_id: ID of the job item to retry
+
+    Returns:
+        Retry result with updated item status
+    """
+    try:
+        # Get the job item
+        job_item = db.query(JobItem).filter(
+            JobItem.id == item_id,
+            JobItem.job_id == job_id
+        ).first()
+
+        if not job_item:
+            raise HTTPException(status_code=404, detail="Job item not found")
+
+        # Verify item is in error state
+        if job_item.status != "error":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot retry item with status '{job_item.status}'. Only 'error' items can be retried."
+            )
+
+        # Get the job
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        # Get the revision for parser config and prompt template
+        revision = None
+        if job.prompt_revision_id:
+            revision = db.query(PromptRevision).filter(
+                PromptRevision.id == job.prompt_revision_id
+            ).first()
+        elif job.project_revision_id:
+            revision = db.query(ProjectRevision).filter(
+                ProjectRevision.id == job.project_revision_id
+            ).first()
+
+        # Get LLM client
+        model_name = job.model_name
+        from backend.llm import get_llm_client
+        from backend.parser import ResponseParser
+
+        try:
+            llm_client = get_llm_client(model_name)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to get LLM client: {str(e)}")
+
+        # Update item status to running
+        job_item.status = "running"
+        job_item.error_message = None
+        db.commit()
+
+        # Execute LLM call
+        try:
+            from backend.prompt import get_message_parser
+
+            # Process image parameters if needed
+            job_manager = JobManager(db)
+            images = []
+            if revision and revision.prompt_template:
+                try:
+                    input_params = json.loads(job_item.input_params)
+                    images = job_manager._process_image_parameters(
+                        input_params,
+                        revision.prompt_template
+                    )
+                except Exception as e:
+                    logger.error(f"Error processing images for retry item {item_id}: {e}")
+
+            # Parse prompt for role markers
+            message_parser = get_message_parser()
+            if message_parser.has_role_markers(job_item.raw_prompt):
+                messages = message_parser.to_messages_list(job_item.raw_prompt)
+                prompt_arg = None
+            else:
+                messages = None
+                prompt_arg = job_item.raw_prompt
+
+            # Get model parameters from system settings
+            model_params = job_manager._get_model_parameters(model_name or llm_client.get_model_name())
+
+            # GPT-5 models don't use temperature
+            actual_model_name = llm_client.get_model_name()
+            is_gpt5 = "gpt-5" in actual_model_name or "gpt5" in actual_model_name
+
+            # Default temperature (can be customized if needed)
+            temperature = 0.7
+
+            if is_gpt5:
+                response = llm_client.call(
+                    prompt=prompt_arg,
+                    messages=messages,
+                    images=images if images else None,
+                    **model_params
+                )
+            else:
+                call_params = {k: v for k, v in model_params.items() if k != 'temperature'}
+                response = llm_client.call(
+                    prompt=prompt_arg,
+                    messages=messages,
+                    images=images if images else None,
+                    temperature=temperature,
+                    **call_params
+                )
+
+            if response.success:
+                job_item.status = "done"
+                job_item.raw_response = response.response_text
+                job_item.turnaround_ms = response.turnaround_ms
+                job_item.error_message = None
+
+                # Apply parser
+                if revision and revision.parser_config:
+                    parser = ResponseParser(revision.parser_config)
+                    parsed_result = parser.parse(response.response_text)
+                    job_item.parsed_response = json.dumps(parsed_result, ensure_ascii=False)
+                else:
+                    job_item.parsed_response = json.dumps({"raw": response.response_text, "parsed": False})
+
+                db.commit()
+
+                # Regenerate merged CSV
+                all_items = db.query(JobItem).filter(JobItem.job_id == job_id).all()
+                merged_csv = job_manager._merge_csv_outputs(all_items, include_csv_header=True)
+                job.merged_csv_output = merged_csv
+
+                # Update job status
+                error_items = db.query(JobItem).filter(
+                    JobItem.job_id == job_id,
+                    JobItem.status == "error"
+                ).count()
+                job.status = "error" if error_items > 0 else "done"
+
+                db.commit()
+
+                return {
+                    "success": True,
+                    "item_id": item_id,
+                    "status": "done",
+                    "message": "Retry successful"
+                }
+            else:
+                job_item.status = "error"
+                job_item.error_message = response.error_message
+                job_item.turnaround_ms = response.turnaround_ms
+                db.commit()
+
+                return {
+                    "success": False,
+                    "item_id": item_id,
+                    "status": "error",
+                    "error_message": response.error_message
+                }
+
+        except Exception as e:
+            job_item.status = "error"
+            job_item.error_message = str(e)
+            db.commit()
+            return {
+                "success": False,
+                "item_id": item_id,
+                "status": "error",
+                "error_message": str(e)
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Retry failed: {str(e)}")
+
+
+@router.post("/api/jobs/{job_id}/retry-all-errors", response_model=Dict[str, Any])
+def retry_all_error_items(job_id: int, db: Session = Depends(get_db)):
+    """Retry all failed job items in a job.
+
+    Re-executes all error items sequentially.
+    After all retries, regenerates merged_csv_output.
+
+    Args:
+        job_id: ID of the job
+
+    Returns:
+        Retry results with success/error counts
+    """
+    try:
+        # Get the job
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        # Get all error items
+        error_items = db.query(JobItem).filter(
+            JobItem.job_id == job_id,
+            JobItem.status == "error"
+        ).all()
+
+        if not error_items:
+            return {
+                "success": True,
+                "job_id": job_id,
+                "success_count": 0,
+                "error_count": 0,
+                "message": "No error items to retry"
+            }
+
+        # Get the revision
+        revision = None
+        if job.prompt_revision_id:
+            revision = db.query(PromptRevision).filter(
+                PromptRevision.id == job.prompt_revision_id
+            ).first()
+        elif job.project_revision_id:
+            revision = db.query(ProjectRevision).filter(
+                ProjectRevision.id == job.project_revision_id
+            ).first()
+
+        # Get LLM client
+        model_name = job.model_name
+        from backend.llm import get_llm_client
+        from backend.parser import ResponseParser
+        from backend.prompt import get_message_parser
+
+        try:
+            llm_client = get_llm_client(model_name)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to get LLM client: {str(e)}")
+
+        job_manager = JobManager(db)
+        message_parser = get_message_parser()
+        model_params = job_manager._get_model_parameters(model_name or llm_client.get_model_name())
+
+        actual_model_name = llm_client.get_model_name()
+        is_gpt5 = "gpt-5" in actual_model_name or "gpt5" in actual_model_name
+        temperature = 0.7
+
+        success_count = 0
+        still_error_count = 0
+
+        # Process each error item sequentially (avoid rate limiting)
+        for item in error_items:
+            item.status = "running"
+            item.error_message = None
+            db.commit()
+
+            try:
+                # Process images
+                images = []
+                if revision and revision.prompt_template:
+                    try:
+                        input_params = json.loads(item.input_params)
+                        images = job_manager._process_image_parameters(
+                            input_params,
+                            revision.prompt_template
+                        )
+                    except Exception as e:
+                        logger.error(f"Error processing images for retry item {item.id}: {e}")
+
+                # Parse prompt for role markers
+                if message_parser.has_role_markers(item.raw_prompt):
+                    messages = message_parser.to_messages_list(item.raw_prompt)
+                    prompt_arg = None
+                else:
+                    messages = None
+                    prompt_arg = item.raw_prompt
+
+                # Call LLM
+                if is_gpt5:
+                    response = llm_client.call(
+                        prompt=prompt_arg,
+                        messages=messages,
+                        images=images if images else None,
+                        **model_params
+                    )
+                else:
+                    call_params = {k: v for k, v in model_params.items() if k != 'temperature'}
+                    response = llm_client.call(
+                        prompt=prompt_arg,
+                        messages=messages,
+                        images=images if images else None,
+                        temperature=temperature,
+                        **call_params
+                    )
+
+                if response.success:
+                    item.status = "done"
+                    item.raw_response = response.response_text
+                    item.turnaround_ms = response.turnaround_ms
+                    item.error_message = None
+
+                    # Apply parser
+                    if revision and revision.parser_config:
+                        parser = ResponseParser(revision.parser_config)
+                        parsed_result = parser.parse(response.response_text)
+                        item.parsed_response = json.dumps(parsed_result, ensure_ascii=False)
+                    else:
+                        item.parsed_response = json.dumps({"raw": response.response_text, "parsed": False})
+
+                    success_count += 1
+                else:
+                    item.status = "error"
+                    item.error_message = response.error_message
+                    item.turnaround_ms = response.turnaround_ms
+                    still_error_count += 1
+
+            except Exception as e:
+                item.status = "error"
+                item.error_message = str(e)
+                still_error_count += 1
+
+            db.commit()
+
+        # Regenerate merged CSV
+        all_items = db.query(JobItem).filter(JobItem.job_id == job_id).all()
+        merged_csv = job_manager._merge_csv_outputs(all_items, include_csv_header=True)
+        job.merged_csv_output = merged_csv
+
+        # Update job status
+        remaining_errors = db.query(JobItem).filter(
+            JobItem.job_id == job_id,
+            JobItem.status == "error"
+        ).count()
+        job.status = "error" if remaining_errors > 0 else "done"
+
+        db.commit()
+
+        return {
+            "success": True,
+            "job_id": job_id,
+            "success_count": success_count,
+            "error_count": still_error_count,
+            "message": f"Retry completed: {success_count} success, {still_error_count} still error"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Bulk retry failed: {str(e)}")
 
 
 def execute_batch_all_background(job_configs: List[Dict], include_csv_header: bool):
