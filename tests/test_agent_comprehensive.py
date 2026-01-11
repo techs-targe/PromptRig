@@ -28,10 +28,12 @@ import asyncio
 import json
 import sys
 import traceback
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-# Add project root to path
-sys.path.insert(0, '/home/USERNAME/project/30_driven_win')
+# Add project root to path dynamically
+project_root = Path(__file__).parent.parent.absolute()
+sys.path.insert(0, str(project_root))
 
 from backend.mcp.tools import MCPToolRegistry
 
