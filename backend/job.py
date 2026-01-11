@@ -280,10 +280,25 @@ class JobManager:
         try:
             llm_client = get_llm_client(model_name)
         except Exception as e:
+            error_msg = f"LLM client initialization failed: {str(e)}"
+            logger.error(f"[LLM-INIT-ERROR] Job {job.id}: {error_msg}")
+
             job.status = "error"
             job.finished_at = datetime.utcnow().isoformat()
+            job.turnaround_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
             self.db.commit()
-            raise e
+
+            # Set error status on all pending items
+            pending_items = self.db.query(JobItem).filter(
+                JobItem.job_id == job_id,
+                JobItem.status == "pending"
+            ).all()
+            for item in pending_items:
+                item.status = "error"
+                item.error_message = error_msg
+            self.db.commit()
+            self.db.refresh(job)
+            return job
 
         # Get parallelism setting (default: 1)
         parallelism = self._get_parallelism_setting()

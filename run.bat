@@ -2,8 +2,11 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 
+REM Set application name (can be overridden by .env file)
+if not defined APP_NAME set APP_NAME=PromptRig
+
 echo ============================================================
-echo PromptRig - Starting Application
+echo %APP_NAME% - Starting Application
 echo ============================================================
 echo.
 

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from backend.database import get_db, Project, ProjectRevision, Job, JobItem
 from backend.prompt import PromptTemplateParser
+from backend.llm import get_available_models
 from app.schemas.responses import (
     ConfigResponse,
     ParameterDefinitionResponse,
@@ -108,5 +109,5 @@ def get_config(project_id: int = 1, db: Session = Depends(get_db)):
         prompt_template=revision.prompt_template,
         parameters=parameters,
         recent_jobs=recent_jobs,
-        available_models=["azure-gpt-4.1", "openai-gpt-4.1-nano"]
+        available_models=[m["name"] for m in get_available_models()]
     )

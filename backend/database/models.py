@@ -321,6 +321,9 @@ class Workflow(Base):
     is_deleted = Column(Integer, nullable=False, default=0)  # 0=active, 1=deleted
     deleted_at = Column(Text, nullable=True)  # Timestamp when deleted
 
+    # Validation status: must be validated (0 errors) before execution. Warnings are allowed.
+    validated = Column(Integer, nullable=False, default=0)  # 0=not validated, 1=validated
+
     # Relationships
     project = relationship("Project", back_populates="project_workflows", foreign_keys=[project_id])
     steps = relationship("WorkflowStep", back_populates="workflow", cascade="all, delete-orphan", order_by="WorkflowStep.step_order")

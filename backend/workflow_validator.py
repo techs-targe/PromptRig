@@ -17,7 +17,8 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
 from sqlalchemy.orm import Session
 
-from .database.models import Workflow, WorkflowStep, Prompt, PromptRevision
+from sqlalchemy import text
+from .database.models import Workflow, WorkflowStep, Prompt, PromptRevision, Dataset
 from .formula_parser import FormulaParser, validate_formula, TokenizerError, ParseError
 
 logger = logging.getLogger(__name__)
@@ -173,7 +174,10 @@ class WorkflowValidator:
     RESERVED_NAMES = {'input', 'vars', '_meta', '_error', '_execution_trace'}
 
     # Patterns for parsing
-    STEP_REF_PATTERN = re.compile(r'\{\{(\w+)\.(\w+)\}\}')
+    # Updated to support nested properties: {{vars.question.column}}, {{ROW.column}}, {{step.field.subfield}}
+    STEP_REF_PATTERN = re.compile(r'\{\{(\w+)\.(\w+(?:\.\w+)*)\}\}')
+    # Pattern for simple {{PARAM}} references (no dot) - for detecting undefined variables
+    SIMPLE_VAR_PATTERN = re.compile(r'\{\{(\w+)\}\}')
     FORMULA_PATTERN = re.compile(
         r'^(sum|upper|lower|trim|length|len|slice|substr|substring|replace|'
         r'split|join|concat|default|ifempty|contains|startswith|endswith|'
@@ -263,7 +267,7 @@ class WorkflowValidator:
                     step_order=step.step_order,
                     category="step_name",
                     message=f"Step name '{name}' is reserved",
-                    message_ja=f"ステップ名 '{name}' は予約語です",
+                    message_ja=f"ステップ [{step.step_order}] '{name}': 予約語のため使用できません",
                     suggestion=f"Use a different name like '{name}_step'",
                     suggestion_ja=f"'{name}_step' などの別名を使用してください"
                 ))
@@ -277,7 +281,7 @@ class WorkflowValidator:
                     step_order=step.step_order,
                     category="step_name",
                     message=f"Duplicate step name '{name}' (also used by step ID {seen_names[name]})",
-                    message_ja=f"ステップ名 '{name}' が重複しています (ステップID {seen_names[name]} でも使用)",
+                    message_ja=f"ステップ [{step.step_order}] '{name}': ステップ名が重複しています (ステップID {seen_names[name]} でも使用)",
                     suggestion="Each step must have a unique name",
                     suggestion_ja="各ステップは一意の名前を持つ必要があります"
                 ))
@@ -293,9 +297,9 @@ class WorkflowValidator:
                     step_order=step.step_order,
                     category="step_name",
                     message=f"Invalid step name format: '{name}'",
-                    message_ja=f"ステップ名の形式が無効です: '{name}'",
+                    message_ja=f"ステップ [{step.step_order}] '{name}': ステップ名の形式が不正です（スペースや日本語は使用不可）",
                     suggestion="Step names must start with a letter and contain only alphanumeric characters and underscores",
-                    suggestion_ja="ステップ名は英字で始まり、英数字とアンダースコアのみ使用可能です"
+                    suggestion_ja="ステップ名は英字で始まり、英数字とアンダースコア(_)のみ使用可能です。例: generate_question"
                 ))
 
     def _validate_control_flow(self, steps: List[WorkflowStep], result: ValidationResult):
@@ -320,7 +324,7 @@ class WorkflowValidator:
                         step_order=step.step_order,
                         category="control_flow",
                         message=f"{step_type.upper()} without matching IF",
-                        message_ja=f"{step_type.upper()} に対応する IF がありません",
+                        message_ja=f"ステップ [{step.step_order}] '{step.step_name}': {step_type.upper()} に対応する IF がありません",
                         suggestion="Add an IF step before this or remove this step",
                         suggestion_ja="前に IF ステップを追加するか、このステップを削除してください"
                     ))
@@ -337,7 +341,7 @@ class WorkflowValidator:
                         step_order=step.step_order,
                         category="control_flow",
                         message=f"{step_type.upper()} without matching {expected_starter.upper() if expected_starter else 'block starter'}",
-                        message_ja=f"{step_type.upper()} に対応する {expected_starter.upper() if expected_starter else '開始ブロック'} がありません",
+                        message_ja=f"ステップ [{step.step_order}] '{step.step_name}': {step_type.upper()} に対応する {expected_starter.upper() if expected_starter else '開始ブロック'} がありません",
                         suggestion=f"Add a {expected_starter.upper()} step or remove this {step_type.upper()}",
                         suggestion_ja=f"{expected_starter.upper()} ステップを追加するか、この {step_type.upper()} を削除してください"
                     ))
@@ -350,7 +354,7 @@ class WorkflowValidator:
                         step_order=step.step_order,
                         category="control_flow",
                         message=f"{step_type.upper()} does not match {opener[0].upper()} at step {opener[2]} ('{opener[3]}')",
-                        message_ja=f"{step_type.upper()} がステップ {opener[2]} ('{opener[3]}') の {opener[0].upper()} と一致しません",
+                        message_ja=f"ステップ [{step.step_order}] '{step.step_name}': {step_type.upper()} が ステップ [{opener[2]}] '{opener[3]}' の {opener[0].upper()} と一致しません",
                         suggestion=f"Expected {self.BLOCK_PAIRS[opener[0]].upper()} to close {opener[0].upper()}",
                         suggestion_ja=f"{opener[0].upper()} を閉じるには {self.BLOCK_PAIRS[opener[0]].upper()} が必要です"
                     ))
@@ -368,7 +372,7 @@ class WorkflowValidator:
                         step_order=step.step_order,
                         category="control_flow",
                         message=f"{step_type.upper()} outside of LOOP or FOREACH",
-                        message_ja=f"{step_type.upper()} が LOOP または FOREACH の外にあります",
+                        message_ja=f"ステップ [{step.step_order}] '{step.step_name}': {step_type.upper()} が LOOP または FOREACH の外にあります",
                         suggestion=f"Move this step inside a LOOP or FOREACH block, or remove it",
                         suggestion_ja=f"このステップを LOOP または FOREACH ブロック内に移動するか、削除してください"
                     ))
@@ -382,7 +386,7 @@ class WorkflowValidator:
                 step_order=opener[2],
                 category="control_flow",
                 message=f"Unclosed {opener[0].upper()} block",
-                message_ja=f"{opener[0].upper()} ブロックが閉じられていません",
+                message_ja=f"ステップ [{opener[2]}] '{opener[3]}': {opener[0].upper()} ブロックが閉じられていません",
                 suggestion=f"Add {self.BLOCK_PAIRS[opener[0]].upper()} after this block",
                 suggestion_ja=f"このブロックの後に {self.BLOCK_PAIRS[opener[0]].upper()} を追加してください"
             ))
@@ -636,10 +640,24 @@ class WorkflowValidator:
         cumulative_vars: Set[str] = set()
         # Stack to track FOREACH item_vars for scope management
         foreach_var_stack: List[str] = []
+        # Track FOREACH context with dataset columns for validation
+        # Format: {step_order: {item_var: str, index_var: str, dataset_id: int, columns: Set[str]}}
+        foreach_context_by_order: Dict[int, Dict[str, Any]] = {}
+        current_foreach_context: List[Dict[str, Any]] = []
+        # Track custom parameters from prompt steps
+        # Format: {step_order: Dict[step_name, Set[str]]} - all custom params available at this step
+        custom_params_by_order: Dict[int, Dict[str, Set[str]]] = {}
+        cumulative_custom_params: Dict[str, Set[str]] = {}
+        # Track steps with JSON parsers (dynamic output fields - skip field validation)
+        json_parser_steps: Set[str] = set()
 
         for step in steps:
             step_names_by_order[step.step_order] = cumulative_names.copy()
             vars_by_order[step.step_order] = cumulative_vars.copy()
+            # Store the current FOREACH context for this step
+            foreach_context_by_order[step.step_order] = current_foreach_context[-1].copy() if current_foreach_context else None
+            # Store custom params available at this step (deep copy)
+            custom_params_by_order[step.step_order] = {k: v.copy() for k, v in cumulative_custom_params.items()}
             cumulative_names.add(step.step_name)
 
             # Track variables defined in SET steps
@@ -657,20 +675,87 @@ class WorkflowValidator:
                 try:
                     config = json.loads(step.condition_config)
                     item_var = config.get('item_var', 'item')
+                    index_var = config.get('index_var', 'i')
+                    source = config.get('source', config.get('list_ref', ''))
                     cumulative_vars.add(item_var)
+                    cumulative_vars.add(index_var)
                     foreach_var_stack.append(item_var)
+
+                    # Parse dataset source and get columns
+                    dataset_id = None
+                    columns: Set[str] = set()
+                    if source.startswith('dataset:'):
+                        match = re.match(r'^dataset:(\d+)', source)
+                        if match:
+                            dataset_id = int(match.group(1))
+                            columns = set(get_dataset_columns(self.db, dataset_id))
+
+                    current_foreach_context.append({
+                        "item_var": item_var,
+                        "index_var": index_var,
+                        "dataset_id": dataset_id,
+                        "columns": columns,
+                        "step_name": step.step_name
+                    })
                 except json.JSONDecodeError:
                     pass
 
             # Remove FOREACH item_var from scope when exiting FOREACH block
-            elif step.step_type == 'endforeach' and foreach_var_stack:
-                exited_var = foreach_var_stack.pop()
+            elif step.step_type == 'endforeach':
+                if foreach_var_stack:
+                    foreach_var_stack.pop()
+                if current_foreach_context:
+                    current_foreach_context.pop()
                 # Note: We keep the variable in cumulative_vars for simplicity
                 # since most workflows don't reuse the same variable name outside
+
+            # Track custom parameters from prompt steps and detect JSON parsers
+            # Custom params are available for subsequent steps to reference
+            # A custom parameter is any input_mapping key NOT in the prompt template
+            if step.step_type == 'prompt':
+                # Check for JSON parser (dynamic output fields)
+                if step.prompt_id:
+                    revision = self.db.query(PromptRevision).filter(
+                        PromptRevision.prompt_id == step.prompt_id
+                    ).order_by(PromptRevision.revision.desc()).first()
+                    if revision:
+                        # Check if parser_config uses JSON type
+                        if revision.parser_config:
+                            try:
+                                parser_cfg = json.loads(revision.parser_config)
+                                if parser_cfg.get('type') == 'json':
+                                    json_parser_steps.add(step.step_name)
+                            except json.JSONDecodeError:
+                                pass
+
+                        # Track custom params from input_mapping
+                        if step.input_mapping:
+                            try:
+                                mapping = json.loads(step.input_mapping)
+                                step_custom_params: Set[str] = set()
+
+                                # Get prompt template parameters if available
+                                template_params = set()
+                                if revision.prompt_template:
+                                    param_pattern = re.compile(r'\{\{([^}:]+)(?::[^}]*)?\}\}')
+                                    for match in param_pattern.finditer(revision.prompt_template):
+                                        template_params.add(match.group(1).strip())
+
+                                # Any input_mapping key NOT in template is a custom param
+                                for key in mapping.keys():
+                                    if key not in template_params:
+                                        step_custom_params.add(key)
+
+                                if step_custom_params:
+                                    cumulative_custom_params[step.step_name] = step_custom_params
+                            except json.JSONDecodeError:
+                                pass
 
         for step in steps:
             available_steps = step_names_by_order.get(step.step_order, set())
             available_vars = vars_by_order.get(step.step_order, set())
+            foreach_context = foreach_context_by_order.get(step.step_order)
+            custom_params = custom_params_by_order.get(step.step_order, {})
 
             # Check input_mapping
             if step.input_mapping:
@@ -678,7 +763,9 @@ class WorkflowValidator:
                     mapping = json.loads(step.input_mapping)
                     for param_name, ref_pattern in mapping.items():
                         self._validate_reference_string(
-                            ref_pattern, available_steps, available_vars, step, result, f"input_mapping['{param_name}']"
+                            ref_pattern, available_steps, available_vars, step, result,
+                            f"input_mapping['{param_name}']", foreach_context, custom_params,
+                            json_parser_steps
                         )
                 except json.JSONDecodeError:
                     result.add_issue(ValidationIssue(
@@ -700,20 +787,26 @@ class WorkflowValidator:
                     for field in ('left', 'right'):
                         if field in config:
                             self._validate_reference_string(
-                                str(config[field]), available_steps, available_vars, step, result, f"condition_config['{field}']"
+                                str(config[field]), available_steps, available_vars, step, result,
+                                f"condition_config['{field}']", foreach_context, custom_params,
+                                json_parser_steps
                             )
 
                     # Check 'source' in FOREACH
                     if 'source' in config:
                         self._validate_reference_string(
-                            str(config['source']), available_steps, available_vars, step, result, "condition_config['source']"
+                            str(config['source']), available_steps, available_vars, step, result,
+                            "condition_config['source']", foreach_context, custom_params,
+                            json_parser_steps
                         )
 
                     # Check 'assignments' in SET
                     if 'assignments' in config:
                         for var_name, value_expr in config['assignments'].items():
                             self._validate_reference_string(
-                                str(value_expr), available_steps, available_vars, step, result, f"assignments['{var_name}']"
+                                str(value_expr), available_steps, available_vars, step, result,
+                                f"assignments['{var_name}']", foreach_context, custom_params,
+                                json_parser_steps
                             )
                 except json.JSONDecodeError:
                     pass  # Already handled above
@@ -728,9 +821,24 @@ class WorkflowValidator:
         available_vars: Set[str],
         step: WorkflowStep,
         result: ValidationResult,
-        context: str
+        context: str,
+        foreach_context: Optional[Dict[str, Any]] = None,
+        custom_params_by_step: Optional[Dict[str, Set[str]]] = None,
+        json_parser_steps: Optional[Set[str]] = None
     ):
-        """Validate step and variable references in a string."""
+        """Validate step and variable references in a string.
+
+        Args:
+            ref_string: The string containing references to validate
+            available_steps: Set of step names available at this point
+            available_vars: Set of variable names available at this point
+            step: The current step being validated
+            result: ValidationResult to add issues to
+            context: Description of where this reference is (e.g., "input_mapping['QUESTION']")
+            foreach_context: Optional FOREACH context with item_var, index_var, columns, etc.
+            custom_params_by_step: Optional dict mapping step_name -> set of custom param names
+            json_parser_steps: Optional set of step names that use JSON parsers (skip field validation)
+        """
         # Find all {{step.field}} references
         for match in self.STEP_REF_PATTERN.finditer(ref_string):
             ref_step = match.group(1)
@@ -742,25 +850,109 @@ class WorkflowValidator:
 
             # Check 'vars' references against defined variables
             if ref_step == 'vars':
-                var_name = ref_field
-                if var_name not in available_vars:
+                # ref_field may be nested like "question.column" or simple like "counter"
+                # Extract the base variable name (first part before any dot)
+                var_parts = ref_field.split('.')
+                base_var_name = var_parts[0]
+
+                if base_var_name not in available_vars:
+                    # Show the full path in error message for clarity
+                    full_ref = f"vars.{ref_field}"
                     result.add_issue(ValidationIssue(
                         severity=ValidationSeverity.ERROR,
                         step_id=step.id,
                         step_name=step.step_name,
                         step_order=step.step_order,
                         category="reference",
-                        message=f"Reference to undefined variable '{{{{vars.{var_name}}}}}' in {context}",
-                        message_ja=f"{context} で未定義の変数 '{{{{vars.{var_name}}}}}' を参照しています",
-                        suggestion=f"Define '{var_name}' in a SET step before this step, or use {{{{input.{var_name}}}}} for workflow input",
-                        suggestion_ja=f"このステップより前に SET ステップで '{var_name}' を定義するか、ワークフロー入力として {{{{input.{var_name}}}}} を使用してください"
+                        message=f"Reference to undefined variable '{{{{{full_ref}}}}}' in {context}",
+                        message_ja=f"{context} で未定義の変数 '{{{{{full_ref}}}}}' を参照しています",
+                        suggestion=f"Define '{base_var_name}' in a SET step before this step, or use {{{{input.{base_var_name}}}}} for workflow input",
+                        suggestion_ja=f"このステップより前に SET ステップで '{base_var_name}' を定義するか、ワークフロー入力として {{{{input.{base_var_name}}}}} を使用してください"
                     ))
+                else:
+                    # Variable exists. If it's a FOREACH item_var and has nested property,
+                    # validate the property against dataset columns
+                    if foreach_context and len(var_parts) > 1:
+                        item_var = foreach_context.get("item_var")
+                        columns = foreach_context.get("columns", set())
+
+                        if base_var_name == item_var and columns:
+                            # This is a FOREACH item variable with nested property access
+                            # e.g., {{vars.question.question_stem}}
+                            nested_property = var_parts[1]  # First nested property (column name)
+
+                            if nested_property not in columns:
+                                full_ref = f"vars.{ref_field}"
+                                available_cols = ', '.join(sorted(columns)) if columns else "(none)"
+
+                                # Try to find a similar column name
+                                close_matches = difflib.get_close_matches(nested_property, columns, n=1, cutoff=0.4)
+                                if close_matches:
+                                    suggestion = f"Available columns: {available_cols}. Did you mean '{close_matches[0]}'?"
+                                    suggestion_ja = f"利用可能なカラム: {available_cols}。'{close_matches[0]}' のことですか？"
+                                else:
+                                    suggestion = f"Available columns: {available_cols}"
+                                    suggestion_ja = f"利用可能なカラム: {available_cols}"
+
+                                result.add_issue(ValidationIssue(
+                                    severity=ValidationSeverity.ERROR,
+                                    step_id=step.id,
+                                    step_name=step.step_name,
+                                    step_order=step.step_order,
+                                    category="reference",
+                                    message=f"Invalid column '{nested_property}' in '{{{{{full_ref}}}}}' - column does not exist in dataset",
+                                    message_ja=f"'{{{{{full_ref}}}}}' のカラム '{nested_property}' はデータセットに存在しません",
+                                    suggestion=suggestion,
+                                    suggestion_ja=suggestion_ja
+                                ))
                 continue
 
             # Check if ref_step is a FOREACH item_var (e.g., {{ROW.field}})
             # These are defined variables that can be referenced directly without 'vars.' prefix
             if ref_step in available_vars:
                 continue  # Valid FOREACH item variable reference
+
+            # If step exists, validate that the field is a valid output for that step
+            if ref_step in available_steps:
+                # Skip field validation for steps with JSON parsers (dynamic output fields)
+                if json_parser_steps and ref_step in json_parser_steps:
+                    continue  # JSON parser: any field is valid
+
+                # For prompt steps, valid outputs are: 'raw' and custom parameters
+                # Build the set of valid fields for this step
+                valid_fields = {'raw', 'OUTPUT'}  # Base fields for prompt steps
+
+                # Add custom parameters from that step
+                if custom_params_by_step and ref_step in custom_params_by_step:
+                    valid_fields.update(custom_params_by_step[ref_step])
+
+                # Get the base field name (before any dot, e.g., 'TIMPO' from 'TIMPO.something')
+                base_field = ref_field.split('.')[0]
+
+                if base_field not in valid_fields:
+                    # Unknown field for this step
+                    available_fields = ', '.join(sorted(valid_fields))
+                    close_matches = difflib.get_close_matches(base_field, valid_fields, n=1, cutoff=0.4)
+
+                    if close_matches:
+                        suggestion = f"Did you mean '{{{{{ref_step}.{close_matches[0]}}}}}'? Available outputs: {available_fields}"
+                        suggestion_ja = f"'{{{{{ref_step}.{close_matches[0]}}}}}' のことですか？利用可能な出力: {available_fields}"
+                    else:
+                        suggestion = f"Available outputs from '{ref_step}': {available_fields}"
+                        suggestion_ja = f"'{ref_step}' の利用可能な出力: {available_fields}"
+
+                    result.add_issue(ValidationIssue(
+                        severity=ValidationSeverity.ERROR,
+                        step_id=step.id,
+                        step_name=step.step_name,
+                        step_order=step.step_order,
+                        category="reference",
+                        message=f"Step '{ref_step}' has no output field '{base_field}' in {context}",
+                        message_ja=f"{context} でステップ '{ref_step}' には出力フィールド '{base_field}' がありません",
+                        suggestion=suggestion,
+                        suggestion_ja=suggestion_ja
+                    ))
+                continue  # Step exists, either valid or error already reported
 
             if ref_step not in available_steps:
                 # Find closest matching step name for better suggestions
@@ -785,6 +977,114 @@ class WorkflowValidator:
                     suggestion=suggestion,
                     suggestion_ja=suggestion_ja
                 ))
+
+        # Validate simple {{PARAM}} references (no dot)
+        # These could be undefined variables or incorrectly formatted references
+        for match in self.SIMPLE_VAR_PATTERN.finditer(ref_string):
+            param_name = match.group(1)
+            match_start = match.start()
+            match_end = match.end()
+
+            # Skip if this is part of a {{step.field}} pattern (already validated above)
+            # Check the character right after the match - if it's part of {{step.field}},
+            # STEP_REF_PATTERN would have matched starting at this position
+            # We check if there's a {{name.field}} pattern starting at this position
+            remaining = ref_string[match_start:]
+            if self.STEP_REF_PATTERN.match(remaining):
+                continue
+
+            # Skip known reserved prefixes that require dot notation
+            if param_name in ('input', 'vars'):
+                # These are incomplete references - should have .field
+                result.add_issue(ValidationIssue(
+                    severity=ValidationSeverity.WARNING,
+                    step_id=step.id,
+                    step_name=step.step_name,
+                    step_order=step.step_order,
+                    category="reference",
+                    message=f"Incomplete reference '{{{{{param_name}}}}}' in {context} - missing field after '{param_name}.'",
+                    message_ja=f"{context} の参照 '{{{{{param_name}}}}}' は不完全です - '{param_name}.' の後にフィールドが必要です",
+                    suggestion=f"Use '{{{{{param_name}.FIELD}}}}' format",
+                    suggestion_ja=f"'{{{{{param_name}.フィールド名}}}}' 形式を使用してください"
+                ))
+                continue
+
+            # Skip known function names (these are handled in formula validation)
+            if param_name.lower() in ('calc', 'sum', 'upper', 'lower', 'trim', 'length', 'len',
+                                       'slice', 'substr', 'substring', 'replace', 'split', 'join',
+                                       'concat', 'default', 'ifempty', 'contains', 'startswith',
+                                       'endswith', 'count', 'left', 'right', 'repeat', 'reverse',
+                                       'capitalize', 'title', 'lstrip', 'rstrip', 'shuffle', 'debug',
+                                       'getprompt', 'getparser'):
+                continue
+
+            # Check if it's a known variable (defined in SET or FOREACH)
+            if param_name in available_vars:
+                # Valid variable reference (though {{vars.X}} is preferred)
+                continue
+
+            # Check if it's a known step name (might be missing .field)
+            if param_name in available_steps:
+                result.add_issue(ValidationIssue(
+                    severity=ValidationSeverity.WARNING,
+                    step_id=step.id,
+                    step_name=step.step_name,
+                    step_order=step.step_order,
+                    category="reference",
+                    message=f"'{{{{{param_name}}}}}' in {context} is a step name - did you mean to access a field?",
+                    message_ja=f"{context} の '{{{{{param_name}}}}}' はステップ名です。フィールドを指定しましたか？",
+                    suggestion=f"Use '{{{{{param_name}.FIELD}}}}' to access step outputs",
+                    suggestion_ja=f"ステップ出力にアクセスするには '{{{{{param_name}.フィールド名}}}}' を使用してください"
+                ))
+                continue
+
+            # Check if it's a custom parameter from a previous step
+            if custom_params_by_step:
+                found_step = None
+                for step_name, params in custom_params_by_step.items():
+                    if param_name in params:
+                        found_step = step_name
+                        break
+                if found_step:
+                    result.add_issue(ValidationIssue(
+                        severity=ValidationSeverity.WARNING,
+                        step_id=step.id,
+                        step_name=step.step_name,
+                        step_order=step.step_order,
+                        category="reference",
+                        message=f"'{{{{{param_name}}}}}' in {context} is a custom parameter from step '{found_step}'",
+                        message_ja=f"{context} の '{{{{{param_name}}}}}' はステップ '{found_step}' のカスタムパラメータです",
+                        suggestion=f"Use '{{{{{found_step}.{param_name}}}}}' to reference it correctly",
+                        suggestion_ja=f"正しく参照するには '{{{{{found_step}.{param_name}}}}}' を使用してください"
+                    ))
+                    continue
+
+            # Unknown reference - this is an error
+            all_known: Set[str] = available_vars | available_steps | {'input', 'vars'}
+            if custom_params_by_step:
+                for params in custom_params_by_step.values():
+                    all_known |= params
+
+            close_matches = difflib.get_close_matches(param_name, all_known, n=1, cutoff=0.4)
+            if close_matches:
+                suggestion = f"Did you mean '{close_matches[0]}'?"
+                suggestion_ja = f"'{close_matches[0]}' のことですか？"
+            else:
+                available_list = ', '.join(sorted(list(all_known)[:10]))
+                suggestion = f"Available: {available_list}" if available_list else "No variables defined yet"
+                suggestion_ja = f"利用可能: {available_list}" if available_list else "変数がまだ定義されていません"
+
+            result.add_issue(ValidationIssue(
+                severity=ValidationSeverity.ERROR,
+                step_id=step.id,
+                step_name=step.step_name,
+                step_order=step.step_order,
+                category="reference",
+                message=f"Undefined reference '{{{{{param_name}}}}}' in {context}",
+                message_ja=f"{context} で未定義の参照 '{{{{{param_name}}}}}' があります",
+                suggestion=suggestion,
+                suggestion_ja=suggestion_ja
+            ))
 
     def _validate_formulas(self, steps: List[WorkflowStep], result: ValidationResult):
         """Validate formula/function syntax in references."""
@@ -860,6 +1160,23 @@ class WorkflowValidator:
                 ))
             return
 
+        # Check for invalid function chaining (e.g., json_parse(...).field)
+        # This pattern is NOT supported but commonly mistaken
+        func_chain_pattern = re.compile(r'(json_parse|concat|upper|lower|trim)\s*\([^)]+\)\s*\.\s*\w+')
+        if func_chain_pattern.search(formula_str):
+            result.add_issue(ValidationIssue(
+                severity=ValidationSeverity.ERROR,
+                step_id=step.id,
+                step_name=step.step_name,
+                step_order=step.step_order,
+                category="formula",
+                message=f"Function chaining is not supported in {context}: '{formula_str}'",
+                message_ja=f"{context} で関数チェーンは非対応: '{formula_str}'",
+                suggestion="Use: 1) {{step.field}} directly if parser extracts it, or 2) Set to variable first (parsed = json_parse(...)), then access {{vars.parsed.field}}",
+                suggestion_ja="正解: 1) パーサーが抽出済みなら {{step.field}} を直接使用、2) setで変数に格納後 {{vars.parsed.field}} でアクセス"
+            ))
+            return
+
         # Additional semantic validation using old method for arg count
         func_name = match.group(1).lower()
         args_str = match.group(2)
@@ -929,23 +1246,25 @@ class WorkflowValidator:
     VARS_IN_TEMPLATE_PATTERN = re.compile(r'\{\{vars\.')
 
     def _validate_prompt_steps(self, steps: List[WorkflowStep], result: ValidationResult):
-        """Validate prompt steps have valid prompt_id or project_id."""
+        """Validate prompt steps have valid prompt_id."""
         for step in steps:
             step_type = step.step_type or "prompt"
 
             if step_type != "prompt":
                 continue
 
-            # Check if prompt_id or project_id is set
-            if not step.prompt_id and not step.project_id:
+            # Check if prompt_id is set (required for prompt steps)
+            if not step.prompt_id:
                 result.add_issue(ValidationIssue(
                     severity=ValidationSeverity.ERROR,
                     step_id=step.id,
                     step_name=step.step_name,
                     step_order=step.step_order,
                     category="config",
-                    message="Prompt step requires prompt_id or project_id",
-                    message_ja="プロンプトステップには prompt_id または project_id が必要です"
+                    message=f"Prompt step '{step.step_name}' (order {step.step_order}) requires prompt_id",
+                    message_ja=f"ステップ [{step.step_order}] '{step.step_name}': プロンプトが選択されていません",
+                    suggestion="Select a prompt for this step or use 'set' step type for variable assignment",
+                    suggestion_ja="このステップにプロンプトを選択するか、変数設定には 'set' ステップタイプを使用してください"
                 ))
                 continue
 
@@ -964,7 +1283,9 @@ class WorkflowValidator:
                         step_order=step.step_order,
                         category="config",
                         message=f"Prompt ID {step.prompt_id} not found or deleted",
-                        message_ja=f"プロンプト ID {step.prompt_id} が見つからないか削除されています"
+                        message_ja=f"ステップ [{step.step_order}] '{step.step_name}': プロンプト (ID={step.prompt_id}) が見つからないか削除されています",
+                        suggestion="Select an existing prompt or create a new one",
+                        suggestion_ja="既存のプロンプトを選択するか、新しいプロンプトを作成してください"
                     ))
                 else:
                     revision = self.db.query(PromptRevision).filter(
@@ -979,7 +1300,9 @@ class WorkflowValidator:
                             step_order=step.step_order,
                             category="config",
                             message=f"No revision found for prompt ID {step.prompt_id}",
-                            message_ja=f"プロンプト ID {step.prompt_id} のリビジョンが見つかりません"
+                            message_ja=f"ステップ [{step.step_order}] '{step.step_name}': プロンプト (ID={step.prompt_id}) のリビジョンがありません",
+                            suggestion="Save the prompt to create a revision",
+                            suggestion_ja="プロンプトを保存してリビジョンを作成してください"
                         ))
                     else:
                         # Validate input_mapping matches prompt parameters
@@ -1403,15 +1726,393 @@ class WorkflowValidator:
         self._validate_parser_field_references(step, parser_type, parser_fields, all_steps, result)
 
 
-def validate_workflow(db: Session, workflow_id: int) -> ValidationResult:
+def validate_workflow(db: Session, workflow_id: int, update_flag: bool = True) -> ValidationResult:
     """Convenience function to validate a workflow.
 
     Args:
         db: Database session
         workflow_id: Workflow ID to validate
+        update_flag: If True, update the workflow's validated flag based on results.
+                     Set to True if errors=0, False otherwise. Warnings are allowed.
 
     Returns:
         ValidationResult with all issues found
     """
+    from backend.database.models import Workflow
+
     validator = WorkflowValidator(db)
-    return validator.validate_workflow(workflow_id)
+    result = validator.validate_workflow(workflow_id)
+
+    # Update the validated flag if requested
+    if update_flag:
+        workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+        if workflow:
+            # validated = 1 if no errors (warnings are OK)
+            workflow.validated = 1 if result.errors == 0 else 0
+            db.commit()
+
+    return result
+
+
+def get_dataset_columns(db: Session, dataset_id: int) -> List[str]:
+    """Get column names for a dataset.
+
+    Args:
+        db: Database session
+        dataset_id: The ID of the dataset
+
+    Returns:
+        List of column names in the dataset
+    """
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset or not dataset.sqlite_table_name:
+        return []
+
+    try:
+        col_result = db.execute(text(f'PRAGMA table_info("{dataset.sqlite_table_name}")'))
+        return [row[1] for row in col_result]
+    except Exception as e:
+        logger.error(f"Failed to get columns for dataset {dataset_id}: {e}")
+        return []
+
+
+def get_available_variables_at_step(
+    db: Session,
+    workflow_id: int,
+    step_order: int
+) -> Dict[str, Any]:
+    """Get all available variables and functions at a specific workflow step.
+
+    This function calculates what variables are available for use in a step's
+    input_mapping or condition_config based on:
+    - Input variables (from workflow initial input)
+    - SET variables defined before this step
+    - FOREACH item_var and index_var (if inside a FOREACH loop)
+    - Dataset columns (if FOREACH uses a dataset source)
+    - Previous step outputs (parser fields)
+    - Available functions
+
+    Args:
+        db: Database session
+        workflow_id: The ID of the workflow
+        step_order: The step order (1-based) to check variables for
+
+    Returns:
+        Dict containing:
+        - workflow_id: The workflow ID
+        - step_order: The requested step order
+        - step_name: Name of the step (if exists)
+        - categories: List of variable categories with variables
+        - functions: List of available functions
+        - foreach_context: Info about enclosing FOREACH (if any)
+    """
+    workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+    if not workflow:
+        return {
+            "error": f"Workflow {workflow_id} not found",
+            "workflow_id": workflow_id,
+            "step_order": step_order
+        }
+
+    # Get all steps ordered
+    steps = list(db.query(WorkflowStep).filter(
+        WorkflowStep.workflow_id == workflow_id
+    ).order_by(WorkflowStep.step_order).all())
+
+    if not steps:
+        return {
+            "workflow_id": workflow_id,
+            "workflow_name": workflow.name,
+            "step_order": step_order,
+            "step_name": None,
+            "categories": [],
+            "functions": _get_available_functions(),
+            "foreach_context": None
+        }
+
+    # Find the current step
+    current_step = None
+    for s in steps:
+        if s.step_order == step_order:
+            current_step = s
+            break
+
+    categories = []
+
+    # Track variables and FOREACH context
+    set_variables = []  # Variables defined by SET steps
+    foreach_stack = []  # Stack of FOREACH contexts
+    previous_step_outputs = []  # Outputs from prompt steps
+    custom_params = []  # Custom parameters from prompt steps
+
+    # Process steps before current step
+    for step in steps:
+        if step.step_order >= step_order:
+            break
+
+        step_type = step.step_type or "prompt"
+
+        # Track SET variables
+        if step_type == 'set' and step.condition_config:
+            try:
+                config = json.loads(step.condition_config)
+                assignments = config.get('assignments', {})
+                for var_name in assignments.keys():
+                    set_variables.append({
+                        "name": var_name,
+                        "variable": f"{{{{vars.{var_name}}}}}",
+                        "type": "wf_var",
+                        "source": f"Step {step.step_order}: {step.step_name} (SET)"
+                    })
+            except json.JSONDecodeError:
+                pass
+
+        # Track FOREACH variables
+        elif step_type == 'foreach' and step.condition_config:
+            try:
+                config = json.loads(step.condition_config)
+                item_var = config.get('item_var', 'item')
+                index_var = config.get('index_var', 'i')
+                source = config.get('source', config.get('list_ref', ''))
+
+                foreach_stack.append({
+                    "step_order": step.step_order,
+                    "step_name": step.step_name,
+                    "item_var": item_var,
+                    "index_var": index_var,
+                    "source": source
+                })
+            except json.JSONDecodeError:
+                pass
+
+        # Pop FOREACH when encountering ENDFOREACH
+        elif step_type == 'endforeach' and foreach_stack:
+            foreach_stack.pop()
+
+        # Track prompt step outputs
+        elif step_type == 'prompt' and step.prompt_id:
+            prompt = db.query(Prompt).filter(
+                Prompt.id == step.prompt_id,
+                Prompt.is_deleted == 0
+            ).first()
+
+            if prompt:
+                # Get parser fields from latest revision
+                revision = db.query(PromptRevision).filter(
+                    PromptRevision.prompt_id == step.prompt_id
+                ).order_by(PromptRevision.revision.desc()).first()
+
+                step_outputs = []
+
+                # Always add raw output
+                step_outputs.append({
+                    "name": "raw",
+                    "variable": f"{{{{{step.step_name}.raw}}}}",
+                    "type": "output",
+                    "source": "LLM生の出力"
+                })
+
+                # Add parser fields if configured
+                if revision and revision.parser_config:
+                    try:
+                        parser_config = json.loads(revision.parser_config)
+                        parser_type = parser_config.get('type', 'none')
+
+                        if parser_type == 'json_path':
+                            paths = parser_config.get('paths', {})
+                            for field_name in paths.keys():
+                                step_outputs.append({
+                                    "name": field_name,
+                                    "variable": f"{{{{{step.step_name}.{field_name}}}}}",
+                                    "type": "output",
+                                    "source": f"パーサー ({parser_type})"
+                                })
+                        elif parser_type == 'regex':
+                            patterns = parser_config.get('patterns', {})
+                            for field_name in patterns.keys():
+                                step_outputs.append({
+                                    "name": field_name,
+                                    "variable": f"{{{{{step.step_name}.{field_name}}}}}",
+                                    "type": "output",
+                                    "source": f"パーサー ({parser_type})"
+                                })
+                        elif parser_type == 'json':
+                            fields = parser_config.get('fields', [])
+                            if fields:
+                                for field_name in fields:
+                                    step_outputs.append({
+                                        "name": field_name,
+                                        "variable": f"{{{{{step.step_name}.{field_name}}}}}",
+                                        "type": "output",
+                                        "source": f"パーサー ({parser_type})"
+                                    })
+                    except json.JSONDecodeError:
+                        pass
+
+                if step_outputs:
+                    previous_step_outputs.append({
+                        "step_order": step.step_order,
+                        "step_name": step.step_name,
+                        "prompt_name": prompt.name,
+                        "outputs": step_outputs
+                    })
+
+            # Track custom parameters from input_mapping
+            # A custom parameter is any key NOT in the prompt template
+            if step.input_mapping:
+                try:
+                    mapping = json.loads(step.input_mapping)
+
+                    # Get prompt template parameters
+                    template_params = set()
+                    if revision and revision.prompt_template:
+                        # Parse template to extract parameter names
+                        import re
+                        param_pattern = re.compile(r'\{\{([^}:]+)(?::[^}]*)?\}\}')
+                        for match in param_pattern.finditer(revision.prompt_template):
+                            template_params.add(match.group(1).strip())
+
+                    # Any input_mapping key NOT in template is a custom param
+                    for key, value in mapping.items():
+                        if key not in template_params:
+                            custom_params.append({
+                                "name": key,
+                                "variable": f"{{{{{step.step_name}.{key}}}}}",
+                                "type": "custom_param",
+                                "source": f"Step {step.step_order}: {step.step_name}"
+                            })
+                except json.JSONDecodeError:
+                    pass
+
+    # Category 1: Initial Input
+    categories.append({
+        "category_id": "input",
+        "category_name": "📥 初期入力 / Initial Input",
+        "variables": [{
+            "name": "パラメータ名",
+            "variable": "{{input.パラメータ名}}",
+            "type": "input",
+            "source": "ワークフロー初期入力（実際のパラメータ名に置き換え）"
+        }]
+    })
+
+    # Category 2: Workflow Variables (SET)
+    if set_variables:
+        categories.append({
+            "category_id": "wf_variables",
+            "category_name": "🏷️ ワークフロー変数 / WF Variables",
+            "variables": set_variables
+        })
+
+    # Category 3: FOREACH Context (if inside a FOREACH loop)
+    foreach_context = None
+    if foreach_stack:
+        # Use the innermost FOREACH
+        current_foreach = foreach_stack[-1]
+        foreach_context = current_foreach.copy()
+
+        item_var = current_foreach["item_var"]
+        index_var = current_foreach["index_var"]
+        source = current_foreach["source"]
+
+        foreach_vars = []
+
+        # Add item variable (full row)
+        foreach_vars.append({
+            "name": f"{item_var} (行全体)",
+            "variable": f"{{{{vars.{item_var}}}}}",
+            "type": "foreach_item",
+            "source": f"FOREACH: {current_foreach['step_name']}"
+        })
+
+        # Add index variable
+        foreach_vars.append({
+            "name": f"{index_var} (インデックス)",
+            "variable": f"{{{{vars.{index_var}}}}}",
+            "type": "foreach_index",
+            "source": "0から始まるループインデックス"
+        })
+
+        # If source is a dataset, get columns
+        dataset_id = None
+        dataset_name = None
+        if source.startswith('dataset:'):
+            # Parse dataset:ID[:...] format
+            match = re.match(r'^dataset:(\d+)', source)
+            if match:
+                dataset_id = int(match.group(1))
+                dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+                if dataset:
+                    dataset_name = dataset.name
+                    columns = get_dataset_columns(db, dataset_id)
+                    for col in columns:
+                        foreach_vars.append({
+                            "name": col,
+                            "variable": f"{{{{vars.{item_var}.{col}}}}}",
+                            "type": "foreach_column",
+                            "source": f"Dataset: {dataset_name}"
+                        })
+
+        if foreach_vars:
+            categories.append({
+                "category_id": "foreach_context",
+                "category_name": f"🔄 FOREACH: {item_var}",
+                "variables": foreach_vars
+            })
+
+        # Update foreach_context with dataset info
+        foreach_context["dataset_id"] = dataset_id
+        foreach_context["dataset_name"] = dataset_name
+
+    # Category: Custom Parameters from prompt steps
+    if custom_params:
+        categories.append({
+            "category_id": "custom_params",
+            "category_name": "🔧 カスタムパラメータ / Custom Params",
+            "variables": custom_params
+        })
+
+    # Category 4+: Previous Step Outputs
+    for step_output in previous_step_outputs:
+        categories.append({
+            "category_id": f"step_{step_output['step_order']}",
+            "category_name": f"📤 Step {step_output['step_order']}: {step_output['step_name']} の出力",
+            "variables": step_output["outputs"]
+        })
+
+    return {
+        "workflow_id": workflow_id,
+        "workflow_name": workflow.name,
+        "step_order": step_order,
+        "step_name": current_step.step_name if current_step else None,
+        "categories": categories,
+        "functions": _get_available_functions(),
+        "foreach_context": foreach_context
+    }
+
+
+def _get_available_functions() -> List[Dict[str, str]]:
+    """Get list of available workflow functions."""
+    return [
+        {"name": "calc", "example": "calc({{vars.x}} + 1)", "desc": "算術計算"},
+        {"name": "upper", "example": "upper({{vars.text}})", "desc": "大文字変換"},
+        {"name": "lower", "example": "lower({{vars.text}})", "desc": "小文字変換"},
+        {"name": "trim", "example": "trim({{vars.text}})", "desc": "前後の空白削除"},
+        {"name": "length", "example": "length({{vars.text}})", "desc": "文字数取得"},
+        {"name": "slice", "example": "slice({{vars.text}}, 0, 10)", "desc": "部分文字列"},
+        {"name": "replace", "example": "replace({{vars.text}}, old, new)", "desc": "文字列置換"},
+        {"name": "split", "example": "split({{vars.text}}, ,)", "desc": "文字列分割"},
+        {"name": "join", "example": "join({{vars.list}}, ,)", "desc": "配列結合"},
+        {"name": "concat", "example": "concat(a, b, c)", "desc": "文字列連結"},
+        {"name": "default", "example": "default({{vars.x}}, fallback)", "desc": "デフォルト値"},
+        {"name": "ifempty", "example": "ifempty({{vars.x}}, fallback)", "desc": "空なら代替値"},
+        {"name": "contains", "example": "contains({{vars.text}}, search)", "desc": "含むか判定"},
+        {"name": "startswith", "example": "startswith({{vars.text}}, prefix)", "desc": "前方一致"},
+        {"name": "endswith", "example": "endswith({{vars.text}}, suffix)", "desc": "後方一致"},
+        {"name": "format_choices", "example": "format_choices({{vars.ROW.choices}})", "desc": "選択肢JSON→テキスト"},
+        {"name": "json_parse", "example": "json_parse({{vars.json_str}})", "desc": "JSONパース"},
+        {"name": "json_zip", "example": "json_zip(keys, values)", "desc": "キーと値をJSON化"},
+        {"name": "now", "example": "now()", "desc": "現在日時"},
+        {"name": "today", "example": "today()", "desc": "今日の日付"},
+        {"name": "debug", "example": "debug({{vars.x}})", "desc": "デバッグ出力"},
+    ]

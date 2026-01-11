@@ -73,3 +73,11 @@ htmlcov/
 *.tmp
 *.bak
 *.orig
+*.backup
+*_backup.py
+
+# Claude Code (user-specific settings)
+.claude/
+
+# Nohup output
+nohup*.out

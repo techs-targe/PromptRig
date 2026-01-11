@@ -21,7 +21,7 @@ from backend.database.models import (
 )
 from backend.job import JobManager
 from backend.workflow import WorkflowManager
-from backend.workflow_validator import validate_workflow, ValidationResult
+from backend.workflow_validator import validate_workflow, ValidationResult, get_available_variables_at_step
 from backend.llm.factory import get_llm_client, get_available_models
 from backend.prompt import PromptTemplateParser
 
@@ -540,6 +540,37 @@ If validation fails, the issues must be fixed before workflow execution will suc
                 ToolParameter("workflow_id", "number", "The ID of the workflow to validate")
             ],
             handler=self._validate_workflow
+        ))
+
+        # Get Available Variables at Step
+        self._register_tool(ToolDefinition(
+            name="get_available_variables",
+            description="""Get all available variables and functions at a specific workflow step.
+
+Use this tool before building workflow steps to understand what variables can be referenced
+in input_mapping or condition_config.
+
+Returns:
+- Input variables (from workflow initial input)
+- Workflow variables (from SET steps before this step)
+- FOREACH context (item_var, index_var, and dataset columns if inside a FOREACH loop)
+- Previous step outputs (parser fields from earlier prompt steps)
+- Available functions
+
+Example: get_available_variables(workflow_id=5, step_order=3)
+
+If inside a FOREACH loop with source="dataset:6" and item_var="ROW":
+- {{vars.ROW}} - full row object
+- {{vars.ROW.question}} - question column from dataset
+- {{vars.ROW.choices}} - choices column from dataset
+- {{vars.i}} - loop index (0-based)
+
+This helps you correctly configure input_mapping with valid variable references.""",
+            parameters=[
+                ToolParameter("workflow_id", "number", "The ID of the workflow"),
+                ToolParameter("step_order", "number", "The step order (1-based) to check variables for")
+            ],
+            handler=self._get_available_variables
         ))
 
         # Job Management
@@ -1408,6 +1439,13 @@ Examples:
             if not workflow:
                 raise ValueError(f"Workflow {workflow_id} not found")
 
+            # Check if workflow is validated
+            if not workflow.validated:
+                raise ValueError(
+                    f"Workflow '{workflow.name}' (ID={workflow_id}) is not validated. "
+                    "Run validate_workflow first. After validation with 0 errors, the workflow can be executed."
+                )
+
             # Get required params from first step's prompt template
             steps = db.query(WorkflowStep).filter(
                 WorkflowStep.workflow_id == workflow_id
@@ -2220,6 +2258,9 @@ Examples:
             if not workflow:
                 raise ValueError(f"Workflow {workflow_id} not found")
 
+            # Reset validated flag when modifying steps
+            workflow.validated = 0
+
             # Check for duplicate step name within the workflow
             existing_step = db.query(WorkflowStep).filter(
                 WorkflowStep.workflow_id == workflow_id,
@@ -2349,6 +2390,9 @@ Examples:
             if not workflow:
                 raise ValueError(f"Workflow {workflow_id} not found")
 
+            # Reset validated flag when modifying steps
+            workflow.validated = 0
+
             # Check for duplicate step names (both foreach_name and foreach_name_end)
             endforeach_name = f"{foreach_name}_end"
             for name in [foreach_name, endforeach_name]:
@@ -2471,6 +2515,9 @@ Examples:
             workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
             if not workflow:
                 raise ValueError(f"Workflow {workflow_id} not found")
+
+            # Reset validated flag when modifying steps
+            workflow.validated = 0
 
             # Check for duplicate step names (if_name, if_name_else, if_name_end)
             names_to_check = [if_name, f"{if_name}_end"]
@@ -2612,6 +2659,11 @@ Examples:
             if not step:
                 raise ValueError(f"Step {step_id} not found")
 
+            # Reset validated flag when modifying steps
+            workflow = db.query(Workflow).filter(Workflow.id == step.workflow_id).first()
+            if workflow:
+                workflow.validated = 0
+
             if step_name is not None:
                 # Check for duplicate step name within the workflow (excluding current step)
                 if step_name != step.step_name:
@@ -2696,6 +2748,11 @@ Examples:
             workflow_id = step.workflow_id
             deleted_order = step.step_order
 
+            # Reset validated flag when modifying steps
+            workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+            if workflow:
+                workflow.validated = 0
+
             db.delete(step)
             db.flush()
 
@@ -2739,11 +2796,41 @@ Examples:
             db.close()
 
     def _validate_workflow(self, workflow_id: int) -> Dict:
-        """Validate workflow integrity and configuration."""
+        """Validate workflow integrity and configuration.
+
+        Updates the workflow's validated flag based on validation results:
+        - validated = true if 0 errors (warnings are allowed)
+        - validated = false if any errors exist
+
+        The workflow must be validated (0 errors) before it can be executed.
+        """
         db = SessionLocal()
         try:
             validation = validate_workflow(db, workflow_id)
-            return validation.to_dict()
+            result = validation.to_dict()
+
+            # Add execution readiness info
+            workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+            if workflow:
+                result["validated"] = bool(workflow.validated)
+                result["execution_ready"] = bool(workflow.validated)
+                if not workflow.validated:
+                    result["execution_blocked_reason"] = "Workflow has validation errors. Fix all errors before execution."
+
+            return result
+        finally:
+            db.close()
+
+    def _get_available_variables(self, workflow_id: int, step_order: int) -> Dict:
+        """Get available variables and functions at a specific workflow step.
+
+        Returns categorized variables that can be used in the step's input_mapping
+        or condition_config, including FOREACH context with dataset columns.
+        """
+        db = SessionLocal()
+        try:
+            result = get_available_variables_at_step(db, workflow_id, step_order)
+            return result
         finally:
             db.close()
 

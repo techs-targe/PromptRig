@@ -21,10 +21,27 @@ project_root = Path(__file__).parent.parent.absolute()
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from app.routes import main, config, run, projects, datasets, settings, workflows, prompts, tags, agent
+
+
+class NoCacheMiddleware(BaseHTTPMiddleware):
+    """Middleware to disable caching for JavaScript files during development."""
+
+    async def dispatch(self, request: Request, call_next):
+        response: Response = await call_next(request)
+        # Disable cache for JS files to ensure latest code is always loaded
+        if request.url.path.endswith('.js'):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
+
 from backend.utils import get_app_name
 
 # Create FastAPI app with dynamic app name
@@ -34,6 +51,9 @@ app = FastAPI(
     description="LLM prompt evaluation and benchmarking tool - Phase 2 Complete",
     version="2.0.0 (Phase 2 Complete)"
 )
+
+# Add middleware to disable JS caching (ensures latest code is always loaded)
+app.add_middleware(NoCacheMiddleware)
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="app/static"), name="static")

@@ -399,6 +399,7 @@
                         <div class="workflow-form-actions">
                             <input type="hidden" id="workflow-id" value="">
                             <button type="submit" class="btn btn-primary">保存</button>
+                            <button type="button" class="btn btn-info" id="btn-workflow-validate" onclick="validateWorkflow()">検査</button>
                             <button type="button" class="btn btn-secondary" onclick="saveWorkflowAs()" id="btn-workflow-save-as" style="display: none;">別名で保存</button>
                             <button type="button" class="btn btn-secondary" onclick="openWorkflowJsonEditor()" id="btn-workflow-json-edit" style="display: none;">JSON編集</button>
                             <button type="button" class="btn btn-secondary" onclick="exportWorkflow()" id="btn-workflow-export" style="display: none;">JSONエクスポート</button>
@@ -879,20 +880,22 @@
                 </div>
                 <div class="agent-input-area" style="padding: 0.5rem; border-top: 1px solid #e2e8f0; background: white;">
                     <div style="position: relative; width: 100%;">
-                        <textarea id="agent-input" class="agent-input" rows="3"
+                        <textarea id="agent-input" class="agent-input" rows="7"
                                   placeholder="メッセージを入力... (Shift+Enterで改行、Enterで送信)"
-                                  style="display: block; width: 100%; box-sizing: border-box; padding: 0.75rem 8rem 0.75rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; resize: vertical; font-size: 0.95rem; line-height: 1.5; background: #f8fafc; transition: border-color 0.2s, box-shadow 0.2s; min-height: 70px;"
+                                  style="display: block; width: 100%; box-sizing: border-box; padding: 0.75rem 4rem 0.75rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; resize: vertical; font-size: 0.95rem; line-height: 1.5; background: #f8fafc; transition: border-color 0.2s, box-shadow 0.2s; min-height: 175px;"
                                   onfocus="this.style.borderColor='#3b82f6'; this.style.boxShadow='0 0 0 3px rgba(59,130,246,0.1)';"
                                   onblur="this.style.borderColor='#e2e8f0'; this.style.boxShadow='none';"
                                   onkeydown="if(event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendAgentMessage(); }"></textarea>
-                        <button id="btn-resource-picker" class="btn btn-secondary" onclick="openResourcePicker()" title="リソース参照 / Resource Picker" style="position: absolute; right: 5rem; bottom: 0.375rem; padding: 0.4rem 0.5rem; border-radius: 6px; font-size: 1rem; background: #f1f5f9; border: 1px solid #e2e8f0; cursor: pointer; transition: background 0.2s;">
-                            📋
-                        </button>
-                        <button id="btn-agent-send" class="btn btn-primary" onclick="sendAgentMessage()" style="position: absolute; right: 0.375rem; bottom: 0.375rem; padding: 0.4rem 0.875rem; border-radius: 6px; font-weight: 500; font-size: 0.85rem; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); border: none; color: white; cursor: pointer; box-shadow: 0 2px 4px rgba(59,130,246,0.3); transition: transform 0.1s, box-shadow 0.1s;"
-                            onmousedown="this.style.transform='scale(0.98)';"
-                            onmouseup="this.style.transform='scale(1)';">
-                            送信
-                        </button>
+                        <div style="position: absolute; right: 0.375rem; bottom: 0.375rem; display: flex; flex-direction: column; gap: 0.375rem;">
+                            <button id="btn-resource-picker" class="btn btn-secondary" onclick="openResourcePicker()" title="リソース参照 / Resource Picker" style="padding: 0.4rem 0.5rem; border-radius: 6px; font-size: 1rem; background: #f1f5f9; border: 1px solid #e2e8f0; cursor: pointer; transition: background 0.2s;">
+                                📋
+                            </button>
+                            <button id="btn-agent-send" class="btn btn-primary" onclick="sendAgentMessage()" style="padding: 0.4rem 0.875rem; border-radius: 6px; font-weight: 500; font-size: 0.85rem; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); border: none; color: white; cursor: pointer; box-shadow: 0 2px 4px rgba(59,130,246,0.3); transition: transform 0.1s, box-shadow 0.1s;"
+                                onmousedown="this.style.transform='scale(0.98)';"
+                                onmouseup="this.style.transform='scale(1)';">
+                                送信
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -911,6 +914,13 @@
 <div id="modal-overlay-2" class="modal-overlay">
     <div id="modal-content-2" class="modal-content">
         <!-- Dynamic help modal content -->
+    </div>
+</div>
+
+<!-- Tertiary Modal for Zoom Editor (overlays modal-overlay-2) -->
+<div id="modal-overlay-3" class="modal-overlay" style="z-index: 1025;">
+    <div id="modal-content-3" class="modal-content">
+        <!-- Dynamic zoom editor content -->
     </div>
 </div>
 

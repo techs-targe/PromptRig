@@ -1072,6 +1072,38 @@ function displayWorkflowJobResults(job) {
         `;
     }
 
+    // Display screen outputs prominently (output_type: "screen")
+    if (job.merged_output) {
+        const screenOutputs = [];
+        for (const [key, value] of Object.entries(job.merged_output)) {
+            if (key.startsWith('_')) continue; // Skip meta fields
+            if (value && typeof value === 'object' && value.output_type === 'screen' && value.content) {
+                screenOutputs.push({
+                    step_name: key,
+                    content: value.content,
+                    format: value.format || 'text'
+                });
+            }
+        }
+
+        if (screenOutputs.length > 0) {
+            html += `<div class="workflow-screen-outputs">`;
+            for (const output of screenOutputs) {
+                const escapedContent = escapeHtmlGlobal(output.content);
+                html += `
+                    <div class="workflow-screen-output response-box-container">
+                        <button class="response-box-copy-btn" onclick="copyWorkflowStepContent(this)" title="コピー / Copy" data-raw-content="${escapedContent.replace(/"/g, '&quot;')}">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        </button>
+                        <h5>📺 画面出力 / Screen Output (${escapeHtmlGlobal(output.step_name)})</h5>
+                        <pre class="screen-output-content">${escapedContent}</pre>
+                    </div>
+                `;
+            }
+            html += `</div>`;
+        }
+    }
+
     // Display merged output
     if (job.merged_output) {
         // Remove _execution_trace from display to avoid duplication
@@ -1554,6 +1586,9 @@ async function selectHistoryItem(jobId) {
 }
 
 function displayJobResults(job, targetContainer = null) {
+    // Store job for error copy function
+    lastDisplayedJob = job;
+
     // Accept container as parameter to avoid getElementById conflicts between tabs
     // When called from batch tab, container is passed directly
     // When called from single tab (or no param), use default #results-area
@@ -1598,11 +1633,16 @@ function displayJobResults(job, targetContainer = null) {
                     <div style="font-size: 1.1rem; margin-bottom: 0.5rem;">
                         <strong>進捗: ${completed + errors} / ${total} 件完了 (${progressPercent}%)</strong>
                     </div>
-                    <div style="display: flex; gap: 1rem; margin-top: 0.5rem; flex-wrap: wrap;">
+                    <div style="display: flex; gap: 1rem; margin-top: 0.5rem; flex-wrap: wrap; align-items: center;">
                         <span style="color: #27ae60;">✓ 成功: ${completed}件</span>
                         <span style="color: #e74c3c;">✗ エラー: ${errors}件</span>
                         ${pending > 0 ? `<span style="color: #95a5a6;">⏳ 待機中: ${pending}件</span>` : ''}
                         ${running > 0 ? `<span style="color: #3498db;">▶ 実行中: ${running}件</span>` : ''}
+                        ${errors > 0 && pending === 0 && running === 0 ? `
+                            <button class="btn-retry-all" onclick="retryAllErrors(${job.id}, this)" title="全エラー再送 / Retry all errors" style="margin-left: auto;">
+                                🔄 全エラー再送 (${errors}件)
+                            </button>
+                        ` : ''}
                     </div>
                     <div style="margin-top: 1rem; background: #ecf0f1; border-radius: 4px; height: 20px; overflow: hidden;">
                         <div style="background: linear-gradient(90deg, #27ae60 0%, #2ecc71 100%); height: 100%; width: ${progressPercent}%; transition: width 0.3s ease;"></div>
@@ -1666,7 +1706,32 @@ function displayJobResults(job, targetContainer = null) {
             let content;
 
             if (item.status === 'error') {
-                content = `<div class="error">Error: ${escapeHtml(item.error_message || 'Unknown error')}</div>`;
+                // Enhanced error display with copy and retry buttons
+                const inputParamsDisplay = item.input_params ? escapeHtml(item.input_params) : 'N/A';
+                content = `
+                    <div class="error-details">
+                        <div class="error-header">
+                            <span class="error-badge">❌ エラー / Error</span>
+                            <div class="error-actions">
+                                <button class="btn-copy-error" onclick="copyErrorInfo(${job.id}, ${item.id})" title="エラー情報をコピー / Copy error info">
+                                    📋 コピー
+                                </button>
+                                <button class="btn-retry" onclick="retryJobItem(${job.id}, ${item.id}, this)" title="再送信 / Retry">
+                                    🔄 再送
+                                </button>
+                            </div>
+                        </div>
+                        <div class="error-message">${escapeHtml(item.error_message || 'Unknown error')}</div>
+                        <details class="error-input-params">
+                            <summary>入力パラメータ / Input Parameters</summary>
+                            <pre>${inputParamsDisplay}</pre>
+                        </details>
+                        <details class="error-raw-prompt">
+                            <summary>送信プロンプト / Sent Prompt</summary>
+                            <pre>${escapeHtml(item.raw_prompt || 'N/A')}</pre>
+                        </details>
+                    </div>
+                `;
             } else {
             // Parse the parsed_response if it exists
             let parsedContent = '';
@@ -2399,7 +2464,9 @@ function updateExecutionTargetSelector(targets) {
     if (targets.workflows && targets.workflows.length > 0) {
         options += '<optgroup label="ワークフロー / Workflows">';
         targets.workflows.forEach(workflow => {
-            options += `<option value="workflow:${workflow.id}">${workflow.name} (${workflow.step_count} steps)</option>`;
+            const invalidIcon = workflow.validated ? '' : '⚠️ ';
+            const invalidTitle = workflow.validated ? '' : ' title="検証エラーあり / Validation errors"';
+            options += `<option value="workflow:${workflow.id}"${invalidTitle}>${invalidIcon}${workflow.name} (${workflow.step_count} steps)</option>`;
         });
         options += '</optgroup>';
     }
@@ -5516,6 +5583,16 @@ async function updateProjectSelects() {
     // Build project options (no workflows - workflows are now selected in prompt/target selector)
     const projectOptions = allProjects.map(p => `<option value="project-${p.id}">${p.name}</option>`).join('');
 
+    // Build workflow options with validation icons for batch execution
+    let workflowOptions = '';
+    if (allWorkflows && allWorkflows.length > 0) {
+        workflowOptions = allWorkflows.map(w => {
+            const invalidIcon = w.validated ? '' : '⚠️ ';
+            const invalidTitle = w.validated ? '' : ' title="検証エラーあり / Validation errors"';
+            return `<option value="workflow-${w.id}"${invalidTitle}>${invalidIcon}${w.name} (${w.steps ? w.steps.length : 0} steps)</option>`;
+        }).join('');
+    }
+
     if (singleSelect) {
         singleSelect.innerHTML = projectOptions;
         // Set default project if configured
@@ -5551,7 +5628,15 @@ async function updateProjectSelects() {
     }
 
     if (batchSelect) {
-        batchSelect.innerHTML = projectOptions;
+        // Build batch options: projects + workflows
+        let batchOptions = '';
+        if (projectOptions) {
+            batchOptions += '<optgroup label="プロジェクト / Projects">' + projectOptions + '</optgroup>';
+        }
+        if (workflowOptions) {
+            batchOptions += '<optgroup label="ワークフロー / Workflows">' + workflowOptions + '</optgroup>';
+        }
+        batchSelect.innerHTML = batchOptions;
         // Set default project if configured
         try {
             const response = await fetch('/api/settings/default-project');
@@ -6329,7 +6414,7 @@ async function editDatasetProjects(datasetId) {
                     📁 プロジェクト
                 </button>
                 <button id="tab-columns" class="btn" style="border-radius: 4px 4px 0 0; border: none; margin-bottom: -2px; background: transparent;" onclick="switchDatasetEditTab('columns')">
-                    📝 列名
+                    📝 列の編集
                 </button>
                 <button id="tab-addrow" class="btn" style="border-radius: 4px 4px 0 0; border: none; margin-bottom: -2px; background: transparent;" onclick="switchDatasetEditTab('addrow')">
                     ➕ データ追加
@@ -6398,6 +6483,23 @@ function switchDatasetEditTab(tab) {
     document.getElementById('save-projects-btn').style.display = tab === 'projects' ? 'inline-block' : 'none';
     document.getElementById('save-columns-btn').style.display = tab === 'columns' ? 'inline-block' : 'none';
     document.getElementById('add-row-btn').style.display = tab === 'addrow' ? 'inline-block' : 'none';
+
+    // Update preview/edit button visibility and text
+    const previewBtn = document.getElementById('preview-dataset-btn');
+    if (previewBtn) {
+        if (tab === 'columns') {
+            // Hide button on 列の編集 tab
+            previewBtn.style.display = 'none';
+        } else if (tab === 'addrow') {
+            // Show button with different text on データ追加 tab
+            previewBtn.style.display = 'inline-block';
+            previewBtn.textContent = 'データ編集／削除';
+        } else {
+            // Default: show button with original text on プロジェクト tab
+            previewBtn.style.display = 'inline-block';
+            previewBtn.textContent = '編集/削除';
+        }
+    }
 }
 
 /**
@@ -10339,13 +10441,16 @@ async function loadWorkflows() {
             return;
         }
 
-        list.innerHTML = workflows.map(w => `
-            <div class="workflow-item ${selectedWorkflow && selectedWorkflow.id === w.id ? 'selected' : ''}"
+        list.innerHTML = workflows.map(w => {
+            const invalidClass = w.validated ? '' : ' workflow-invalid';
+            const invalidIcon = w.validated ? '' : '<span class="workflow-invalid-icon" title="検証エラーあり / Validation errors">⚠️</span>';
+            return `
+            <div class="workflow-item${invalidClass} ${selectedWorkflow && selectedWorkflow.id === w.id ? 'selected' : ''}"
                  onclick="selectWorkflow(${w.id})">
-                <div class="workflow-name">${escapeHtmlGlobal(w.name)}</div>
+                <div class="workflow-name">${invalidIcon}${escapeHtmlGlobal(w.name)}</div>
                 <div class="workflow-info">${w.steps.length} ステップ / steps</div>
             </div>
-        `).join('');
+        `}).join('');
         console.log('[loadWorkflows] Rendered', workflows.length, 'workflow items');
 
     } catch (error) {
@@ -10403,10 +10508,12 @@ async function loadWorkflowsAll() {
 
         list.innerHTML = workflows.map(w => {
             const projectName = w.project_id ? (projectNameMap[w.project_id] || `Project #${w.project_id}`) : '(未割当 / Unassigned)';
+            const invalidClass = w.validated ? '' : ' workflow-invalid';
+            const invalidIcon = w.validated ? '' : '<span class="workflow-invalid-icon" title="検証エラーあり / Validation errors">⚠️</span>';
             return `
-                <div class="workflow-item ${selectedWorkflow && selectedWorkflow.id === w.id ? 'selected' : ''}"
+                <div class="workflow-item${invalidClass} ${selectedWorkflow && selectedWorkflow.id === w.id ? 'selected' : ''}"
                      onclick="selectWorkflow(${w.id})">
-                    <div class="workflow-name">${escapeHtmlGlobal(w.name)}</div>
+                    <div class="workflow-name">${invalidIcon}${escapeHtmlGlobal(w.name)}</div>
                     <div class="workflow-info">${w.steps.length} ステップ / steps</div>
                     <div class="workflow-project-tag" style="font-size: 0.8em; color: #888;">${escapeHtmlGlobal(projectName)}</div>
                 </div>
@@ -18326,4 +18433,174 @@ if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initFunctionReference);
 } else {
     initFunctionReference();
+}
+
+// ========== Error Retry and Copy Functions ==========
+
+// Store job data for error copy function
+let lastDisplayedJob = null;
+
+/**
+ * Store the displayed job data for later use (called from displayJobResults)
+ */
+function storeJobForErrorCopy(job) {
+    lastDisplayedJob = job;
+}
+
+/**
+ * Retry a single failed job item
+ * @param {number} jobId - Job ID
+ * @param {number} itemId - Job item ID
+ * @param {HTMLElement} btn - The button element (for disabling during request)
+ */
+async function retryJobItem(jobId, itemId, btn) {
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '再送中...';
+    }
+
+    try {
+        const response = await fetch(`/api/jobs/${jobId}/items/${itemId}/retry`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            showStatus('再送成功！ / Retry successful!', 'success');
+            // Refresh job display
+            await refreshJobDisplay(jobId);
+        } else {
+            showStatus(`再送失敗 / Retry failed: ${result.error_message}`, 'error');
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = '🔄 再送';
+            }
+        }
+    } catch (e) {
+        showStatus(`再送エラー / Retry error: ${e.message}`, 'error');
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = '🔄 再送';
+        }
+    }
+}
+
+/**
+ * Retry all failed job items in a job
+ * @param {number} jobId - Job ID
+ * @param {HTMLElement} btn - The button element (for disabling during request)
+ */
+async function retryAllErrors(jobId, btn) {
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '再送中...';
+    }
+
+    try {
+        const response = await fetch(`/api/jobs/${jobId}/retry-all-errors`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            const statusType = result.error_count > 0 ? 'warning' : 'success';
+            showStatus(
+                `再送完了 / Retry completed: 成功${result.success_count}件 / ${result.success_count} success, ` +
+                `失敗${result.error_count}件 / ${result.error_count} still error`,
+                statusType
+            );
+            // Refresh job display
+            await refreshJobDisplay(jobId);
+        } else {
+            showStatus(`一括再送失敗 / Bulk retry failed: ${result.message || 'Unknown error'}`, 'error');
+        }
+    } catch (e) {
+        showStatus(`一括再送エラー / Bulk retry error: ${e.message}`, 'error');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = '🔄 全エラー再送';
+        }
+    }
+}
+
+/**
+ * Copy error information to clipboard
+ * @param {number} jobId - Job ID
+ * @param {number} itemId - Job item ID
+ */
+async function copyErrorInfo(jobId, itemId) {
+    // First try to get item from lastDisplayedJob
+    let item = null;
+    if (lastDisplayedJob && lastDisplayedJob.id === jobId && lastDisplayedJob.items) {
+        item = lastDisplayedJob.items.find(i => i.id === itemId);
+    }
+
+    // If not found, fetch from API
+    if (!item) {
+        try {
+            const response = await fetch(`/api/jobs/${jobId}/details`);
+            if (response.ok) {
+                const job = await response.json();
+                item = job.items.find(i => i.id === itemId);
+            }
+        } catch (e) {
+            console.error('Failed to fetch job details for copy:', e);
+        }
+    }
+
+    if (!item) {
+        showStatus('エラー情報が見つかりません / Error info not found', 'error');
+        return;
+    }
+
+    const errorInfo = `=== エラー情報 / Error Information ===
+Job ID: ${jobId}
+Item ID: ${itemId}
+Status: ${item.status}
+
+--- エラーメッセージ / Error Message ---
+${item.error_message || 'Unknown error'}
+
+--- 入力パラメータ / Input Parameters ---
+${item.input_params || 'N/A'}
+
+--- 送信プロンプト / Sent Prompt ---
+${item.raw_prompt || 'N/A'}
+`;
+
+    try {
+        await navigator.clipboard.writeText(errorInfo);
+        showStatus('エラー情報をコピーしました / Error info copied to clipboard', 'success');
+    } catch (e) {
+        showStatus('コピーに失敗しました / Failed to copy', 'error');
+    }
+}
+
+/**
+ * Refresh job display after retry
+ * @param {number} jobId - Job ID to refresh
+ */
+async function refreshJobDisplay(jobId) {
+    try {
+        const response = await fetch(`/api/jobs/${jobId}/details`);
+        if (response.ok) {
+            const job = await response.json();
+            lastDisplayedJob = job;
+            displayJobResults(job);
+
+            // Also update history item status
+            updateHistoryItemStatus(jobId, job.status, job);
+        }
+    } catch (e) {
+        console.error('Failed to refresh job display:', e);
+    }
 }

@@ -742,7 +742,8 @@ def get_project_execution_targets(
             "id": wf.id,
             "name": wf.name,
             "description": wf.description or "",
-            "step_count": len(wf.steps) if wf.steps else 0
+            "step_count": len(wf.steps) if wf.steps else 0,
+            "validated": bool(wf.validated)
         })
 
     return ProjectPromptsWorkflowsResponse(

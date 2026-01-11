@@ -51,6 +51,7 @@ TOOL_CATEGORIES: Dict[str, List[str]] = {
         "add_foreach_block",
         "add_if_block",
         "validate_workflow",
+        "get_available_variables",
         "list_deleted_workflows",
         "restore_workflow"
     ],
@@ -215,7 +216,7 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                 "examples": [
                     '{"step_type": "set", "condition_config": {"assignments": {"correct": "0", "incorrect": "0"}}}',
                     '{"step_type": "set", "condition_config": {"assignments": {"total": "calc({{vars.total}} + 1)"}}}',
-                    '{"step_type": "set", "condition_config": {"assignments": {"result": "{{step.ANSWER}}"}}}'
+                    '{"step_type": "set", "condition_config": {"assignments": {"result": "{{ask.ANSWER}}"}}}'
                 ],
                 "notes": [
                     "assignments に変数名と値のペアを指定",
@@ -239,14 +240,17 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
 )""",
                 "examples": [
                     '{"step_type": "output", "condition_config": {"output_type": "screen", "format": "text", "content": "正解率: {{vars.correct}}/{{vars.total}}"}}',
-                    '{"step_type": "output", "condition_config": {"output_type": "screen", "format": "json", "fields": {"answer": "{{step.ANSWER}}", "score": "{{step.SCORE}}"}}}',
-                    '{"step_type": "output", "condition_config": {"output_type": "file", "format": "csv", "filename": "results.csv", "columns": ["ID", "Answer"], "values": ["{{vars.i}}", "{{step.ANSWER}}"], "append": true}}'
+                    '{"step_type": "output", "condition_config": {"output_type": "screen", "format": "json", "fields": {"answer": "{{ask.ANSWER}}", "score": "{{ask.SCORE}}"}}}',
+                    '{"step_type": "output", "condition_config": {"output_type": "file", "format": "csv", "filename": "results.csv", "columns": ["ID", "Answer"], "values": ["{{vars.i}}", "{{ask.ANSWER}}"], "append": true}}'
                 ],
                 "notes": [
                     "output_type: 'screen' (画面表示) または 'file' (ファイル出力)",
                     "format: 'text', 'json', 'csv' から選択",
                     "CSV出力時は columns と values を配列で指定",
-                    "append: true でファイルに追記"
+                    "append: true でファイルに追記",
+                    "【CSVクォート】values に手動で引用符を付けないこと",
+                    "  ❌ values: [\"\\\"id\\\"\", ...]  (手動引用符 → 三重引用符になる)",
+                    "  ✅ values: [\"id\", ...]  (CSVフォーマッタが自動処理)"
                 ]
             },
             "foreach": {
@@ -277,7 +281,10 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                     "  dataset:ID:limit:N - N行に制限",
                     "  dataset:ID:limit:N:seed:S - ランダムN行（シード指定）",
                     "  dataset:ID:random:N - ランダムN行",
-                    "  dataset:ID:random:N:seed:S - ランダムN行（シード指定）"
+                    "  dataset:ID:random:N:seed:S - ランダムN行（シード指定）",
+                    "【単一カラム vs 複数カラム】",
+                    "  source: dataset:6:text → {{vars.ROW}} で値を参照 ({{vars.ROW.text}} は無効)",
+                    "  source: dataset:6 → {{vars.ROW.column}} で各カラムを参照"
                 ]
             },
             "endforeach": {
@@ -292,14 +299,14 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                 "syntax": """add_if_block(
     workflow_id=ID,
     step_name="check",
-    left="{{step.ANSWER}}",
+    left="{{ask.ANSWER}}",
     operator="==",
     right="{{vars.ROW.answerKey}}"
 )""",
                 "examples": [
-                    '{"step_type": "if", "condition_config": {"left": "{{step.ANSWER}}", "operator": "==", "right": "A"}}',
+                    '{"step_type": "if", "condition_config": {"left": "{{ask.ANSWER}}", "operator": "==", "right": "A"}}',
                     '{"step_type": "if", "condition_config": {"left": "{{vars.score}}", "operator": ">=", "right": "80"}}',
-                    '{"step_type": "if", "condition_config": {"left": "{{step.result}}", "operator": "contains", "right": "success"}}'
+                    '{"step_type": "if", "condition_config": {"left": "{{api_call.result}}", "operator": "contains", "right": "success"}}'
                 ],
                 "notes": [
                     "演算子: ==, !=, >, <, >=, <=, contains, empty, not_empty",
@@ -310,7 +317,7 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
             "elif": {
                 "summary": "追加の条件分岐",
                 "description": "前のifまたはelifが偽の場合に追加の条件を評価します",
-                "syntax": '{"step_type": "elif", "condition_config": {"left": "{{step.ANSWER}}", "operator": "==", "right": "B"}}',
+                "syntax": '{"step_type": "elif", "condition_config": {"left": "{{ask.ANSWER}}", "operator": "==", "right": "B"}}',
                 "notes": ["if の後、endif の前に配置"]
             },
             "else": {
@@ -384,18 +391,35 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                     "step_name - 各ステップの出力 (step_nameはステップ名)"
                 ]
             },
+            "prompt_output_fields": {
+                "summary": "【重要】PROMPTステップの出力フィールド一覧",
+                "description": "PROMPTステップ実行後に参照可能なフィールド。.textは存在しません！",
+                "syntax": "{{step_name.field}}",
+                "examples": [
+                    "{{generate.raw}} - LLM応答の生テキスト（パーサー不要で常に利用可能）",
+                    "{{generate.ASSISTANT}} - LLM応答（rawと同じ内容）",
+                    "{{ask.ANSWER}} - JSONパーサー設定時の解析済みフィールド",
+                    "{{step.parsed.key}} - ネストされた解析済みデータ"
+                ],
+                "notes": [
+                    "【重要】.text は存在しない！必ず .raw を使用すること",
+                    "パーサー未設定時: .raw と .ASSISTANT のみ利用可能",
+                    "JSONパーサー設定時: 解析結果がトップレベルに展開される（例: .ANSWER）",
+                    "CSVやOUTPUTステップで参照する場合は {{step.raw}} が安全"
+                ]
+            },
             "operators": {
                 "summary": "条件演算子",
                 "description": "IF/LOOP ステップで使用可能な演算子一覧",
                 "syntax": '{"left": "値1", "operator": "演算子", "right": "値2"}',
                 "examples": [
-                    "== (等しい): {{step.ANSWER}} == A",
+                    "== (等しい): {{ask.ANSWER}} == A",
                     "!= (等しくない): {{vars.status}} != error",
                     "> (大きい): {{vars.score}} > 80",
                     "< (小さい): {{vars.count}} < 10",
                     ">= (以上): {{vars.total}} >= 100",
                     "<= (以下): {{vars.retry}} <= 3",
-                    "contains (含む): {{step.text}} contains 'keyword'",
+                    "contains (含む): {{generate.raw}} contains 'keyword'",
                     "empty (空): {{vars.result}} empty (rightは無視)",
                     "not_empty (空でない): {{vars.result}} not_empty"
                 ],
@@ -418,8 +442,8 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                     "✅ input_mapping: {\"QUESTION\": \"{{vars.ROW.question}}\"} (プロンプトの{{QUESTION}}と一致)",
                     "",
                     "【間違い3: パーサーフィールドの参照で大文字小文字が不一致】",
-                    "❌ パーサー {\"ANSWER\": \"[A-D]\"} に対して {{step.answer}} (小文字)",
-                    "✅ パーサー {\"ANSWER\": \"[A-D]\"} に対して {{step.ANSWER}} (大文字で一致)",
+                    "❌ パーサー {\"ANSWER\": \"[A-D]\"} に対して {{ask.answer}} (小文字)",
+                    "✅ パーサー {\"ANSWER\": \"[A-D]\"} に対して {{ask.ANSWER}} (大文字で一致)",
                     "",
                     "【間違い4: データセットカラム名の間違い】",
                     "❌ {{vars.ROW.question}} (実際のカラム名は question_stem)",
@@ -427,11 +451,20 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                     "",
                     "【間違い5: パーサーのjson_pathが間違い】",
                     "❌ json_path: {\"ANSWER\": \"$.choices\"} (配列が返る)",
-                    "✅ json_path: {\"ANSWER\": \"$.label[0]\"} (単一値が返る)"
+                    "✅ json_path: {\"ANSWER\": \"$.label[0]\"} (単一値が返る)",
+                    "",
+                    "【間違い6: 関数チェーン（致命的エラー）】",
+                    "❌ fact1 = json_parse({{run1.OUTPUT}}).fact ← 動作しません！",
+                    "→ json_parse() は辞書を返すが、.fact は無視される",
+                    "→ 結果: fact1 に辞書全体が格納され、後続の文字列処理で TypeError",
+                    "✅ 正解1: {{run1.fact}} を直接使用（パーサーがfactフィールドを抽出済みの場合）",
+                    "✅ 正解2: 2段階アプローチ",
+                    "   setステップ: parsed = json_parse({{run1.OUTPUT}})",
+                    "   次のステップ: {{vars.parsed.fact}} でアクセス"
                 ],
                 "notes": [
                     "プロンプトテンプレート: {{PARAM}} 形式のみ使用",
-                    "ワークフロー変数: {{vars.xxx}}, {{step.xxx}} はinput_mappingで渡す",
+                    "ワークフロー変数: {{vars.xxx}}, {{ステップ名.xxx}} はinput_mappingで渡す",
                     "大文字小文字は常に厳密に一致させる",
                     "データセットカラム名は preview_dataset_rows で確認",
                     "パーサーの出力形式はLLMの応答に依存するため、プロンプトで出力形式を指示"
@@ -504,6 +537,39 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                     "エラー発生時はログを確認して原因特定"
                 ]
             },
+            "get_available_variables": {
+                "summary": "【ツール】指定ステップで利用可能な変数・関数を取得",
+                "description": "ワークフローの特定ステップで参照可能な変数と関数の一覧を取得します。FOREACHループ内ではデータセットのカラム名も表示されます。",
+                "syntax": "get_available_variables(workflow_id=ID, step_order=N)",
+                "examples": [
+                    "【基本使用】",
+                    "get_available_variables(workflow_id=161, step_order=2)",
+                    "",
+                    "【返却例 - FOREACH内のステップ】",
+                    "categories: [",
+                    "  {category: '📥 初期入力', variables: [{name: 'param', variable: '{{input.param}}'}]},",
+                    "  {category: '🔄 FOREACH: question', variables: [",
+                    "    {name: 'question (行全体)', variable: '{{vars.question}}'},",
+                    "    {name: 'i (インデックス)', variable: '{{vars.i}}'},",
+                    "    {name: 'question', variable: '{{vars.question.question}}'},",
+                    "    {name: 'choices', variable: '{{vars.question.choices}}'},",
+                    "    {name: 'answerKey', variable: '{{vars.question.answerKey}}'}",
+                    "  ]},",
+                    "  {category: '📊 変数', variables: [{name: 'correct', variable: '{{vars.correct}}'}]}",
+                    "]",
+                    "",
+                    "【用途】",
+                    "- input_mapping を作成する前に利用可能な変数を確認",
+                    "- FOREACHループ内でデータセットのカラム名を確認",
+                    "- 条件式で参照可能な変数を確認"
+                ],
+                "notes": [
+                    "step_order は0始まり（最初のステップが0）",
+                    "FOREACH内のステップでは、データセットソースからカラム名を自動取得",
+                    "validate_workflow と組み合わせてワークフロー構築を効率化",
+                    "返却されるfunctionsには使用可能な関数一覧も含まれる"
+                ]
+            },
             "array_pattern": {
                 "summary": "【推奨】ループで結果を蓄積するパターン",
                 "description": "concat() での文字列連結より、array_push + join パターンを推奨します。データの整合性とCSV出力の互換性が向上します。",
@@ -542,21 +608,26 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
     "functions": {
         "description": "ワークフローで使用可能な関数 (28種類)",
         "overview": """ワークフローのset/outputステップやinput_mapping内で使用できる関数です。
-構文: function_name(引数1, 引数2, ...)""",
+構文: function_name(引数1, 引数2, ...)
+
+【重要】関数チェーン（function().property）は一切サポートされていません。
+❌ 禁止: json_parse({{x}}).field, concat(a,b).length
+✅ 正解: setステップで変数に格納してから別途アクセス
+詳細は help workflow common_mistakes を参照""",
         "entries": {
             # 文字列操作
             "upper": {
                 "summary": "大文字変換",
                 "args": 1,
                 "syntax": "upper(text)",
-                "examples": ["upper({{step.text}}) → HELLO", "upper(abc) → ABC"],
+                "examples": ["upper({{generate.raw}}) → HELLO", "upper(abc) → ABC"],
                 "notes": []
             },
             "lower": {
                 "summary": "小文字変換",
                 "args": 1,
                 "syntax": "lower(text)",
-                "examples": ["lower({{step.text}}) → hello", "lower(ABC) → abc"],
+                "examples": ["lower({{generate.raw}}) → hello", "lower(ABC) → abc"],
                 "notes": []
             },
             "trim": {
@@ -684,7 +755,7 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                 "args": 2,
                 "syntax": "array_push(array, element)",
                 "examples": [
-                    "array_push({{vars.items}}, {{step.value}}) → [\"既存\", \"新規\"]",
+                    "array_push({{vars.items}}, {{extract.value}}) → [\"既存\", \"新規\"]",
                     "array_push([], first) → [\"first\"]"
                 ],
                 "notes": [
@@ -824,11 +895,16 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                 "args": 1,
                 "syntax": "json_parse(json_string)",
                 "examples": [
-                    "json_parse({{step.json_output}}) → JSONオブジェクトに変換",
+                    "json_parse({{generate.json_output}}) → JSONオブジェクトに変換",
                     "json_parse({\"name\": \"test\", \"value\": 123}) → パース後にフィールドアクセス可能",
                     "【ワークフロー例】\nステップ1: LLMがJSON出力 → {{ask.RAW_RESPONSE}} = '{\"answer\": \"A\", \"score\": 95}'\nステップ2: set で parsed = json_parse({{ask.RAW_RESPONSE}})\nステップ3: {{vars.parsed.answer}} で 'A' を取得"
                 ],
                 "notes": [
+                    "【禁止】json_parse()の戻り値に直接.propertyをチェーンすることは不可",
+                    "❌ 絶対禁止: json_parse({{step.OUTPUT}}).field ← これは動作しません！",
+                    "✅ 正解1: プロンプトパーサーが既にフィールドを抽出済みなら {{step.field}} を直接使用",
+                    "✅ 正解2: setステップで parsed = json_parse({{step.OUTPUT}}) → その後 {{vars.parsed.field}}",
+                    "関数チェーン（func().prop）は一切サポートされていない",
                     "JSON文字列をパースしてネストしたフィールドにアクセス可能にする",
                     "パース後は {{vars.変数名.フィールド名}} でアクセス",
                     "ネストしたアクセス: {{vars.parsed.data.items[0].name}}",
@@ -879,6 +955,7 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                     "dataset_filter(dataset:6, \"status='done' OR status='skip'\") → OR条件",
                     "dataset_filter(dataset:6, \"name LIKE 'test%'\") → 'test'で始まる名前",
                     "dataset_filter(dataset:6, \"comment IS NULL\") → コメントがNULLの行",
+                    "dataset_filter(dataset:6, \"comment IS NOT NULL\") → コメントがある行のみ",
                     "dataset_filter(dataset:6, \"field IS EMPTY\") → fieldが空文字の行",
                     "dataset_filter(dataset:6, \"text contains keyword\") → textにkeywordを含む行"
                 ],
@@ -891,7 +968,10 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                     "空文字判定: IS EMPTY, IS NOT EMPTY",
                     "論理演算子: AND, OR (大文字小文字不問)",
                     "AND/ORの優先順位: AND > OR (括弧は非対応)",
-                    "条件値はシングル/ダブルクォートで囲む（数値比較時は不要）"
+                    "条件値はシングル/ダブルクォートで囲む（数値比較時は不要）",
+                    "【FOREACHソースとして使用】",
+                    "  source: dataset_filter(dataset:6, \"score>80\") → 条件に合う行のみイテレート",
+                    "  source: dataset_filter(dataset:6, \"field IS NOT NULL\") → NULLでない行のみ"
                 ]
             },
             "dataset_join": {
@@ -915,7 +995,7 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                 "summary": "デバッグ出力",
                 "args": "1+",
                 "syntax": "debug(value, ...)",
-                "examples": ["debug({{vars.x}}, {{step.result}})"],
+                "examples": ["debug({{vars.x}}, {{ask.result}})"],
                 "notes": [
                     "ログに出力される (画面には表示されない)",
                     "デバッグ目的で変数の値を確認"
@@ -1158,7 +1238,13 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                     "dataset:6:question",
                     "dataset:6:answer"
                 ],
-                "notes": ["カラム名は大文字小文字を区別"]
+                "notes": [
+                    "カラム名は大文字小文字を区別",
+                    "【重要】単一カラム指定時、item_var には値が直接格納される",
+                    "  → 参照: {{vars.ROW}}  ✅ (値そのもの)",
+                    "  → 参照: {{vars.ROW.column}} ❌ (オブジェクトではない)",
+                    "複数カラムまたは全カラム指定時のみ {{vars.ROW.column}} が有効"
+                ]
             },
             "multiple_columns": {
                 "summary": "複数カラム",
@@ -1263,12 +1349,12 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                     "原因: A/B/C/D形式の回答を期待しているが、JSONパーサーを使用",
                     "対処: パーサーを type: regex, patterns: {\"ANSWER\": \"[A-D]\"} に変更",
                     "",
-                    "【警告4: References {{step.FIELD}} but field not found in parser】",
+                    "【警告4: References {{ステップ名.FIELD}} but field not found in parser】",
                     "原因: 後続ステップがパーサーに存在しないフィールドを参照",
                     "対処A: パーサー設定にフィールドを追加",
                     "対処B: 参照を正しいフィールド名に修正",
                     "",
-                    "【警告5: References {{step.FIELD}} but step has no parser】",
+                    "【警告5: References {{ステップ名.FIELD}} but step has no parser】",
                     "原因: プロンプトステップにパーサー設定がないのにフィールドを参照",
                     "対処: プロンプトにパーサー設定を追加"
                 ],
@@ -1344,7 +1430,7 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                     "【エラー: IF step requires condition_config】",
                     "原因: IF ステップに条件設定がない",
                     "対処: condition_config を追加",
-                    "例: {\"left\": \"{{step.ANSWER}}\", \"operator\": \"==\", \"right\": \"A\"}",
+                    "例: {\"left\": \"{{ask.ANSWER}}\", \"operator\": \"==\", \"right\": \"A\"}",
                     "",
                     "【エラー: SET step requires 'assignments' in condition_config】",
                     "原因: SET ステップに代入設定がない",
@@ -1423,6 +1509,90 @@ HELP_TOPICS: Dict[str, Dict[str, Any]] = {
                     "プロンプトテンプレートは {{PARAM}} 形式のみ",
                     "ワークフロー変数は input_mapping で渡す",
                     "これによりプロンプトの再利用性が向上"
+                ]
+            }
+        }
+    },
+
+    # =========================================================================
+    # validation トピック - ワークフロー実行前の必須バリデーション
+    # =========================================================================
+    "validation": {
+        "description": "ワークフロー実行前の必須バリデーション - エラー0件必須",
+        "overview": """ワークフローは実行前にバリデーションが必須です。
+validated=true でないと execute_workflow は実行できません。
+
+【厳格ルール】
+- エラー0件 → validated=true → 実行可能
+- エラー1件以上 → validated=false → 実行不可
+- 警告は無視（警告があっても実行可能）
+
+【フラグがリセットされる操作】
+- add_workflow_step
+- update_workflow_step
+- delete_workflow_step
+- add_if_block
+- add_foreach_block
+
+ステップ変更後は必ず validate_workflow を再実行してください。""",
+        "entries": {
+            "lifecycle": {
+                "summary": "ワークフローのライフサイクル",
+                "description": "作成から実行までの validated フラグの状態遷移",
+                "examples": [
+                    "1. create_workflow() → validated=false",
+                    "2. add_workflow_step() → validated=false (リセット)",
+                    "3. add_if_block() → validated=false (リセット)",
+                    "4. validate_workflow() → エラー0件なら validated=true",
+                    "5. execute_workflow() → validated=true の場合のみ実行可能"
+                ],
+                "notes": [
+                    "ステップを変更するたびに validated=false にリセットされる",
+                    "最終的に validate_workflow を実行して validated=true にする必要がある",
+                    "validate_workflow の結果で execution_ready を確認可能"
+                ]
+            },
+            "required_flow": {
+                "summary": "実行前の必須フロー",
+                "description": "execute_workflow を呼ぶ前に必ず行うこと",
+                "syntax": """# 正しいフロー
+1. ワークフロー作成・ステップ追加
+2. validate_workflow(workflow_id)  ← 必須
+3. errors=0 を確認
+4. execute_workflow(workflow_id, input_params)
+
+# validate_workflow の結果例
+{
+  "valid": true,
+  "errors": 0,
+  "warnings": 1,  # 警告があっても実行可能
+  "validated": true,
+  "execution_ready": true
+}""",
+                "examples": [
+                    "【成功例】\nvalidate_workflow(workflow_id=10)\n→ {\"valid\": true, \"errors\": 0, \"validated\": true}\n→ execute_workflow(workflow_id=10) 実行可能",
+                    "【失敗例】\nvalidate_workflow(workflow_id=10)\n→ {\"valid\": false, \"errors\": 2}\n→ execute_workflow(workflow_id=10) はエラーで失敗",
+                    "【よくあるエラー】\n\"Workflow 'xxx' (ID=10) is not validated. Run validate_workflow first.\"\n→ validate_workflow を実行してエラーを修正する"
+                ],
+                "notes": [
+                    "validate_workflow はエラーチェックと同時に validated フラグを更新",
+                    "エラーがあれば修正してから再度 validate_workflow を実行",
+                    "GUIで保存成功した場合は自動で validated=true になる"
+                ]
+            },
+            "common_errors": {
+                "summary": "よくあるバリデーションエラー",
+                "description": "validate_workflow で検出されるエラーと対処法",
+                "examples": [
+                    "【IF without ENDIF】\nIF ブロックに対応する ENDIF がない\n→ add_if_block を使用して IF/ENDIF ペアを作成",
+                    "【FOREACH without ENDFOREACH】\nFOREACH ブロックに対応する ENDFOREACH がない\n→ add_foreach_block を使用して FOREACH/ENDFOREACH ペアを作成",
+                    "【Unknown step reference】\n存在しないステップを参照している\n→ {{step_name.field}} のステップ名を確認",
+                    "【Prompt not found】\nprompt_name で指定したプロンプトが存在しない\n→ list_prompts で確認し、正しい名前を設定"
+                ],
+                "notes": [
+                    "制御フロー (IF/FOREACH) は専用ツールで作成する",
+                    "参照エラーはステップ名のタイポを確認",
+                    "help(topic='troubleshooting') で詳細な対処法を確認"
                 ]
             }
         }

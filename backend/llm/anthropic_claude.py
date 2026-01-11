@@ -240,10 +240,11 @@ class ClaudeSonnet4Client(AnthropicClaudeClient):
     DISPLAY_NAME = "claude-sonnet-4"
 
 
-class Claude35SonnetClient(AnthropicClaudeClient):
-    """Claude 3.5 Sonnet client (Fast and intelligent)."""
-    MODEL_NAME = "claude-3-5-sonnet-20241022"
-    DISPLAY_NAME = "claude-3.5-sonnet"
+# Disabled: Model no longer available via API (404 error)
+# class Claude35SonnetClient(AnthropicClaudeClient):
+#     """Claude 3.5 Sonnet client (Fast and intelligent)."""
+#     MODEL_NAME = "claude-3-5-sonnet-20241022"
+#     DISPLAY_NAME = "claude-3.5-sonnet"
 
 
 class Claude35HaikuClient(AnthropicClaudeClient):
@@ -252,7 +253,8 @@ class Claude35HaikuClient(AnthropicClaudeClient):
     DISPLAY_NAME = "claude-3.5-haiku"
 
 
-class Claude3OpusClient(AnthropicClaudeClient):
-    """Claude 3 Opus client (Most capable)."""
-    MODEL_NAME = "claude-3-opus-20240229"
-    DISPLAY_NAME = "claude-3-opus"
+# Disabled: Model no longer available via API (404 error)
+# class Claude3OpusClient(AnthropicClaudeClient):
+#     """Claude 3 Opus client (Most capable)."""
+#     MODEL_NAME = "claude-3-opus-20240229"
+#     DISPLAY_NAME = "claude-3-opus"

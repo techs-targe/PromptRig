@@ -4773,6 +4773,26 @@ footer {
     margin-top: 0.2rem;
 }
 
+/* --- Invalid Workflow Styling --- */
+.workflow-item.workflow-invalid {
+    background: linear-gradient(90deg, #fef2f2 0%, #ffffff 100%);
+    border-left: 3px solid #ef4444;
+}
+
+.workflow-item.workflow-invalid:hover {
+    background: linear-gradient(90deg, #fee2e2 0%, #fef2f2 100%);
+}
+
+.workflow-item.workflow-invalid.selected {
+    background: linear-gradient(90deg, #fee2e2 0%, #fef2f2 100%);
+    border-left: 3px solid #dc2626;
+}
+
+.workflow-invalid-icon {
+    margin-right: 0.3rem;
+    font-size: 0.9em;
+}
+
 /* --- Status Badge Enhancement --- */
 .status-badge {
     display: inline-flex;
@@ -5121,6 +5141,41 @@ footer {
     border-radius: 4px;
     background-color: #fff;
     resize: vertical;
+}
+
+/* Workflow Screen Output */
+.workflow-screen-outputs {
+    margin-top: 1rem;
+}
+
+.workflow-screen-output {
+    margin-bottom: 1rem;
+    padding: 1rem;
+    background-color: #e8f5e9;  /* Light green for screen output */
+    border: 2px solid #4caf50;  /* Green border to make it prominent */
+    border-radius: 6px;
+    position: relative;
+}
+
+.workflow-screen-output h5 {
+    margin: 0 0 0.75rem 0;
+    color: #2e7d32;
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.workflow-screen-output .screen-output-content {
+    background-color: #fff;
+    padding: 1rem;
+    border-radius: 4px;
+    border: 1px solid #c8e6c9;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 0.9rem;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 400px;
+    overflow-y: auto;
+    margin: 0;
 }
 
 /* ========================================
@@ -6502,6 +6557,69 @@ footer {
 }
 
 /* =====================================================
+   Workflow Step Validation Marks
+   ===================================================== */
+
+/* Validation icon in step header */
+.step-validation-icon {
+    margin-left: 8px;
+    font-size: 14px;
+    cursor: help;
+}
+
+.step-validation-icon.error {
+    color: #ef4444;
+}
+
+.step-validation-icon.warning {
+    color: #f59e0b;
+}
+
+/* Step border highlight for validation errors/warnings */
+.workflow-step.has-validation-error {
+    border-left: 3px solid #ef4444 !important;
+    background-color: rgba(239, 68, 68, 0.05);
+}
+
+.workflow-step.has-validation-warning {
+    border-left: 3px solid #f59e0b !important;
+    background-color: rgba(245, 158, 11, 0.05);
+}
+
+/* Validation success message toast */
+.validation-success-toast {
+    position: fixed;
+    top: 80px;
+    right: 20px;
+    background: #22c55e;
+    color: white;
+    padding: 12px 20px;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 500;
+    animation: slideInRight 0.3s ease;
+}
+
+.validation-success-toast .toast-icon {
+    font-size: 18px;
+}
+
+@keyframes slideInRight {
+    from {
+        opacity: 0;
+        transform: translateX(50px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+/* =====================================================
    Variable Picker Dropdown
    ===================================================== */
 
@@ -7401,8 +7519,8 @@ footer {
 
 /* Agent history panel */
 .agent-history-panel {
-    width: 220px;
-    min-width: 200px;
+    width: 286px;
+    min-width: 260px;
     border: 1px solid #e2e8f0;
     border-radius: 12px;
     overflow: hidden;
@@ -7413,8 +7531,8 @@ footer {
 }
 
 .agent-history-item {
-    padding: 0.625rem 0.875rem;
-    margin-bottom: 0.25rem;
+    padding: 0.8rem 1rem;
+    margin-bottom: 0.4rem;
     border-radius: 8px;
     cursor: pointer;
     border: 1px solid transparent;
@@ -7433,8 +7551,8 @@ footer {
 }
 
 .agent-history-title {
-    font-size: 0.85rem;
-    font-weight: 500;
+    font-size: 0.95rem;
+    font-weight: 600;
     color: #1e293b;
     white-space: nowrap;
     overflow: hidden;
@@ -7442,9 +7560,89 @@ footer {
 }
 
 .agent-history-time {
-    font-size: 0.7rem;
+    font-size: 0.8rem;
     color: #94a3b8;
     margin-top: 0.2rem;
+}
+
+/* Agent History Meta (time + status) */
+.agent-history-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.2rem;
+    flex-wrap: wrap;
+}
+
+/* Agent Model Badge */
+.agent-model-badge {
+    font-size: 0.75rem;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-weight: 500;
+    white-space: nowrap;
+    background: #e0e7ff;
+    color: #4338ca;
+    max-width: 100px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Agent Status Badge */
+.agent-status-badge {
+    font-size: 0.78rem;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.agent-status-running {
+    background: #fef3c7;
+    color: #92400e;
+    animation: pulse-running 1.5s ease-in-out infinite;
+}
+
+.agent-status-pending {
+    background: #f3f4f6;
+    color: #6b7280;
+}
+
+.agent-status-completed {
+    background: #d1fae5;
+    color: #065f46;
+}
+
+.agent-status-error {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.agent-status-cancelled {
+    background: #e5e7eb;
+    color: #4b5563;
+}
+
+@keyframes pulse-running {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+/* Agent Stop Button */
+.agent-stop-btn {
+    background: #fee2e2;
+    border: none;
+    color: #dc2626;
+    cursor: pointer;
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 0.7rem;
+    transition: background 0.2s, color 0.2s;
+}
+
+.agent-stop-btn:hover {
+    background: #fecaca;
+    color: #b91c1c;
 }
 
 /* Agent History Delete Button */
@@ -8976,4 +9174,172 @@ footer {
     background: linear-gradient(135deg, #e0f2fe, #bae6fd);
     border-color: #7dd3fc;
     color: #0284c7;
+}
+
+/* ========== Error Retry Styles ========== */
+
+/* Error details container */
+.error-details {
+    background-color: #fef2f2;
+    border: 2px solid #ef4444;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-top: 0.5rem;
+}
+
+.error-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.error-badge {
+    background-color: #ef4444;
+    color: white;
+    padding: 0.25rem 0.75rem;
+    border-radius: 4px;
+    font-weight: bold;
+    font-size: 0.9rem;
+}
+
+.error-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.btn-retry, .btn-retry-all {
+    background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+    color: white;
+    border: none;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    font-size: 0.85rem;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.btn-retry:hover, .btn-retry-all:hover {
+    background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.3);
+}
+
+.btn-retry:disabled, .btn-retry-all:disabled {
+    background: #9ca3af;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+.btn-copy-error {
+    background: #f3f4f6;
+    color: #374151;
+    border: 1px solid #d1d5db;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.btn-copy-error:hover {
+    background: #e5e7eb;
+    border-color: #9ca3af;
+}
+
+.error-message {
+    background-color: white;
+    padding: 0.75rem;
+    border-radius: 4px;
+    border-left: 4px solid #ef4444;
+    font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+    font-size: 0.9rem;
+    margin-bottom: 0.75rem;
+    word-break: break-word;
+    color: #991b1b;
+}
+
+.error-input-params,
+.error-raw-prompt {
+    margin-top: 0.5rem;
+}
+
+.error-input-params summary,
+.error-raw-prompt summary {
+    cursor: pointer;
+    color: #6b7280;
+    font-size: 0.9rem;
+    padding: 0.25rem 0;
+    user-select: none;
+}
+
+.error-input-params summary:hover,
+.error-raw-prompt summary:hover {
+    color: #374151;
+}
+
+.error-input-params pre,
+.error-raw-prompt pre {
+    background: #f9fafb;
+    padding: 0.75rem;
+    border-radius: 4px;
+    overflow-x: auto;
+    margin-top: 0.5rem;
+    font-size: 0.85rem;
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.error-summary {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-top: 0.5rem;
+}
+
+/* Dark mode support for error styles */
+.dark-mode .error-details {
+    background-color: #450a0a;
+    border-color: #dc2626;
+}
+
+.dark-mode .error-message {
+    background-color: #1f2937;
+    color: #fca5a5;
+}
+
+.dark-mode .error-input-params pre,
+.dark-mode .error-raw-prompt pre {
+    background-color: #1f2937;
+    color: #e5e7eb;
+}
+
+.dark-mode .error-input-params summary,
+.dark-mode .error-raw-prompt summary {
+    color: #9ca3af;
+}
+
+.dark-mode .error-input-params summary:hover,
+.dark-mode .error-raw-prompt summary:hover {
+    color: #d1d5db;
+}
+
+.dark-mode .btn-copy-error {
+    background: #374151;
+    color: #e5e7eb;
+    border-color: #4b5563;
+}
+
+.dark-mode .btn-copy-error:hover {
+    background: #4b5563;
+    border-color: #6b7280;
 }
